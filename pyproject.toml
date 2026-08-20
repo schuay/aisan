@@ -1,0 +1,170 @@
+# Copyright 2026 The aisan developers
+# SPDX-License-Identifier: MIT
+
+[project]
+name = "aisan"
+version = "0.1.0"
+description = "Linux confinement and credential-aware egress for build and coding agents"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "Jakob Linke" }]
+keywords = ["bubblewrap", "sandbox", "security", "egress", "reapi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+# Deliberately thin and standalone: the package owns its bind model and
+# resolves without a sibling checkout.
+dependencies = [
+    # aiohttp serves allowlisted HTTP proxies; h2 serves the plaintext HTTP/2
+    # REAPI transport. h2 pulls hpack itself, which we do not import directly.
+    "aiohttp>=3.9",
+    "h2>=4.1",
+]
+
+[project.optional-dependencies]
+# Google ADC impersonation for Vertex. RBE credential minting invokes the
+# external luci-auth command and does not need this Python extra.
+google-auth = [
+    # The [requests] extra, not bare google-auth: `mint` refreshes the
+    # impersonated credential through google.auth.transport.requests, which
+    # raises ImportError at IMPORT time when the requests package is absent.
+    # google-auth does not pull it in itself, and inside a workspace something
+    # else always had, so this only shows up on a standalone install -- which is
+    # the one this package claims to support.
+    "google-auth[requests]>=2.0",
+]
+
+[project.scripts]
+# The box uses its in-package launcher by absolute interpreter path. `aisan`
+# is the human-facing entry point; the box launcher remains a low-level helper.
+aisan = "aisan.cli.main:main"
+aisan-box-launch = "aisan.launch:main"
+
+[project.urls]
+Homepage = "https://github.com/schuay/aisan"
+Repository = "https://github.com/schuay/aisan"
+Issues = "https://github.com/schuay/aisan/issues"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.15"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aisan"]
+
+[tool.hatch.build.targets.sdist]
+# Harness instruction files are checkout-local guidance commonly kept in
+# .git/info/exclude. Hatchling's sdist discovery does not honor that
+# per-checkout exclude file.
+exclude = ["/AGENTS.md", "/CLAUDE.md", "/GEMINI.md"]
+
+# Lint policy is carried here so standalone checkouts apply it consistently.
+#
+# Ruff is deliberately not pinned, so a new release can surface findings in code
+# that has not changed. The backlog stays at zero; rules this project does not
+# adopt are disabled here with a reason rather than scattered inline suppressions.
+[tool.ruff.lint]
+extend-select = [
+    "B",      # bugbear: real mistakes, not style
+    "BLE",    # blind except -- see the ignore below
+    "C4",     # comprehension misuse
+    "DTZ",    # naive datetimes: this codebase has been bitten by expiry handling
+    "G",      # logging call shape
+    "ISC",    # implicit string concat, i.e. the missing-comma bug
+    "PL",     # pylint subset
+    "RET",    # return-path smells
+    "RUF",
+    "S",      # bandit subset
+    "SIM",
+    "TRY",    # exception antipatterns
+    "UP",     # pyupgrade
+]
+ignore = [
+    # Blind `except Exception` is the intended shape at this codebase's
+    # boundaries: callbacks that must not fail a turn, best-effort artifact
+    # writes, or input that must be quarantined rather than crash the loop.
+    # Every such site logs and explains itself; narrowing them would mean
+    # enumerating exception types from libraries that do not document them, and
+    # the failure mode of missing one is exactly what these guards exist to stop.
+    # S110 (try/except/pass) stays ENABLED -- silent is the part we do not want.
+    "BLE001",
+    # Asserts in tests are the point.
+    "S101",
+    # Function-level imports keep optional dependencies optional and break
+    # otherwise-unnecessary import cycles at process boundaries.
+    "PLC0415",
+    # A literal in an assertion IS the specification; naming it moves the fact
+    # away from the check that reads it.
+    "PLR2004",
+    # Message-in-raise is how these exceptions are read in logs and tracebacks;
+    # hoisting every one to a constant would make them harder to follow, not
+    # easier.
+    "TRY003",
+    # Argument counts, branch/statement counts: these flag real complexity, but
+    # the fix is a refactor with its own risk. Left off rather than suppressed
+    # inline, so the decision is visible and revisitable in one place.
+    "PLR0913",
+    "PLR0917",
+    "PLR0912",
+    "PLR0915",
+    "PLR0911",
+    # log.error vs log.exception is a judgement call the rule cannot make: a
+    # timeout has no informative traceback, and the parse-error sites already
+    # carry the exception in the message.
+    "TRY400",
+    # google-auth exposes credential expiry as naive UTC. Normalising that
+    # third-party value is safer than mixing aware and naive datetimes.
+    "DTZ001",
+    "DTZ006",
+    "DTZ007",
+    # Unicode dashes appear only as DATA -- a regex character class that
+    # normalizes them, and the test asserting it does.
+    "RUF001",
+    # dict(...) with kwargs is sometimes the clearer form, e.g. when it mirrors
+    # the attribute names of the thing it fakes.
+    "C408",
+    # subprocess with a bare "git" and a constructed argv: PATH lookup is
+    # intended (the box and the host resolve different git binaries), and every
+    # argv here is built from validated internal values, not user input.
+    "S603",
+    "S607",
+    # B027 wants @abstractmethod on Backend.prepare/preflight. They are empty ON
+    # PURPOSE -- the docstrings say so -- because most backends need neither, and
+    # making them abstract would force every backend to write two empty overrides
+    # to say "nothing to prepare". A backend that mints overrides preflight
+    # because it has something to check, not because the base class compels it.
+    "B027",
+    # SIM102 fires on one `elif isinstance(...)` arm of the h2 event dispatch
+    # whose body is `if cid is not None:`. Every sibling arm has the same shape,
+    # and collapsing this one alone would hide that they are the same dispatch.
+    "SIM102",
+]
+
+# Per-path exceptions, kept narrow. A rule switched off for src/ too would be a
+# real loss of coverage; these are cases where the rule's assumption does not
+# hold for test code.
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = [
+    "S105",  # "token"/"password" literals in fixtures are fake by construction
+    "S106",
+    "S108",  # /tmp paths in tests are the test's own scratch
+    "S103",  # chmod 0o755 to set up a permissions fixture
+    "S603",  # subprocess in a test harness, with fixed argv
+    "S607",
+    "B017",  # a bare-Exception assertRaises is sometimes exactly the assertion
+    "RUF012",  # dataclass-ish test doubles carry mutable defaults by design
+    "ASYNC221",  # a git fixture in an async test is setup, not I/O under test
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

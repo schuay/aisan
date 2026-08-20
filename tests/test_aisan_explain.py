@@ -1,0 +1,267 @@
+# Copyright 2026 The aisan developers
+# SPDX-License-Identifier: MIT
+
+"""The explain renderer: parse_wrapper over REAL Sandbox.wrapper() output.
+
+These tests drive the actual wrapper() argv (not a hand-rolled token list), so
+a reorder in the sandbox that changes mount precedence is caught here, from the
+side that runs it. Assembly asserts the invariant; this is the caller
+checking that the argv it hands bwrap still has the ordering it depends on.
+
+The classification these exercise is what makes the report an audit artifact
+rather than a dump: a pin is derived from the ordering, not from a field, so the
+label cannot disagree with what the box gets.
+"""
+
+from pathlib import Path
+
+from aisan.explain import normalise, parse_wrapper
+from aisan.sandbox import RO, RW, Bind, Sandbox, Seal
+
+
+def _idx(prof, path: Path) -> int:
+    """argv index of the mount at `path`, which is what decides precedence."""
+    for m in prof.mounts:
+        if Path(m.path).resolve() == path.resolve():
+            return m.idx
+    raise AssertionError(f"{path} is not mounted at all")
+
+
+def test_wrapper_phases_ro_ancestor_before_the_tmpfs(tmp_path):
+    # The motivating /usr-vs-$HOME case: a ro bind covering the home tmpfs must land
+    # BEFORE it, or it shadows the blanked home read-only (and exposes the real
+    # one). Core owns that phasing; this is the consumer-side guard that the
+    # argv the caller actually runs still has it.
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    sb = Sandbox(
+        root=root,
+        binds=(Bind(tmp_path, RO),),  # ro ancestor of the home tmpfs
+        tmpfs=((str(home), 64 << 20),),
+        env=(("HOME", str(home)),),
+        use_cgroup=False,
+    )
+    prof = parse_wrapper(sb.wrapper(), sb)
+    assert _idx(prof, tmp_path) < _idx(prof, home)
+
+
+def test_descendant_ro_under_home_lands_after_the_tmpfs(tmp_path):
+    # depot_tools at ~/depot_tools is a DESCENDANT of home: it must land AFTER
+    # the tmpfs to stay visible on top of the blanked home. The inverse of the
+    # case above, and the reason phasing is a split rather than a global sort.
+    home = tmp_path / "home"
+    home.mkdir()
+    depot = home / "depot_tools"
+    depot.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    sb = Sandbox(
+        root=root,
+        binds=(Bind(depot, RO),),
+        tmpfs=((str(home), 64 << 20),),
+        env=(("HOME", str(home)),),
+        use_cgroup=False,
+    )
+    prof = parse_wrapper(sb.wrapper(), sb)
+    assert _idx(prof, home) < _idx(prof, depot)
+
+
+def test_parses_the_tmpfs_size_cap(tmp_path):
+    # Emitted as `--size N --tmpfs MNT`; an index slip here silently reports
+    # "no size" for every tmpfs, which reads as "no cap configured".
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    sb = Sandbox(
+        root=root,
+        tmpfs=((str(home), 64 << 20),),
+        use_cgroup=False,
+    )
+    prof = parse_wrapper(sb.wrapper(), sb)
+    assert [m.size for m in prof.tmpfs] == [str(64 << 20)]
+
+
+def test_classifies_a_pin_by_the_ordering_not_by_a_field(tmp_path):
+    # A dump that renders every ro bind the same way buries the ones that matter:
+    # a reviewer scanning it should see the pinned .git config distinctly, not as
+    # one line in a wall of "ro". There is no longer a field to read that off, so
+    # the inspector derives it from what a pin IS in this model -- an ro bind
+    # after an rw one that covers it -- which means the label comes from the same
+    # ordering the box gets and cannot disagree with it.
+    root = tmp_path / "wt"
+    root.mkdir()
+    ctrl = tmp_path / "ctrl"
+    ctrl.mkdir()
+    dep = tmp_path / "dep"
+    dep.mkdir()
+    gitdir = ctrl / "gitdir"
+    gitdir.mkdir()
+    gitcfg = gitdir / "config"
+    gitcfg.write_text("")
+    sb = Sandbox(
+        root=root,
+        binds=(
+            Bind(dep, RO),
+            Bind(ctrl, RW),
+            Bind(gitdir, RW),
+            Bind(gitcfg, RO),  # ro AFTER the rw parent: a pin
+        ),
+        tmpfs=(("/tmp", 64 << 20),),
+        use_cgroup=False,
+    )
+    kinds = {Path(m.path).name: m.kind for m in parse_wrapper(sb.wrapper(), sb).mounts}
+    assert kinds["config"] == "ro-pin"  # inside an rw mount: the guard
+    assert kinds["dep"] == "ro"  # plain ro: not over anything writable
+    assert kinds["wt"] == "rw-root"
+    assert kinds["ctrl"] == "rw"
+    assert kinds["usr"] == "system"  # from the fixed surface, not the policy
+
+
+def test_a_pin_written_before_its_rw_parent_is_not_labelled_a_pin(tmp_path):
+    # The negative that makes the label mean something. Same two binds, other
+    # order: the rw parent wins, so the file is NOT read-only in the box and
+    # calling it a pin would be a dump that lies about the one line a reviewer
+    # is scanning for. Under the field model this state was unreachable, so
+    # nothing said what the label was actually derived from.
+    root = tmp_path / "wt"
+    root.mkdir()
+    gitdir = tmp_path / "gitdir"
+    gitdir.mkdir()
+    gitcfg = gitdir / "config"
+    gitcfg.write_text("")
+    sb = Sandbox(
+        root=root,
+        binds=(Bind(gitcfg, RO), Bind(gitdir, RW)),
+        use_cgroup=False,
+    )
+    kinds = {Path(m.path).name: m.kind for m in parse_wrapper(sb.wrapper(), sb).mounts}
+    assert kinds["config"] == "ro"
+
+
+def test_a_seal_is_reported_as_its_own_kind(tmp_path):
+    # A seal reaches the argv as two ops -- an empty tmpfs and, at the very end,
+    # a --remount-ro. A dump that showed only the first would report a writable
+    # scratch directory where the box has an immutable empty one, and one that
+    # showed neither would leave the .git dance unexplained.
+    root = tmp_path / "wt"
+    root.mkdir()
+    sealed = tmp_path / "worktrees"
+    sealed.mkdir()
+    sb = Sandbox(root=root, binds=(Seal(sealed),), use_cgroup=False)
+    mounts = parse_wrapper(sb.wrapper(), sb).mounts
+    at_sealed = [m.kind for m in mounts if Path(m.path) == sealed]
+    assert at_sealed == ["tmpfs", "seal-ro"]
+    # And the remount is last, which is what makes holes through the seal
+    # possible at all -- see the core suite for why.
+    assert mounts[-1].kind == "seal-ro"
+
+
+def test_normalise_replaces_the_longest_host_prefix_first(tmp_path, monkeypatch):
+    # A home under the temp dir is a real CI layout, and it is exactly where a
+    # naive replace order goes wrong: <TMP> eats the prefix, the home rule never
+    # matches, and the snapshot carries a path fragment that differs per host --
+    # which is a snapshot that fails for a reason nobody caused.
+    home = tmp_path / "t" / "home" / "u"
+    home.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path / "t"))
+    out = normalise(f"a {home}/x b {tmp_path / 't'}/y\n")
+    assert out == "a <HOME>/x b <TMP>/y\n"
+
+
+def test_normalise_leaves_the_policy_alone(tmp_path):
+    # The complement, stated as a test because it is the whole contract: host
+    # facts get placeholders, everything else -- ordering, kinds, sizes, flags
+    # -- is the policy under audit and must survive verbatim.
+    text = "  ro-pin  /x/config\n  --unshare-net\n  ( 4294967296)\n"
+    assert normalise(text) == text
+
+
+def test_normalise_blanks_the_mount_index_but_not_the_order(tmp_path):
+    # The index is a token offset into an argv whose first thirty-odd tokens are
+    # a fixed system preamble, so it says nothing the line ORDER does not -- and
+    # it shifts wholesale when anything earlier gains a mount, turning one real
+    # change into a diff against every line below it. Blank the number, keep the
+    # sequence, which is the part that IS the policy.
+    text = "  [ 44] rw-root  /a\n  [131] seal-ro  /b\n"
+    assert normalise(text) == "  [..] rw-root  /a\n  [..] seal-ro  /b\n"
+
+
+def test_normalise_collapses_aisans_own_runtime_binds():
+    # Aisan binds its interpreter, venv and editable source roots into EVERY box
+    # (Box._sandbox), so how many lines that is depends on how aisan is
+    # installed here: one site-packages tree for a released install, one per
+    # workspace member for a checkout. It is identical in every box by
+    # construction, so it can never be what a preset diff changed -- but left in
+    # a snapshot it fails on somebody else's install layout while staying green
+    # through a real policy change.
+    from aisan.launch import launcher_binds
+
+    paths = [str(b.path) for b in launcher_binds()]
+    assert len(paths) > 1, "the collapse is only interesting for a run of lines"
+    lines = "".join(f"  [ {i:>2}] ro       {p}\n" for i, p in enumerate(paths))
+    out = normalise(f"  [ 10] rw-root  /a\n{lines}  [ 99] seal-ro  /b\n")
+    assert out == "  [..] rw-root  /a\n  <AISAN RUNTIME>\n  [..] seal-ro  /b\n"
+
+
+def test_normalise_drops_the_bind_flag_with_the_path_it_names():
+    # In the argv section a bind is three lines (--ro-bind, src, dst). Dropping
+    # only the paths would leave a bare --ro-bind pointing at the NEXT mount's
+    # source, which is a snapshot that reads as a real argv and is not one.
+    from aisan.launch import launcher_binds
+
+    p = str(launcher_binds()[0].path)
+    out = normalise(f"  --ro-bind\n  {p}\n  {p}\n  --unshare-net\n")
+    assert out == "  <AISAN RUNTIME>\n  --unshare-net\n"
+
+
+def test_the_package_does_not_re_export_the_renderer():
+    """`aisan.explain` is the MODULE, and only the module.
+
+    A package that re-exports a function under its own submodule's name has two
+    meanings for one attribute, and which one a caller gets depends on whether
+    anything imported the submodule first -- so `explain(box, ...)` works until
+    an unrelated import reorders, then raises TypeError. Reached through the
+    package's own deferred-import hook it was worse: the from-import form probes
+    hasattr() before importing, the probe re-entered the hook, and a real
+    the previous inspector died in a RecursionError with no mention of either
+    name. Found by hand-running the command, not by the suite.
+    """
+    import aisan as pkg
+    import aisan.explain as mod
+
+    assert pkg.explain is mod
+    assert "explain" not in pkg.__all__
+
+
+def test_a_credential_exposing_spec_renders_as_a_refusal(tmp_path):
+    # The Box refuses to assemble a spec whose binds would expose a backend
+    # credential, and explain renders that refusal as the finding rather than
+    # crashing on it -- which is what the mode is FOR: an operator who ran
+    # `--explain` on a merged profile with a bad user bind sees the refusal,
+    # not a traceback, before any box owns their terminal.
+    from aisan import Box
+    from aisan.egress.anthropic import AnthropicBackend
+    from aisan.explain import explain
+    from aisan.sandbox import RW, Bind
+    from aisan.spec import BoxSpec, Limits
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    creds = tmp_path / "creds" / "k.json"
+    creds.parent.mkdir()
+    spec = BoxSpec(
+        root=wt,
+        binds=(Bind(creds.parent, RW),),
+        tmpfs=(),
+        env=(),
+        egress=(AnthropicBackend(credentials=creds),),
+        unshare_net=True,
+        limits=Limits(use_cgroup=False),
+    )
+    text = explain(Box(spec, box_id="t"), inputs=())
+    assert "BOX ASSEMBLY REFUSED" in text
+    assert "would expose the anthropic backend" in text

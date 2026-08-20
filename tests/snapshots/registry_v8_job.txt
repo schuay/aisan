@@ -1,0 +1,188 @@
+
+== inputs ==
+  preset    v8_job
+  box_id    snapshot
+  HOME(env) <HOME>
+  chdir     <ROOT>
+
+== egress backends (host half on a socket, in-box on loopback) ==
+  (none; the box has no route off the machine)
+
+== tmpfs mounts (mounted before binds; intended writable scratch) ==
+  [..] <TMP>  (4294967296)
+  [..] <HOME>  (1073741824  <- $HOME)
+  [..] <MAIN>/.git/worktrees  (no size)
+
+== binds in argv order (later shadows earlier on overlap) ==
+  [..] system   /usr
+  [..] system   /etc
+  [..] system   /run/systemd/journal/stdout
+  [..] rw-root  <ROOT>
+  [..] overlay  <VPYTHON_CACHE>/vpython-root
+  [..] ro       <MAIN>/build
+  [..] ro       <MAIN>/third_party/icu
+  [..] ro       <DEPOT_TOOLS>
+  [..] rw       <MAIN>/.git
+  [..] ro-pin   <ROOT>/.git
+  [..] ro-pin   <MAIN>/.git/config
+  [..] ro-pin   <MAIN>/.git/config.worktree
+  [..] ro-pin   <MAIN>/.git/objects/info/alternates
+  [..] ro-pin   <MAIN>/.git/hooks
+  [..] rw       <MAIN>/.git/worktrees/wt
+  [..] ro-pin   <MAIN>/.git/worktrees/wt/commondir
+  [..] ro-pin   <MAIN>/.git/worktrees/wt/config.worktree
+  <AISAN RUNTIME>
+  [..] seal-ro  <MAIN>/.git/worktrees
+
+== sealed directories (empty in the box; nothing creatable) ==
+  <MAIN>/.git/worktrees
+
+== environment (the box's complete environment; --clearenv first) ==
+  AI_AGENT=aisan
+  DEBIAN_FRONTEND=noninteractive
+  GIT_CONFIG_COUNT=1
+  GIT_CONFIG_KEY_0=gc.auto
+  GIT_CONFIG_VALUE_0=0
+  GIT_PAGER=cat
+  GIT_TERMINAL_PROMPT=0
+  HOME=<HOME>
+  PAGER=cat
+  PATH=<DEPOT_TOOLS>:/usr/bin
+  PRESUBMIT_SKIP_NETWORK=1
+
+== argv (exactly what is exec'd, one token per line) ==
+  systemd-run
+  --user
+  --scope
+  -q
+  --collect
+  -p
+  MemoryMax=32G
+  -p
+  TasksMax=4096
+  --
+  bwrap
+  --ro-bind
+  /usr
+  /usr
+  --symlink
+  usr/bin
+  /bin
+  --symlink
+  usr/lib
+  /lib
+  --symlink
+  usr/lib64
+  /lib64
+  --symlink
+  usr/sbin
+  /sbin
+  --ro-bind
+  /etc
+  /etc
+  --proc
+  /proc
+  --dev
+  /dev
+  --ro-bind
+  /run/systemd/journal/stdout
+  /run/systemd/journal/stdout
+  --size
+  4294967296
+  --tmpfs
+  <TMP>
+  --size
+  1073741824
+  --tmpfs
+  <HOME>
+  --bind
+  <ROOT>
+  <ROOT>
+  --overlay-src
+  <VPYTHON_CACHE>/vpython-root
+  --tmp-overlay
+  <VPYTHON_CACHE>/vpython-root
+  --ro-bind
+  <MAIN>/build
+  <MAIN>/build
+  --ro-bind
+  <MAIN>/third_party/icu
+  <MAIN>/third_party/icu
+  --ro-bind
+  <DEPOT_TOOLS>
+  <DEPOT_TOOLS>
+  --bind
+  <MAIN>/.git
+  <MAIN>/.git
+  --ro-bind
+  <ROOT>/.git
+  <ROOT>/.git
+  --ro-bind
+  <MAIN>/.git/config
+  <MAIN>/.git/config
+  --ro-bind
+  <MAIN>/.git/config.worktree
+  <MAIN>/.git/config.worktree
+  --ro-bind
+  <MAIN>/.git/objects/info/alternates
+  <MAIN>/.git/objects/info/alternates
+  --ro-bind
+  <MAIN>/.git/hooks
+  <MAIN>/.git/hooks
+  --tmpfs
+  <MAIN>/.git/worktrees
+  --bind
+  <MAIN>/.git/worktrees/wt
+  <MAIN>/.git/worktrees/wt
+  --ro-bind
+  <MAIN>/.git/worktrees/wt/commondir
+  <MAIN>/.git/worktrees/wt/commondir
+  --ro-bind
+  <MAIN>/.git/worktrees/wt/config.worktree
+  <MAIN>/.git/worktrees/wt/config.worktree
+  <AISAN RUNTIME>
+  --remount-ro
+  <MAIN>/.git/worktrees
+  --unshare-pid
+  --unshare-ipc
+  --unshare-uts
+  --cap-drop
+  ALL
+  --die-with-parent
+  --clearenv
+  --setenv
+  DEBIAN_FRONTEND
+  noninteractive
+  --setenv
+  GIT_PAGER
+  cat
+  --setenv
+  PAGER
+  cat
+  --setenv
+  GIT_TERMINAL_PROMPT
+  0
+  --setenv
+  AI_AGENT
+  aisan
+  --setenv
+  HOME
+  <HOME>
+  --setenv
+  PATH
+  <DEPOT_TOOLS>:/usr/bin
+  --setenv
+  GIT_CONFIG_COUNT
+  1
+  --setenv
+  GIT_CONFIG_KEY_0
+  gc.auto
+  --setenv
+  GIT_CONFIG_VALUE_0
+  0
+  --setenv
+  PRESUBMIT_SKIP_NETWORK
+  1
+  --chdir
+  <ROOT>
+  <payload>

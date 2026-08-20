@@ -1,0 +1,131 @@
+
+== inputs ==
+  preset    opencode
+  box_id    snapshot
+  HOME(env) <HOME>
+  chdir     <ROOT>
+
+== egress backends (host half on a socket, in-box on loopback) ==
+  (none; the box has no route off the machine)
+
+== tmpfs mounts (mounted before binds; intended writable scratch) ==
+  [..] <TMP>  (2147483648)
+  [..] <HOME>  (1073741824  <- $HOME)
+
+== binds in argv order (later shadows earlier on overlap) ==
+  [..] system   /usr
+  [..] system   /etc
+  [..] system   /run/systemd/journal/stdout
+  [..] rw-root  <ROOT>
+  [..] ro       <OPENCODE_CACHE>/models.json
+  <AISAN RUNTIME>
+
+== environment (the box's complete environment; --clearenv first) ==
+  AI_AGENT=aisan
+  DEBIAN_FRONTEND=noninteractive
+  GIT_PAGER=cat
+  GIT_TERMINAL_PROMPT=0
+  HOME=<HOME>
+  OPENCODE_DISABLE_AUTOUPDATE=1
+  OPENCODE_DISABLE_LSP_DOWNLOAD=1
+  OPENCODE_DISABLE_MODELS_FETCH=1
+  PAGER=cat
+  PATH=/usr/bin
+  XDG_DATA_HOME=<ROOT>/.aisan-opencode-state
+
+== argv (exactly what is exec'd, one token per line) ==
+  systemd-run
+  --user
+  --scope
+  -q
+  --collect
+  -p
+  MemoryMax=8G
+  -p
+  TasksMax=4096
+  --
+  bwrap
+  --ro-bind
+  /usr
+  /usr
+  --symlink
+  usr/bin
+  /bin
+  --symlink
+  usr/lib
+  /lib
+  --symlink
+  usr/lib64
+  /lib64
+  --symlink
+  usr/sbin
+  /sbin
+  --ro-bind
+  /etc
+  /etc
+  --proc
+  /proc
+  --dev
+  /dev
+  --unshare-net
+  --ro-bind
+  /run/systemd/journal/stdout
+  /run/systemd/journal/stdout
+  --size
+  2147483648
+  --tmpfs
+  <TMP>
+  --size
+  1073741824
+  --tmpfs
+  <HOME>
+  --bind
+  <ROOT>
+  <ROOT>
+  --ro-bind
+  <OPENCODE_CACHE>/models.json
+  <OPENCODE_CACHE>/models.json
+  <AISAN RUNTIME>
+  --unshare-pid
+  --unshare-ipc
+  --unshare-uts
+  --cap-drop
+  ALL
+  --die-with-parent
+  --clearenv
+  --setenv
+  DEBIAN_FRONTEND
+  noninteractive
+  --setenv
+  GIT_PAGER
+  cat
+  --setenv
+  PAGER
+  cat
+  --setenv
+  GIT_TERMINAL_PROMPT
+  0
+  --setenv
+  AI_AGENT
+  aisan
+  --setenv
+  HOME
+  <HOME>
+  --setenv
+  PATH
+  /usr/bin
+  --setenv
+  XDG_DATA_HOME
+  <ROOT>/.aisan-opencode-state
+  --setenv
+  OPENCODE_DISABLE_AUTOUPDATE
+  1
+  --setenv
+  OPENCODE_DISABLE_MODELS_FETCH
+  1
+  --setenv
+  OPENCODE_DISABLE_LSP_DOWNLOAD
+  1
+  --chdir
+  <ROOT>
+  <payload>

@@ -1,0 +1,132 @@
+
+== inputs ==
+  preset    codex
+  box_id    snapshot
+  HOME(env) <HOME>
+  chdir     <ROOT>
+
+== egress backends (host half on a socket, in-box on loopback) ==
+  openai-responses 127.0.0.1:8715 -> <TMP>/aisan-proxy-16a0eeb0791b6c92/openai-responses.sock
+
+== tmpfs mounts (mounted before binds; intended writable scratch) ==
+  [..] <TMP>  (2147483648)
+  [..] <HOME>  (1073741824  <- $HOME)
+
+== binds in argv order (later shadows earlier on overlap) ==
+  [..] system   /usr
+  [..] system   /etc
+  [..] system   /run/systemd/journal/stdout
+  [..] rw-root  <ROOT>
+  [..] rw       <STATE>
+  <AISAN RUNTIME>
+  [..] ro       <TMP>/aisan-proxy-16a0eeb0791b6c92
+
+== environment (the box's complete environment; --clearenv first) ==
+  AISAN_CODEX_API_KEY=aisan-placeholder-not-a-credential
+  AI_AGENT=aisan
+  CODEX_HOME=<STATE>
+  DEBIAN_FRONTEND=noninteractive
+  GIT_PAGER=cat
+  GIT_TERMINAL_PROMPT=0
+  HOME=<HOME>
+  PAGER=cat
+  PATH=/usr/bin
+
+== argv (exactly what is exec'd, one token per line) ==
+  systemd-run
+  --user
+  --scope
+  -q
+  --collect
+  -p
+  MemoryMax=8G
+  -p
+  TasksMax=4096
+  --
+  bwrap
+  --ro-bind
+  /usr
+  /usr
+  --symlink
+  usr/bin
+  /bin
+  --symlink
+  usr/lib
+  /lib
+  --symlink
+  usr/lib64
+  /lib64
+  --symlink
+  usr/sbin
+  /sbin
+  --ro-bind
+  /etc
+  /etc
+  --proc
+  /proc
+  --dev
+  /dev
+  --unshare-net
+  --ro-bind
+  /run/systemd/journal/stdout
+  /run/systemd/journal/stdout
+  --size
+  2147483648
+  --tmpfs
+  <TMP>
+  --size
+  1073741824
+  --tmpfs
+  <HOME>
+  --bind
+  <ROOT>
+  <ROOT>
+  --bind
+  <STATE>
+  <STATE>
+  <AISAN RUNTIME>
+  --ro-bind
+  <TMP>/aisan-proxy-16a0eeb0791b6c92
+  <TMP>/aisan-proxy-16a0eeb0791b6c92
+  --unshare-pid
+  --unshare-ipc
+  --unshare-uts
+  --cap-drop
+  ALL
+  --die-with-parent
+  --clearenv
+  --setenv
+  DEBIAN_FRONTEND
+  noninteractive
+  --setenv
+  GIT_PAGER
+  cat
+  --setenv
+  PAGER
+  cat
+  --setenv
+  GIT_TERMINAL_PROMPT
+  0
+  --setenv
+  AI_AGENT
+  aisan
+  --setenv
+  HOME
+  <HOME>
+  --setenv
+  PATH
+  /usr/bin
+  --setenv
+  CODEX_HOME
+  <STATE>
+  --setenv
+  AISAN_CODEX_API_KEY
+  aisan-placeholder-not-a-credential
+  --chdir
+  <ROOT>
+  <AISAN PYTHON>
+  -m
+  aisan.launch
+  <TMP>/aisan-proxy-16a0eeb0791b6c92
+  --
+  <payload>

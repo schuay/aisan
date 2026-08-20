@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Personal commit-message policy; kept local while core.hooksPath is .githooks.
+/.githooks/commit-msg
+
+# This library does not publish a locked application environment. Regenerated
+# locally by uv sync.
+/uv.lock

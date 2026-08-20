@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Copyright 2026 The aisan developers
+# SPDX-License-Identifier: MIT
+
+# Check the staged files without resolving, installing, or updating anything.
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+mapfile -d '' -t staged_files < <(
+  git diff --cached --name-only --diff-filter=ACM -z
+)
+staged_py=()
+for path in "${staged_files[@]}"; do
+  [[ $path == *.py ]] && staged_py+=("$path")
+done
+
+if ((${#staged_py[@]})); then
+  uv run --offline --no-sync ruff format --check -- "${staged_py[@]}"
+  uv run --offline --no-sync ruff check -- "${staged_py[@]}"
+fi
+
+hdr_script="$repo_root/scripts/add-license-headers.py"
+if ((${#staged_files[@]})); then
+  uv run --offline --no-sync python "$hdr_script" \
+    --check --files "${staged_files[@]}"
+fi
+
+scripts/check-private-patterns staged
