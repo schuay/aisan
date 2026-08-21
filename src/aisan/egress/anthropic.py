@@ -34,9 +34,17 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from ..proxy.anthropic import make_app
-from ..proxy.http import RateLimit
+from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
-from .base import PLACEHOLDER_KEY, Backend, PreflightError
+from .base import (
+    PLACEHOLDER_KEY,
+    SHARED_PORT_MARKER,
+    SHARED_TOKEN_MARKER,
+    Backend,
+    BackendActivation,
+    PreflightError,
+    shared_proxy_token,
+)
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +79,7 @@ class AnthropicBackend(Backend):
 
     name = "anthropic"
     port = PORT
+    supports_shared_net = True
 
     def __init__(
         self,
@@ -95,10 +104,17 @@ class AnthropicBackend(Backend):
         client that reads `~/.claude/.credentials.json` -- which is absent in the
         box, so it would try to log in interactively instead of failing.
         """
+        return self._client_env(self.port, PLACEHOLDER_KEY)
+
+    @staticmethod
+    def _client_env(port: int | str, key: str) -> dict[str, str]:
         return {
-            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{self.port}",
-            "ANTHROPIC_API_KEY": PLACEHOLDER_KEY,
+            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
+            "ANTHROPIC_API_KEY": key,
         }
+
+    def shared_client_env_description(self) -> dict[str, str]:
+        return self._client_env(SHARED_PORT_MARKER, SHARED_TOKEN_MARKER)
 
     async def _bearer(self) -> str:
         """The current access token. Read per request, never cached.
@@ -205,6 +221,22 @@ class AnthropicBackend(Backend):
         finally:
             await runner.cleanup()
             sock.unlink(missing_ok=True)
+
+    @asynccontextmanager
+    async def serve_shared(self, runtime_dir: Path) -> AsyncIterator[BackendActivation]:
+        client_token = shared_proxy_token()
+        app = make_app(
+            token=self._bearer,
+            upstream=self._upstream,
+            rate=RateLimit(per_minute=self._rpm),
+            client_token=client_token,
+        )
+        runner, port = await serve_tcp(app)
+        log.info("anthropic proxy: listening on 127.0.0.1:%d", port)
+        try:
+            yield BackendActivation(port, self._client_env(port, client_token))
+        finally:
+            await runner.cleanup()
 
 
 def _read_bearer(path: Path) -> str:

@@ -20,17 +20,23 @@ name:
 from __future__ import annotations
 
 import contextlib
+import os
+import shutil
 import socket as _socket
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from aisan import Box, PreflightError
-from aisan.egress.base import Backend
+from aisan.egress.base import Backend, BackendActivation
 from aisan.runtime import (
+    CLIENT_ENV_NAME,
     MANIFEST_NAME,
     cleanup_runtime_dir,
     prepare_runtime_dir,
+    read_client_env,
     read_manifest,
     runtime_dir,
 )
@@ -39,6 +45,9 @@ from aisan.spec import BoxSpec, Limits
 
 # sizeof(struct sockaddr_un.sun_path) on Linux, minus the NUL.
 _SUN_PATH_MAX = 107
+needs_bwrap = pytest.mark.skipif(
+    shutil.which("bwrap") is None, reason="bubblewrap not installed"
+)
 
 
 def _spec(root: Path, *, egress=(), **kw) -> BoxSpec:
@@ -94,6 +103,27 @@ class _FakeBackend(Backend):
         finally:
             s.close()
             sock.unlink(missing_ok=True)
+
+
+class _SharedFakeBackend(_FakeBackend):
+    supports_shared_net = True
+
+    def shared_client_env_description(self) -> dict[str, str]:
+        return {
+            "FAKE_ENDPOINT": "http://127.0.0.1:(assigned at launch)",
+            "FAKE_TOKEN": "<per-box proxy token>",
+        }
+
+    @contextlib.asynccontextmanager
+    async def serve_shared(self, runtime_dir: Path):
+        self.order.append("serve_shared")
+        yield BackendActivation(
+            23456,
+            {
+                "FAKE_ENDPOINT": "http://127.0.0.1:23456",
+                "FAKE_TOKEN": "private-token",
+            },
+        )
 
 
 # -- the runtime directory ----------------------------------------------------
@@ -248,6 +278,90 @@ async def test_the_manifest_names_every_backends_socket_and_port(tmp_path):
     assert [Path(str(e["socket"])).parent for e in entries] == [box.runtime_dir] * 2
 
 
+async def test_shared_network_activation_uses_a_private_environment_file(tmp_path):
+    backend = _SharedFakeBackend()
+    box = Box(
+        _spec(tmp_path, egress=(backend,), unshare_net=False),
+        box_id=str(tmp_path / "shared"),
+    )
+    async with box:
+        path = box.runtime_dir / CLIENT_ENV_NAME
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert read_client_env(box.runtime_dir)["FAKE_TOKEN"] == "private-token"
+        assert not (box.runtime_dir / MANIFEST_NAME).exists()
+        assert "FAKE_TOKEN" not in box.env
+        assert "private-token" not in "\0".join(box.command(["true"]))
+        assert box.activation(backend).port == 23456
+    assert not box.runtime_dir.exists()
+
+
+@needs_bwrap
+async def test_shared_client_environment_reaches_a_real_box_without_argv_leak(tmp_path):
+    class _NoFilesShared(_SharedFakeBackend):
+        def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+            return []
+
+        def prepare(self, runtime_dir: Path) -> None:
+            self.order.append("prepare")
+
+    root = tmp_path / "root"
+    root.mkdir()
+    backend = _NoFilesShared()
+    listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(2)
+    port = listener.getsockname()[1]
+    box = Box(
+        _spec(root, egress=(backend,), unshare_net=False),
+        box_id=str(tmp_path / "shared-real"),
+    )
+    async with box:
+        argv = box.command(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os, socket; "
+                    f"s = socket.create_connection(('127.0.0.1', {port})); "
+                    "s.sendall(b'from-box'); print(os.environ['FAKE_TOKEN'])"
+                ),
+            ]
+        )
+        assert "private-token" not in "\0".join(argv)
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, **box.env},
+        )
+    assert result.returncode == 0, result.stderr
+    connection, _ = listener.accept()
+    try:
+        assert connection.recv(64) == b"from-box"
+    finally:
+        connection.close()
+        listener.close()
+    assert result.stdout.strip() == "private-token"
+
+
+def test_shared_network_explain_markers_are_not_live_activation_values(tmp_path):
+    backend = _SharedFakeBackend()
+    box = Box(
+        _spec(tmp_path, egress=(backend,), unshare_net=False),
+        box_id=str(tmp_path / "shared-explain"),
+    )
+    from aisan.explain import explain
+
+    with box.staged():
+        report = explain(box)
+    assert "shared host namespace" in report
+    assert "authenticated host-loopback TCP" in report
+    assert "<per-box proxy token>" in report
+    assert "private-token" not in report
+
+
 async def test_the_endpoint_the_client_reads_is_the_port_the_relay_serves(tmp_path):
     # The drift this closes: the code that stamps the endpoint and the code that
     # serves it used to be different code, and a mismatch presents as every call
@@ -297,6 +411,13 @@ def test_two_backends_on_one_port_are_refused(tmp_path):
     a, b = _FakeBackend(name="a", port=8800), _FakeBackend(name="b", port=8800)
     with pytest.raises(ValueError, match="8800"):
         _spec(tmp_path, egress=(a, b))
+
+
+def test_shared_backends_do_not_reserve_their_isolated_ports(tmp_path):
+    a = _SharedFakeBackend(name="a", port=8800)
+    b = _SharedFakeBackend(name="b", port=8800)
+    spec = _spec(tmp_path, egress=(a, b), unshare_net=False)
+    assert spec.egress == (a, b)
 
 
 def test_a_spec_bind_containing_a_credential_is_refused(tmp_path):

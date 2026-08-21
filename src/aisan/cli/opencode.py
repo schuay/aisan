@@ -116,6 +116,7 @@ async def _main(argv: list[str]) -> int:
             *((("OPENCODE_CONFIG", str(mcp_config)),) if mcp.enabled else ()),
             *terminal_env(),
         ),
+        unshare_net=not args.net,
     )
     return await run_interactive(
         client="opencode",
@@ -126,7 +127,7 @@ async def _main(argv: list[str]) -> int:
         spec=spec,
         # The sandbox is the permission boundary for this launcher; opencode's
         # own approval prompts would otherwise interrupt tool use in the TUI.
-        command=["opencode", "--auto", *payload],
+        command=lambda _box: ["opencode", "--auto", *payload],
         binary=opencode_binary,
         binds=args.binds,
         explain_only=args.explain,

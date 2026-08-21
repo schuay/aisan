@@ -59,7 +59,7 @@ from dataclasses import dataclass
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-from .http import MAX_BODY_BYTES, RateLimit, serve
+from .http import MAX_BODY_BYTES, RateLimit, bearer_token, serve, token_matches
 from .policy import permits as policy_permits
 from .policy import refusal as policy_refusal
 
@@ -262,6 +262,7 @@ def make_app(
     body: BodyPolicy | None = None,
     rate: RateLimit | None = None,
     headers: HeaderSource | None = None,
+    client_token: str | None = None,
 ) -> web.Application:
     if (token is None) == (authorization is None):
         raise ValueError("provide exactly one of token or authorization")
@@ -271,6 +272,8 @@ def make_app(
     base = upstream.rstrip("/")
 
     async def handle(request: web.Request) -> web.StreamResponse:
+        if not token_matches(bearer_token(request), client_token):
+            return _error(401, "authentication_error", "invalid aisan proxy token")
         # Through `policy_permits`, so an allowlist that RAISES denies rather
         # than tearing the connection down as a retryable transport error.
         if not policy_permits(

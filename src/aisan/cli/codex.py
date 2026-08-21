@@ -65,6 +65,7 @@ async def _main(argv: list[str]) -> int:
         egress=(backend,),
         extra_ro=(GIT_CONFIG, *mcp_ro_binds(mcp)),
         extra_env=(("PATH", mcp_search_path()), *terminal_env()),
+        unshare_net=not args.net,
     )
     payload_args = tuple(payload)
     if mcp.enabled:
@@ -76,7 +77,10 @@ async def _main(argv: list[str]) -> int:
         repo=repo,
         state=state,
         spec=spec,
-        command=codex_argv(payload_args, overrides=backend.config_overrides()),
+        command=lambda box: codex_argv(
+            payload_args,
+            overrides=backend.config_overrides(port=box.activation(backend).port),
+        ),
         binary=codex_binary,
         binds=args.binds,
         explain_only=args.explain,

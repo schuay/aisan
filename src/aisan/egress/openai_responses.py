@@ -35,10 +35,17 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..proxy.http import RateLimit
+from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
 from ..proxy.openai_responses import make_app
-from .base import PLACEHOLDER_KEY, Backend, PreflightError
+from .base import (
+    PLACEHOLDER_KEY,
+    SHARED_TOKEN_MARKER,
+    Backend,
+    BackendActivation,
+    PreflightError,
+    shared_proxy_token,
+)
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +74,7 @@ class CodexBackend(Backend):
 
     name = "openai-responses"
     port = PORT
+    supports_shared_net = True
 
     def __init__(
         self,
@@ -89,7 +97,10 @@ class CodexBackend(Backend):
     def client_env(self) -> dict[str, str]:
         return {CLIENT_KEY_ENV: PLACEHOLDER_KEY}
 
-    def config_overrides(self) -> tuple[str, ...]:
+    def shared_client_env_description(self) -> dict[str, str]:
+        return {CLIENT_KEY_ENV: SHARED_TOKEN_MARKER}
+
+    def config_overrides(self, *, port: int | None = None) -> tuple[str, ...]:
         """Highest-precedence Codex settings for this confined transport."""
         values: list[tuple[str, str | bool]] = [
             ("model_provider", PROVIDER),
@@ -99,7 +110,10 @@ class CodexBackend(Backend):
             ("feedback.enabled", False),
             ("features.apps", False),
             (f"model_providers.{PROVIDER}.name", "aisan host proxy"),
-            (f"model_providers.{PROVIDER}.base_url", f"http://127.0.0.1:{self.port}"),
+            (
+                f"model_providers.{PROVIDER}.base_url",
+                f"http://127.0.0.1:{self.port if port is None else port}",
+            ),
             (f"model_providers.{PROVIDER}.env_key", CLIENT_KEY_ENV),
             (f"model_providers.{PROVIDER}.wire_api", "responses"),
             (f"model_providers.{PROVIDER}.requires_openai_auth", False),
@@ -183,6 +197,22 @@ class CodexBackend(Backend):
         finally:
             await runner.cleanup()
             sock.unlink(missing_ok=True)
+
+    @asynccontextmanager
+    async def serve_shared(self, runtime_dir: Path) -> AsyncIterator[BackendActivation]:
+        client_token = shared_proxy_token()
+        app = make_app(
+            credential=self._credential,
+            upstream=self._upstream,
+            rate=RateLimit(per_minute=self._rpm),
+            client_token=client_token,
+        )
+        runner, port = await serve_tcp(app)
+        log.info("openai-responses proxy: listening on 127.0.0.1:%d", port)
+        try:
+            yield BackendActivation(port, {CLIENT_KEY_ENV: client_token})
+        finally:
+            await runner.cleanup()
 
 
 def _read_chatgpt_credential(path: Path) -> _ChatGPTCredential:

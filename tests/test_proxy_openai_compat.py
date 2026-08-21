@@ -215,6 +215,32 @@ class _Proxy:
 URL = "http://openai.invalid"
 
 
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Authorization": "Basic expected"},
+        {"Authorization": "Bearer wrong"},
+        [("Authorization", "Bearer expected"), ("Authorization", "Bearer expected")],
+    ],
+)
+async def test_shared_proxy_requires_one_exact_bearer(tmp_path, headers):
+    async with (
+        _Proxy(
+            tmp_path,
+            token=_token,
+            upstream="http://127.0.0.1:1",
+            client_token="expected",
+        ) as session,
+        session.post(
+            f"{URL}/chat/completions", data=b"{}", headers=headers
+        ) as response,
+    ):
+        assert response.status == 401
+        body = await response.json()
+    assert body["error"]["type"] == "authentication_error"
+
+
 async def _token(value: str = "real-key") -> str:
     return value
 

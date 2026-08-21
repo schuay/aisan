@@ -367,6 +367,36 @@ async def test_the_backend_serves_and_injects_the_credential_it_read(tmp_path):
     assert paths == ["/v4/chat/completions"]
 
 
+async def test_shared_backend_serves_the_activated_tcp_endpoint(tmp_path):
+    got: dict[str, str] = {}
+
+    async def upstream(request: web.Request) -> web.Response:
+        got.update({k.lower(): v for k, v in request.headers.items()})
+        return web.json_response({"ok": True})
+
+    up, up_runner = await _upstream_server(upstream)
+    backend = _backend(tmp_path, upstream=f"{up}/v4")
+    try:
+        async with backend.serve_shared(tmp_path) as activation:
+            auth = json.loads(activation.client_env["OPENCODE_AUTH_CONTENT"])
+            config = json.loads(activation.client_env["OPENCODE_CONFIG_CONTENT"])
+            client_token = auth[PROVIDER]["key"]
+            endpoint = config["provider"][PROVIDER]["options"]["baseURL"]
+            async with (
+                ClientSession() as session,
+                session.post(
+                    f"{endpoint}/chat/completions",
+                    data=b"{}",
+                    headers={"Authorization": f"Bearer {client_token}"},
+                ) as response,
+            ):
+                assert response.status == 200
+    finally:
+        await up_runner.cleanup()
+
+    assert got["authorization"] == f"Bearer {FAKE_KEY}"
+
+
 async def test_the_backend_never_writes_the_credential(tmp_path):
     """The settled rule from the Anthropic backend, asserted the same way:
     over a full preflight-serve-request cycle, by bytes and mtime -- a

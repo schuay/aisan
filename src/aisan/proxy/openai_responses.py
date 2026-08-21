@@ -159,6 +159,7 @@ def make_app(
     paths: PathAllowlist | None = None,
     body: BodyPolicy | None = None,
     rate: RateLimit | None = None,
+    client_token: str | None = None,
 ) -> web.Application:
     async def authorization() -> dict[str, str]:
         token, account_id = await credential()
@@ -174,6 +175,7 @@ def make_app(
         body=body or BodyPolicy(),
         rate=rate,
         headers=_protocol_headers,
+        client_token=client_token,
     )
 
 

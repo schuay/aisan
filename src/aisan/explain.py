@@ -197,20 +197,33 @@ def explain(
         out.write(f"  {exc}\n")
         return out.getvalue()
     prof = parse_wrapper(wrapper, sandbox)
-    home = prof.env.get("HOME", "")
+    shared_egress = bool(box.spec.egress) and not box.spec.unshare_net
+    effective_env = dict(prof.env)
+    if shared_egress:
+        for backend in box.spec.egress:
+            effective_env.update(backend.shared_client_env_description())
+    home = effective_env.get("HOME", "")
 
     section("inputs")
     for key, value in inputs:
         out.write(f"  {key:<9} {value}\n")
+    if shared_egress:
+        out.write("  network   shared host namespace\n")
     out.write(f"  box_id    {box.box_id}\n")
     out.write(f"  HOME(env) {home}\n")
     out.write(f"  chdir     {prof.chdir}\n")
 
-    section("egress backends (host half on a socket, in-box on loopback)")
+    if not shared_egress:
+        section("egress backends (host half on a socket, in-box on loopback)")
+    else:
+        section("egress backends (authenticated host-loopback TCP)")
     if box.spec.egress:
         for backend in box.spec.egress:
-            sock = backend.socket_path(box.runtime_dir)
-            out.write(f"  {backend.name:<8} 127.0.0.1:{backend.port} -> {sock}\n")
+            if not shared_egress:
+                sock = backend.socket_path(box.runtime_dir)
+                out.write(f"  {backend.name:<8} 127.0.0.1:{backend.port} -> {sock}\n")
+            else:
+                out.write(f"  {backend.name:<8} 127.0.0.1:(assigned at launch)\n")
     else:
         out.write("  (none; the box has no route off the machine)\n")
 
@@ -238,9 +251,12 @@ def explain(
         for m in sealed:
             out.write(f"  {m.path}\n")
 
-    section("environment (the box's complete environment; --clearenv first)")
-    for k in sorted(prof.env):
-        out.write(f"  {k}={prof.env[k]}\n")
+    if not shared_egress:
+        section("environment (the box's complete environment; --clearenv first)")
+    else:
+        section("effective environment (backend values injected by launcher)")
+    for k in sorted(effective_env):
+        out.write(f"  {k}={effective_env[k]}\n")
 
     if argv:
         # The exact argv, one token per line. Not shell-quoted: this is a list

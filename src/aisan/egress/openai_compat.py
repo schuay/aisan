@@ -61,10 +61,18 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from ..proxy.http import RateLimit
+from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
 from ..proxy.openai_compat import make_app
-from .base import PLACEHOLDER_KEY, Backend, PreflightError
+from .base import (
+    PLACEHOLDER_KEY,
+    SHARED_PORT_MARKER,
+    SHARED_TOKEN_MARKER,
+    Backend,
+    BackendActivation,
+    PreflightError,
+    shared_proxy_token,
+)
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +118,7 @@ class OpenAICompatBackend(Backend):
     #: (BoxSpec refuses the collision otherwise) -- one route per box is the
     #: common shape, not the only expressible one.
     port = PORT
+    supports_shared_net = True
 
     def __init__(
         self,
@@ -257,6 +266,26 @@ class OpenAICompatBackend(Backend):
             await runner.cleanup()
             sock.unlink(missing_ok=True)
 
+    @asynccontextmanager
+    async def serve_shared(self, runtime_dir: Path) -> AsyncIterator[BackendActivation]:
+        client_token = shared_proxy_token()
+        app = make_app(
+            token=self._bearer,
+            upstream=self._resolve_api(),
+            rate=RateLimit(per_minute=self._rpm),
+            client_token=client_token,
+        )
+        runner, port = await serve_tcp(app)
+        log.info(
+            "openai-compat proxy (%s): listening on 127.0.0.1:%d",
+            self._provider,
+            port,
+        )
+        try:
+            yield BackendActivation(port, self._client_env(port, client_token))
+        finally:
+            await runner.cleanup()
+
     # --- box side: what the client is told -----------------------------------
 
     def client_env(self) -> dict[str, str]:
@@ -274,16 +303,17 @@ class OpenAICompatBackend(Backend):
         1.18.18: only `opencode run` does), so the default model rides this
         config content -- that is why it is here at all.
         """
-        auth = {self._provider: {"type": "api", "key": PLACEHOLDER_KEY}}
+        return self._client_env(self.port, PLACEHOLDER_KEY)
+
+    def _client_env(self, port: int | str, key: str) -> dict[str, str]:
+        auth = {self._provider: {"type": "api", "key": key}}
         config: dict[str, object] = {
             # Session sharing uploads the transcript to opencode's servers:
             # egress this backend does not allowlist, so it is off here where
             # project config cannot override it.
             "share": "disabled",
             "provider": {
-                self._provider: {
-                    "options": {"baseURL": f"http://127.0.0.1:{self.port}"}
-                }
+                self._provider: {"options": {"baseURL": f"http://127.0.0.1:{port}"}}
             },
         }
         if self._model:
@@ -292,6 +322,9 @@ class OpenAICompatBackend(Backend):
             "OPENCODE_AUTH_CONTENT": json.dumps(auth),
             "OPENCODE_CONFIG_CONTENT": json.dumps(config),
         }
+
+    def shared_client_env_description(self) -> dict[str, str]:
+        return self._client_env(SHARED_PORT_MARKER, SHARED_TOKEN_MARKER)
 
 
 class CredentialShapeError(Exception):

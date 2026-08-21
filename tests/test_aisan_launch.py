@@ -32,7 +32,7 @@ from aisan.launch import (
     launcher_binds,
     own_source_root,
 )
-from aisan.runtime import write_manifest
+from aisan.runtime import write_client_env, write_manifest
 from aisan.sandbox import RO
 
 
@@ -57,6 +57,22 @@ def test_the_launcher_is_named_by_path_not_by_a_path_lookup(tmp_path):
     assert prefix[0] == sys.executable
     assert prefix[1] == "-m" and prefix[2].endswith("aisan.launch")
     assert prefix[-2:] == [str(tmp_path), "--"]
+
+
+async def test_shared_mode_injects_client_env_then_execs(tmp_path, monkeypatch):
+    write_client_env(tmp_path, {"AISAN_TEST_TOKEN": "secret"})
+    seen = {}
+
+    def execvpe(file, argv, env):
+        seen.update(file=file, argv=argv, env=env)
+        raise RuntimeError("exec intercepted")
+
+    monkeypatch.setattr(launch_mod.os, "execvpe", execvpe)
+    with pytest.raises(RuntimeError, match="exec intercepted"):
+        await launch_mod._run(tmp_path, ["payload", "arg"])
+    assert seen["file"] == "payload"
+    assert seen["argv"] == ["payload", "arg"]
+    assert seen["env"]["AISAN_TEST_TOKEN"] == "secret"
 
 
 def test_launcher_binds_cover_the_venv_and_every_interpreter_hop():

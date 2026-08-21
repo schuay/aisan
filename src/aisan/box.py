@@ -3,9 +3,9 @@
 
 """One lifecycle bracket: `async with Box(spec, box_id=...) as box`.
 
-`__aenter__` creates the runtime dir, preflights and starts
-every backend, writes the manifest, and hands back a Box that can produce the
-wrapper argv and the launch prefix; `__aexit__` unwinds all of it.
+`__aenter__` creates the runtime dir, preflights and starts every backend,
+writes the selected transport's launcher control file, and hands back a Box
+that can produce the wrapper argv and launch prefix; `__aexit__` unwinds it.
 
 The order inside `__aenter__` is the part worth stating, because it is a real
 constraint and not a preference:
@@ -15,7 +15,7 @@ constraint and not a preference:
    because luci reauth is interactive and the box owns the TTY once it is up;
    prepare before wrapper() because a bind-over source that does not exist fails
    the whole profile.
-3. the manifest, because the launcher reads it.
+3. relay manifest or protected client environment, because the launcher reads it.
 4. only then may `wrapper()` be called. It resolves the binds, and the sources
    have to be on disk by then.
 
@@ -31,11 +31,13 @@ from contextlib import AsyncExitStack, ExitStack, contextmanager
 from pathlib import Path
 from typing import Self
 
+from .egress.base import Backend, BackendActivation
 from .runtime import (
     cleanup_runtime_dir,
     prepare_runtime_dir,
     runtime_bind,
     runtime_dir,
+    write_client_env,
     write_manifest,
 )
 from .sandbox import RO, RW, Bind, Mount, Sandbox
@@ -89,6 +91,10 @@ class Box:
         self.box_id = box_id
         self.runtime_dir = runtime_dir(box_id)
         self._stack: AsyncExitStack | None = None
+        self._activations: dict[Backend, BackendActivation] = {}
+
+    def _needs_relays(self) -> bool:
+        return bool(self.spec.egress) and self.spec.unshare_net
 
     def _stage(self, stack: ExitStack | AsyncExitStack) -> None:
         """Everything that has to exist on disk before `wrapper()` may resolve:
@@ -127,9 +133,23 @@ class Box:
                 # one whose first does not.
                 await backend.preflight()
             self._stage(stack)
+            activations: dict[Backend, BackendActivation] = {}
             for backend in self.spec.egress:
-                await stack.enter_async_context(backend.serve(self.runtime_dir))
-            if self.spec.egress:
+                if self.spec.unshare_net:
+                    await stack.enter_async_context(backend.serve(self.runtime_dir))
+                    activation = BackendActivation(backend.port, backend.client_env())
+                else:
+                    activation = await stack.enter_async_context(
+                        backend.serve_shared(self.runtime_dir)
+                    )
+                activations[backend] = activation
+            if not self.spec.unshare_net and activations:
+                client_env: dict[str, str] = {}
+                for activation in activations.values():
+                    client_env.update(activation.client_env)
+                path = write_client_env(self.runtime_dir, client_env)
+                stack.callback(path.unlink, missing_ok=True)
+            if self._needs_relays():
                 path = write_manifest(self.runtime_dir, self._manifest())
                 # Unlinked with everything else: a file left in the runtime dir
                 # means its rmdir never succeeds and every box leaks a directory
@@ -138,6 +158,7 @@ class Box:
         except BaseException:
             await stack.aclose()
             raise
+        self._activations = activations
         self._stack = stack
         return self
 
@@ -153,8 +174,16 @@ class Box:
 
     async def __aexit__(self, *exc) -> None:
         stack, self._stack = self._stack, None
+        self._activations = {}
         if stack is not None:
             await stack.aclose()
+
+    def activation(self, backend: Backend) -> BackendActivation:
+        """The backend's live per-Box endpoint, only inside the async bracket."""
+        try:
+            return self._activations[backend]
+        except KeyError as e:
+            raise RuntimeError("backend activation is not live in this Box") from e
 
     @contextmanager
     def staged(self) -> Iterator[Box]:
@@ -172,16 +201,17 @@ class Box:
 
     @property
     def env(self) -> dict[str, str]:
-        """The box's complete environment: the spec's, plus each backend's
-        client variables.
+        """Environment serialized into bwrap argv.
 
-        The one thing a spec cannot state itself, because the values name a port
-        table only the backends know. Computed rather than stored so there is no
-        second copy to fall out of date with the spec it came from.
+        Isolated mode includes each backend's meaningless placeholder values.
+        Shared mode deliberately does not: its live ports and proxy tokens are
+        injected by the launcher from the protected runtime file, so they never
+        appear in a host process command line.
         """
         env = dict(self.spec.env)
-        for backend in self.spec.egress:
-            env.update(backend.client_env())
+        if self.spec.unshare_net:
+            for backend in self.spec.egress:
+                env.update(backend.client_env())
         return env
 
     def _sandbox(self) -> Sandbox:
@@ -202,9 +232,9 @@ class Box:
           (a box rooted at aisan's own checkout is the case that forced this)
           keeps the spec's grant, and the launcher bind for it is dropped
           below -- a default does not downgrade an explicit grant.
-        - the runtime dir, ro, so the in-box relays can reach the sockets. ro is
-          enough: connect() needs no write bit, and the box has no business
-          unlinking the host's socket.
+        - the runtime dir, ro, so isolated relays can reach sockets and the
+          shared-network launcher can read its protected client environment.
+          The box has no business changing either control surface.
         - each backend's own mounts, whose sources live in the runtime dir.
 
         Appended LAST, so a consumer that binds one of these paths differently
@@ -307,10 +337,10 @@ class Box:
         checking that the bind SURVIVED resolution. It is optional (a box being
         explained may have no runtime dir yet), so a wrapper() called outside
         the bracket, before `_stage` created the directory, silently drops it
-        and produces a box whose relays have nothing to splice to. That failure
-        presents as every model call and every RBE call refusing to connect from
-        inside a box that otherwise looks entirely correct, which is a long way
-        from the missing `async with` that caused it.
+        and produces a box whose relays have no sockets, or whose shared-network
+        launcher has no client environment. That presents as every model call
+        failing inside a box that otherwise looks correct, far from the missing
+        `async with` that caused it.
         """
         sandbox = self._sandbox()
         if self.spec.egress and not any(
@@ -318,16 +348,16 @@ class Box:
         ):
             raise ValueError(
                 f"box {self.box_id}: spec has egress backends but does not bind"
-                f" the runtime dir {self.runtime_dir} ro -- the in-box relays"
-                " would have no socket to splice to"
+                f" the runtime dir {self.runtime_dir} ro -- the launcher would"
+                " have no egress control data"
             )
         return sandbox.wrapper()
 
     def launch_prefix(self) -> list[str]:
-        """The argv prefix that starts the relays around a payload.
+        """The argv prefix that supplies the selected egress transport.
 
-        Empty when there is no egress: no backends means no relays, which means
-        no launcher, which means a box whose payload need not be Python at all.
+        Empty when there is no egress: no backends means no relays or protected
+        client environment, so the payload need not carry a Python launcher.
         """
         if not self.spec.egress:
             return []

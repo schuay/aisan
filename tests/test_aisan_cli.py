@@ -81,6 +81,18 @@ def test_session_parsers_preserve_explain_and_payload(module_name):
     assert payload == ["--model", "m", "--help"]
 
 
+@pytest.mark.parametrize(
+    "module_name",
+    ["aisan.cli.claude", "aisan.cli.codex", "aisan.cli.opencode"],
+)
+def test_session_parsers_default_offline_and_accept_net(module_name):
+    module = importlib.import_module(module_name)
+    default, _ = module.parse_args([])
+    enabled, _ = module.parse_args(["--net"])
+    assert default.net is False
+    assert enabled.net is True
+
+
 def test_claude_defaults_to_the_anthropic_api(monkeypatch):
     monkeypatch.delenv("AISAN_UPSTREAM", raising=False)
     module = importlib.import_module("aisan.cli.claude")

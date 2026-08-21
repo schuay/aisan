@@ -1,11 +1,13 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The in-box launcher: N relays, then the payload, then its exit status.
+"""The in-box launcher: relay isolated egress or inject shared-network state.
 
-`relays.json` in the runtime dir says
-what to listen on and where to splice it; the launcher binds them all, spawns the
-payload, and exits with the payload's status.
+In isolated mode, `relays.json` says what to listen on and where to splice it;
+the launcher binds every relay, spawns the payload, and returns its status. In
+shared-network mode, `client-env.json` carries the dynamic proxy port and token;
+the launcher adds them to the environment and execs the payload without
+starting relays or exposing the token in argv.
 
 Spawn, not exec, and that is the whole reason this is a process at all. The
 relays live in THIS process's event loop, so replacing the image would take them
@@ -27,7 +29,7 @@ import sys
 from pathlib import Path
 
 from .proxy import relay
-from .runtime import read_manifest
+from .runtime import CLIENT_ENV_NAME, read_client_env, read_manifest
 from .sandbox import RO, Bind, BindSpec
 
 # Signals forwarded to the payload. Everything a terminal or a supervisor sends
@@ -128,7 +130,7 @@ def launcher_binds(python: Path | None = None) -> list[BindSpec]:
 
 
 def launch_prefix(runtime_dir: Path, python: Path | None = None) -> list[str]:
-    """The argv prefix that turns a payload command into a relayed one.
+    """The argv prefix that supplies a payload's egress transport.
 
     `python -m` at an absolute interpreter path rather than the installed
     `aisan-box-launch` console script: it names exactly the interpreter
@@ -142,7 +144,11 @@ def launch_prefix(runtime_dir: Path, python: Path | None = None) -> list[str]:
 
 
 async def _run(runtime_dir: Path, cmd: list[str]) -> int:
-    """Serve every relay in the manifest for the life of `cmd`."""
+    """Inject shared state and exec, or serve isolated relays around `cmd`."""
+    if (runtime_dir / CLIENT_ENV_NAME).exists():
+        env = {**os.environ, **read_client_env(runtime_dir)}
+        os.execvpe(cmd[0], cmd, env)  # noqa: S606 - argv exec, no shell
+
     servers = []
     for entry in read_manifest(runtime_dir):
         # Bind failures propagate: a relay that is not listening does not mean a

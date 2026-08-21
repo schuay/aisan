@@ -23,10 +23,11 @@ the core does not depend on any one model or agent.
   the exception: an unset resource cap is not an unstated mount.
 - **One ordered bind list, later wins**, matching Bubblewrap's mount behavior.
   `Bind`, `Seal`, `Overlay`, and `BindOver` read top to bottom.
-- **Egress as two halves joined by one manifest.** The host holds credentials
-  and serves Unix sockets; the box gets loopback ports. One launcher reads
-  `relays.json` and starts all relays, so sockets and ports have one source of
-  truth.
+- **Credential-aware egress in both network modes.** Isolated boxes reach host
+  proxies through Unix sockets and in-box loopback relays. Interactive boxes
+  started with `--net` reach authenticated host-loopback TCP listeners directly;
+  a private runtime file supplies the per-session proxy token without placing it
+  in process arguments.
 - **Fail-closed request policy.** A policy exception denies the request. Refusal
   messages name the policy reason rather than an internal callback.
 - **Presets as pure `args -> BoxSpec` functions**, rather than project switches
@@ -54,8 +55,11 @@ policy decision is not mistaken for a retryable network failure.
 - Vertex credential minting requires the `google-auth` extra and Application
   Default Credentials.
 
-The box has no general network access by design. Install dependencies, prepare
-virtual environments, and complete host CLI logins before starting a session.
+Boxes have no general network access by default. Interactive `claude`, `codex`,
+and `opencode` sessions accept `--net` before the literal `--` to share the
+host network namespace. That exposes the internet, LAN/VPN routes, and
+host-local services in both directions; configured model credential files stay
+unmounted and model calls still pass through authenticated host proxies.
 
 ## Installation
 
@@ -79,6 +83,7 @@ aisan explain --help
 aisan claude /path/to/repo
 aisan codex /path/to/repo
 aisan opencode /path/to/repo
+aisan codex /path/to/repo --net
 ```
 
 Launcher options come before a literal `--`; arguments after it are passed to

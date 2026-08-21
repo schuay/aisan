@@ -21,6 +21,8 @@ Known give-ups of this tier, documented rather than papered over:
 - Network is the host's unless `unshare_net` is set. With it set the box has
   no route off the machine at all; host-side proxies then reach it only through
   a bind-mounted UNIX socket, which is what the Vertex and RBE proxies do.
+  Interactive launchers default to that isolation and expose explicit `--net`
+  opt-in backed by authenticated host-loopback proxies.
 - No disk quota on the rw worktree (project quotas need root); only the tmpfs
   mounts are size-capped.
 - /tmp is a fresh tmpfs per call: scratch there does not survive to the next

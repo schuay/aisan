@@ -121,6 +121,29 @@ async def _token(value: str = "real-bearer") -> str:
     return value
 
 
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"x-api-key": "wrong"},
+        [("x-api-key", "expected"), ("x-api-key", "expected")],
+    ],
+)
+async def test_shared_proxy_requires_one_exact_x_api_key(tmp_path, headers):
+    async with (
+        _Proxy(
+            tmp_path,
+            token=_token,
+            upstream="http://127.0.0.1:1",
+            client_token="expected",
+        ) as session,
+        session.post(f"{URL}/v1/messages", data=b"{}", headers=headers) as response,
+    ):
+        assert response.status == 401
+        body = await response.json()
+    assert body["error"]["type"] == "authentication_error"
+
+
 async def test_the_boxs_key_is_dropped_and_the_real_bearer_attached(tmp_path):
     """The whole design, in one request.
 

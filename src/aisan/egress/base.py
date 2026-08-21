@@ -3,11 +3,11 @@
 
 """What a backend is, and what a box may ask of one.
 
-A backend is one route off the machine, in two halves that never meet: a HOST
-half holding the credential, checking the allowlist and dialing upstream, and an
-IN-BOX half that is a loopback listener splicing to a UNIX socket. The socket is
-what crosses the network namespace, being a filesystem object; the port is what
-a client that can only dial host:port can use.
+A backend is one credential-aware route off the machine. In isolated mode its
+host half serves a UNIX socket and an in-box loopback listener relays to it. In
+shared-network mode supported interactive backends instead serve authenticated
+TCP on host loopback; the client receives a per-Box port and token activation.
+In both modes the upstream credential stays in the host half.
 
 The split this contract encodes is transport vs backend. A transport is
 `(unix socket) -> (allowlist) -> (inject credential) -> (upstream)`; a backend is
@@ -24,7 +24,9 @@ Three things every backend must be able to answer, and one it may:
   before bwrap starts, because once the box is up it owns the TTY and an
   interactive reauth has nowhere to prompt. The failure carries the exact
   command to fix it.
-- `serve(runtime_dir)` -- the host half, for the life of the box.
+- `serve(runtime_dir)` -- the isolated host half, for the life of the box.
+- `serve_shared(runtime_dir)` -- optional authenticated host-loopback service,
+  yielding per-Box endpoint state rather than storing it on the backend.
 - `refused` -- the mint failure this backend hit, or None. Optional in the sense
   that the default is honest for a backend that cannot fail this way; it is on
   the PUBLIC surface because "did this build fail for lack of a credential" has
@@ -36,8 +38,10 @@ from __future__ import annotations
 
 import abc
 import re
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..sandbox import BindSpec
@@ -59,18 +63,36 @@ class PreflightError(RuntimeError):
         self.fix = fix
 
 
-# The key value every backend hands its box. Distinct from a real key by
+# The key value every isolated backend hands its box. Distinct from a real key by
 # construction, and self-describing: it shows up in the box's environment, in
 # `explain` output and in a snapshot, so it should say what it is to whoever
 # reads it there. Its only job is to stop the client looking for a credential
 # the box does not have -- the value is deliberately meaningless.
 #
-# One constant for every backend rather than one each: it names aisan's side of
+# Shared mode uses the last 20 characters as a stable Claude-approved suffix on
+# a token with a fresh random prefix. Knowing the suffix grants nothing; the
+# proxy compares the full token. One constant for every backend rather than one
+# each: it names aisan's side of
 # the same contract wherever a client reads it, and a backend that minted a
 # DIFFERENT-looking placeholder would be a backend whose placeholder could be
 # mistaken for a policy of its own.
 PLACEHOLDER_KEY = "aisan-placeholder-not-a-credential"
+SHARED_PORT_MARKER = "(assigned at launch)"
+SHARED_TOKEN_MARKER = "<per-box proxy token>"  # noqa: S105 - descriptive marker
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+
+@dataclass(frozen=True)
+class BackendActivation:
+    """One backend's live endpoint and payload environment for one Box."""
+
+    port: int
+    client_env: dict[str, str]
+
+
+def shared_proxy_token() -> str:
+    """A fresh token retaining Claude Code's already-approved key suffix."""
+    return secrets.token_urlsafe(32) + PLACEHOLDER_KEY[-20:]
 
 
 class Backend(abc.ABC):
@@ -92,6 +114,8 @@ class Backend(abc.ABC):
     #: is exposure even for a provider the box does not use. That is why the
     #: check is over paths, not over "the key this backend attaches".
     credentials: tuple[Path, ...] = ()
+    #: Whether this backend implements the authenticated host-loopback path.
+    supports_shared_net: bool = False
 
     def socket_path(self, runtime_dir: Path) -> Path:
         """Where this backend listens, inside the box's runtime dir.
@@ -117,6 +141,10 @@ class Backend(abc.ABC):
         port N" and mapping N to a variable name is what the consumer knows.
         """
         return {}
+
+    def shared_client_env_description(self) -> dict[str, str]:
+        """Deterministic markers for explain; never a live port or token."""
+        raise NotImplementedError(f"{self.name} does not support shared networking")
 
     def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
         """Extra mounts this backend needs in the box, e.g. a bind-over of a
@@ -157,6 +185,12 @@ class Backend(abc.ABC):
         dead port.
         """
         raise NotImplementedError
+        yield  # pragma: no cover -- makes this an async generator for typing
+
+    @asynccontextmanager
+    async def serve_shared(self, runtime_dir: Path) -> AsyncIterator[BackendActivation]:
+        """Serve the authenticated host-loopback path for one Box activation."""
+        raise NotImplementedError(f"{self.name} does not support shared networking")
         yield  # pragma: no cover -- makes this an async generator for typing
 
 

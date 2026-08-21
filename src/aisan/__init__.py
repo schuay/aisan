@@ -4,7 +4,7 @@
 """aisan: one API for a confined box with audited egress.
 
     async with Box(spec, box_id="whatever-you-call-it") as box:
-        box.env                  # the complete in-box environment
+        box.env                  # environment serialized into bwrap argv
         argv = box.command(["bash", "-lc", "..."])
 
 `spec` is a `BoxSpec`: an ordered bind list, an environment, limits, and zero or

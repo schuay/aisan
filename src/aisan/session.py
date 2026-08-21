@@ -67,6 +67,11 @@ def interactive_parser(prog: str, executable: str) -> argparse.ArgumentParser:
         action="store_true",
         help="print the resolved profile and exit; nothing runs",
     )
+    parser.add_argument(
+        "--net",
+        action="store_true",
+        help="share host networking (internet, LAN/VPN, and host loopback)",
+    )
     return parser
 
 
@@ -95,7 +100,7 @@ async def run_interactive(
     repo: Path,
     state: Path,
     spec: BoxSpec,
-    command: list[str],
+    command: Callable[[Box], list[str]],
     binary: Callable[[], Path | None],
     binds: Path | None,
     explain_only: bool,
@@ -134,9 +139,16 @@ async def run_interactive(
         prepare()
     try:
         async with box:
+            if not box.spec.unshare_net:
+                print(
+                    "WARNING: box shares host networking: internet, LAN/VPN, and"
+                    " host-local services are reachable; configured model"
+                    " credential files are not mounted.",
+                    file=sys.stderr,
+                )
             done = await asyncio.to_thread(
                 subprocess.run,
-                box.command(command),
+                box.command(command(box)),
                 env={**os.environ, **box.env},
                 check=False,
             )

@@ -110,10 +110,11 @@ async def _main(argv: list[str]) -> int:
     mcp = claude_host_mcp()
     mcp_config = state / "aisan-host-mcp.json"
 
+    backend = AnthropicBackend(upstream=args.upstream)
     spec = claude_code(
         repo,
         state=state,
-        egress=(AnthropicBackend(upstream=args.upstream),),
+        egress=(backend,),
         extra_ro=(GIT_CONFIG, *mcp_ro_binds(mcp)),
         extra_env=(
             # /usr is bound ro unconditionally, but the preset's PATH is only
@@ -126,6 +127,7 @@ async def _main(argv: list[str]) -> int:
             # there is someone watching.
             ("CLAUDE_CODE_MAX_RETRIES", "3"),
         ),
+        unshare_net=not args.net,
     )
     command = ["claude"]
     if mcp.enabled:
@@ -144,7 +146,7 @@ async def _main(argv: list[str]) -> int:
         repo=repo,
         state=state,
         spec=spec,
-        command=command,
+        command=lambda _box: command,
         binary=claude_code_binary,
         binds=args.binds,
         explain_only=args.explain,

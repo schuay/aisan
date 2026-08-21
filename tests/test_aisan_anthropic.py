@@ -256,6 +256,59 @@ async def test_the_backend_serves_and_injects_the_credential_it_read(tmp_path):
     assert "x-api-key" not in got
 
 
+async def test_shared_backend_serves_authenticated_tcp_with_per_box_state(tmp_path):
+    got: dict[str, str] = {}
+
+    async def upstream(request: web.Request) -> web.Response:
+        got.update({k.lower(): v for k, v in request.headers.items()})
+        return web.json_response({"ok": True})
+
+    up, up_runner = await _upstream_server(upstream)
+    backend = AnthropicBackend(
+        credentials=_credentials(tmp_path / "c.json"), upstream=up
+    )
+    try:
+        async with backend.serve_shared(tmp_path) as activation:
+            endpoint = activation.client_env["ANTHROPIC_BASE_URL"]
+            client_token = activation.client_env["ANTHROPIC_API_KEY"]
+            assert activation.port == int(endpoint.rsplit(":", 1)[1])
+            assert client_token.endswith(PLACEHOLDER_KEY[-20:])
+            assert client_token != PLACEHOLDER_KEY
+            async with (
+                ClientSession() as session,
+                session.post(
+                    f"{endpoint}/v1/messages",
+                    data=b"{}",
+                    headers={"x-api-key": client_token},
+                ) as response,
+            ):
+                assert response.status == 200
+    finally:
+        await up_runner.cleanup()
+
+    assert got["authorization"] == f"Bearer {FAKE_TOKEN}"
+    assert "x-api-key" not in got
+
+
+async def test_one_backend_can_hold_two_shared_activations(tmp_path):
+    up, up_runner = await _upstream_server(_hello)
+    backend = AnthropicBackend(
+        credentials=_credentials(tmp_path / "c.json"), upstream=up
+    )
+    try:
+        async with (
+            backend.serve_shared(tmp_path) as first,
+            backend.serve_shared(tmp_path) as second,
+        ):
+            assert first.port != second.port
+            assert (
+                first.client_env["ANTHROPIC_API_KEY"]
+                != second.client_env["ANTHROPIC_API_KEY"]
+            )
+    finally:
+        await up_runner.cleanup()
+
+
 async def test_the_backend_never_writes_the_credential(tmp_path):
     """The settled decision, asserted rather than intended.
 

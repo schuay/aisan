@@ -3,16 +3,17 @@
 
 """Host-side egress proxies for a sandboxed process.
 
-The box holds no credential and, with `Sandbox.unshare_net`, no network. It
-reaches the outside world only through these proxies, over UNIX sockets bound
-into the box. The credential stays host-side; the box gets a capability,
-narrowed by an allowlist, and nothing it can steal.
+The box holds no upstream credential. With `Sandbox.unshare_net`, it reaches
+the outside world only through these proxies over UNIX sockets bound into the
+box. Opted-in interactive boxes sharing the host network instead use
+authenticated host-loopback TCP. The configured credential stays host-side in
+both modes; the proxy route remains narrowed by its allowlist.
 
-Every path has the same two-part shape: a host-side proxy listening on a Unix
-socket, and `relay`, the in-box half that offers a loopback port and splices it
-to that socket. The socket crosses the network namespace as a filesystem object;
-the relay lets clients that only dial host:port reach it. HTTP provider modules
-handle model protocols; `rbe` handles plaintext HTTP/2 REAPI traffic.
+The isolated path has two parts: a host-side proxy listening on a UNIX socket,
+and `relay`, the in-box half that offers a loopback port and splices it to that
+socket. The shared-network HTTP path binds an authenticated random TCP port on
+host loopback and needs no relay. HTTP provider modules handle model protocols;
+`rbe` handles plaintext HTTP/2 REAPI traffic and remains isolated-only.
 """
 
 from .http import RateLimit, run_forever, serve

@@ -91,3 +91,34 @@ def test_explain_leaves_no_persistent_session_state(tmp_path, command):
     )
     assert result.returncode == 0, result.stderr
     assert not (home / ".cache").exists()
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_net_explain_describes_shared_transport_without_live_secrets(tmp_path, command):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env["HOME"] = str(home)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "aisan.cli.main",
+            command,
+            "--net",
+            "--explain",
+            str(repo),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "shared host namespace" in result.stdout
+    assert "authenticated host-loopback TCP" in result.stdout
+    assert "<per-box proxy token>" in result.stdout
+    assert "WARNING:" not in result.stderr

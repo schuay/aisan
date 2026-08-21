@@ -98,30 +98,25 @@ class BoxSpec:
     # resolves. See Box.env.
     env: tuple[tuple[str, str], ...]
     # The egress backends this box gets. Each is a host half holding a
-    # credential and an in-box loopback port; an empty tuple is a box with no
-    # route off the machine at all.
+    # credential and a client endpoint selected by the network mode; an empty
+    # tuple is a box with no credential-aware route.
     egress: tuple[Backend, ...]
-    # Its own network namespace: no route off the machine, and a loopback that
-    # is not the host's.
+    # Its own network namespace: no general route off the machine, and a
+    # loopback that is not the host's. False shares the host's complete network.
     unshare_net: bool
     limits: Limits = field(default_factory=Limits)
 
     def __post_init__(self) -> None:
-        # Egress without unshare_net is not a lesser box, it is a broken one,
-        # and it fails in two directions at once. Each backend's in-box port is
-        # FIXED (see egress.base), which is only safe because the box's loopback
-        # is private to it: on the host's loopback that port is machine-wide, so
-        # the second concurrent box dies at bind() -- and the first one's relay
-        # is reachable by anything else on the host, which makes an
-        # unauthenticated capability to the credential behind it. This is step
-        # 1's all-or-none rule, moved onto the object that can enforce it: a
-        # library exporting an unsafe combination can hand a caller an unsafe
-        # box, and one that refuses to build it cannot.
-        if self.egress and not self.unshare_net:
+        # Egress without unshare_net is valid only for a backend that supplies
+        # the authenticated, kernel-assigned host-loopback transport. A backend
+        # with only the fixed relay port would either collide with another box or
+        # expose an unauthenticated credential capability on host loopback. The
+        # all-or-none rule lives here so no caller can assemble that unsafe mix.
+        unsupported = [b.name for b in self.egress if not b.supports_shared_net]
+        if self.egress and not self.unshare_net and unsupported:
             raise ValueError(
-                "egress backends require unshare_net: their in-box ports are"
-                " fixed, which is only private inside the box's own network"
-                f" namespace (backends: {[b.name for b in self.egress]})"
+                "egress without unshare_net requires shared-network support"
+                f" from every backend (unsupported: {unsupported})"
             )
         names = [b.name for b in self.egress]
         if any(
@@ -135,7 +130,7 @@ class BoxSpec:
         if len(set(names)) != len(names):
             raise ValueError(f"egress backend names collide: {names}")
         ports = [b.port for b in self.egress]
-        if len(set(ports)) != len(ports):
+        if self.unshare_net and len(set(ports)) != len(ports):
             # A collision presents as one backend mysteriously unreachable (its
             # relay bound first and the other's client found the wrong server),
             # which is a long way from the typo that caused it.

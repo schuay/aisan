@@ -211,6 +211,35 @@ async def test_backend_injects_host_subscription_and_preserves_upstream_prefix(
     ]
 
 
+async def test_shared_backend_serves_the_activated_tcp_endpoint(tmp_path):
+    reached = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        reached.append(request.path)
+        return web.Response(body=b"data: [DONE]\n\n", content_type="text/event-stream")
+
+    upstream_url, upstream_runner = await _upstream_server(upstream)
+    backend = _backend(tmp_path, upstream=upstream_url)
+    body = json.dumps(
+        {"input": [], "tools": [], "store": False, "stream": True}
+    ).encode()
+    try:
+        async with backend.serve_shared(tmp_path) as activation:
+            client_token = activation.client_env[CLIENT_KEY_ENV]
+            async with (
+                ClientSession() as session,
+                session.post(
+                    f"http://127.0.0.1:{activation.port}/responses",
+                    data=body,
+                    headers={"Authorization": f"Bearer {client_token}"},
+                ) as response,
+            ):
+                assert response.status == 200
+    finally:
+        await upstream_runner.cleanup()
+    assert reached == ["/v1/responses"]
+
+
 def test_codex_preset_is_registered_and_uses_isolated_state(tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()

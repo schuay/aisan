@@ -5,12 +5,14 @@
 
 Provider modules own request policy, credentials, upstream behavior, and error
 envelopes. This module owns only the mechanics they share: request-size and rate
-limits plus the Unix-socket server lifecycle.
+limits, constant-time token primitives, and UNIX/TCP server lifecycle.
 """
 
 from __future__ import annotations
 
 import asyncio
+import secrets
+import socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +69,43 @@ async def serve(socket_path: Path, app: web.Application) -> web.AppRunner:
     # The box runs as the same uid; keep the socket off-limits to anyone else.
     socket_path.chmod(0o600)
     return runner
+
+
+async def serve_tcp(app: web.Application) -> tuple[web.AppRunner, int]:
+    """Serve `app` on one explicit IPv4 loopback socket."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    runner = web.AppRunner(app, access_log=None)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(socket.SOMAXCONN)
+        sock.setblocking(False)
+        assigned = int(sock.getsockname()[1])
+        await runner.setup()
+        await web.SockSite(runner, sock).start()
+    except BaseException:
+        await runner.cleanup()
+        sock.close()
+        raise
+    else:
+        return runner, assigned
+
+
+def token_matches(presented: str | None, expected: str | None) -> bool:
+    """Whether a client-presented proxy token is valid for this mode."""
+    if expected is None:
+        return True
+    return presented is not None and secrets.compare_digest(presented, expected)
+
+
+def bearer_token(request: web.Request) -> str | None:
+    """Return one exact bearer credential, rejecting duplicates and malformed input."""
+    values = request.headers.getall("Authorization", [])
+    if len(values) != 1:
+        return None
+    scheme, separator, value = values[0].partition(" ")
+    if not separator or scheme.lower() != "bearer" or not value or " " in value:
+        return None
+    return value
 
 
 async def run_forever(socket_path: Path, app: web.Application) -> None:

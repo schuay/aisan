@@ -1,13 +1,14 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The per-box runtime directory: sockets, backend files, and the relay manifest.
+"""The per-box runtime directory: sockets, backend files, and launcher control.
 
 One directory per box, holding one socket per backend plus the small files the
 box needs in order to dial them, plus `relays.json` -- the manifest the in-box
 launcher reads to know what to listen on. The box binds the DIRECTORY, so every
-file in it is reachable inside at the same absolute path the host wrote it at,
-which is what lets both ends agree on a path without passing one.
+file in it is reachable inside at the same absolute path the host wrote it at.
+Isolated mode carries `relays.json`; shared-network mode carries a protected
+`client-env.json` whose live port and token the launcher injects before exec.
 
 The directory is keyed by an opaque `box_id`. Opaque is the point: aisan never
 parses it, never derives a job id or a worktree out of it, and two boxes with
@@ -33,6 +34,7 @@ _DIR_PREFIX = "aisan-proxy-"
 
 # The manifest file name. Read by the in-box launcher, written by the Box.
 MANIFEST_NAME = "relays.json"
+CLIENT_ENV_NAME = "client-env.json"
 
 
 def runtime_dir(box_id: str) -> Path:
@@ -122,3 +124,21 @@ def write_manifest(directory: Path, entries: list[dict[str, object]]) -> Path:
 def read_manifest(directory: Path) -> list[dict[str, object]]:
     """Read `relays.json` from inside the box."""
     return json.loads((directory / MANIFEST_NAME).read_text())
+
+
+def write_client_env(directory: Path, env: dict[str, str]) -> Path:
+    """Write shared-mode client environment inside the private runtime dir."""
+    path = directory / CLIENT_ENV_NAME
+    path.write_text(json.dumps(env, sort_keys=True) + "\n")
+    path.chmod(0o600)
+    return path
+
+
+def read_client_env(directory: Path) -> dict[str, str]:
+    """Read the shared-mode environment immediately before payload exec."""
+    data = json.loads((directory / CLIENT_ENV_NAME).read_text())
+    if not isinstance(data, dict) or any(
+        not isinstance(k, str) or not isinstance(v, str) for k, v in data.items()
+    ):
+        raise ValueError("client environment must be a string mapping")
+    return data
