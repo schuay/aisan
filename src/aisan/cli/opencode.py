@@ -28,10 +28,11 @@ The CLI: launcher flags are parsed STRICTLY (no abbreviation -- `--bind` must
 not resolve to `--binds` in a tool whose flags gate mounts), and everything
 after a literal `--` is forwarded to opencode verbatim. The split is manual
 because argparse's own `--` handling would let the `repo` positional eat a
-payload flag. `--binds` names a user bind spec (see `aisan.userbinds`); it is
+payload flag. `--binds` names a user bind spec (see `aisan.userbinds`), and is
+repeatable so a shared tool spec and a per-project one compose; it is
 appended after the preset's binds, so user mounts shadow the template.
 `--explain` prints the resolved profile and exits -- the review path for a
-merge of two bind sources, rendered from the same Box the real path uses.
+merge of several bind sources, rendered from the same Box the real path uses.
 
 Usage:
     aisan opencode [repo] [flags] -- [opencode args...]

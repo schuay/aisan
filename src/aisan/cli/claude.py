@@ -23,8 +23,9 @@ after a literal `--` is forwarded to claude verbatim, after the
 `--permission-mode` this wrapper always sets. The split is manual because
 argparse's own `--` handling would let the `repo` positional eat a payload
 flag. `--binds` names a user bind spec (see `aisan.userbinds`); it is appended
-after the preset's binds, so user mounts shadow the template. `--explain`
-prints the resolved profile and exits -- the review path for a merge of two
+after the preset's binds, so user mounts shadow the template, and it is
+repeatable so a shared tool spec and a per-project one compose. `--explain`
+prints the resolved profile and exits -- the review path for a merge of several
 bind sources, rendered from the same Box the real path uses.
 
 Usage: aisan claude [repo] [flags] -- [claude args...]

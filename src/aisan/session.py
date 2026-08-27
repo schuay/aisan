@@ -60,8 +60,10 @@ def interactive_parser(prog: str, executable: str) -> argparse.ArgumentParser:
         "--binds",
         type=Path,
         metavar="FILE",
-        help="user bind spec, TOML (keys: ro, rw); appended after the"
-        " preset's binds, so these shadow (see aisan.userbinds)",
+        action="append",
+        help="user bind spec, TOML (keys: ro, rw, overlay, path); appended"
+        " after the preset's binds, so these shadow. Repeatable, applied in"
+        " the order given (see aisan.userbinds)",
     )
     parser.add_argument(
         "--explain",
@@ -132,18 +134,23 @@ async def run_interactive(
     spec: BoxSpec,
     command: Callable[[Box], list[str]],
     binary: Callable[[], Path | None],
-    binds: Path | None,
+    binds: list[Path] | None,
     explain_only: bool,
     prepare: Callable[[], None] | None = None,
     mcp: SessionMCP | None = None,
 ) -> int:
     """Apply user binds, explain or run, and preserve the payload's status."""
-    if binds is not None:
+    # In the order given, each file applied whole: later-wins is the model's
+    # only precedence rule, so two files compose the same way two entries in
+    # one file do -- which is what makes a shared tool spec and a per-project
+    # one usable together without either knowing about the other.
+    for spec_file in binds or []:
         try:
-            spec = spec.with_binds(userbinds.load(binds, egress=spec.egress))
+            user = userbinds.load(spec_file, egress=spec.egress)
         except ValueError as e:
             print(f"binds: {e}", file=sys.stderr)
             return 2
+        spec = spec.with_binds(user.binds).with_path_prefix(user.path)
 
     box = Box(spec, box_id=box_id(client, repo))
     if explain_only:
@@ -154,7 +161,7 @@ async def run_interactive(
                     inputs=(
                         ("harness", harness),
                         ("repo", str(repo)),
-                        ("binds", str(binds) if binds else "(none)"),
+                        ("binds", ", ".join(map(str, binds)) if binds else "(none)"),
                     ),
                 ),
                 end="",

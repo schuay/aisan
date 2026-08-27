@@ -1,0 +1,41 @@
+# Copyright 2026 The aisan developers
+# SPDX-License-Identifier: MIT
+
+# A user bind spec for a Chromium depot_tools checkout, as a worked example of
+# what the four keys are for. Pass it with `aisan claude --binds`, repeat the
+# flag to compose it with a per-project spec, and check the result with
+# `--explain` before it owns a terminal.
+#
+# Nothing here is knowledge aisan has: the library sees four lists of paths.
+# Adjust them to this host and keep the file wherever your own configuration
+# lives -- it is data, not a preset.
+#
+# ONE-TIME HOST SETUP, which no bind can do for you:
+#
+#     touch ~/depot_tools/.disable_auto_update
+#
+# The `gclient` and `fetch` wrappers run `update_depot_tools` on every
+# invocation, which is a `git fetch` into a checkout the box mounts read-only
+# and cannot reach the network from: without the file, `gclient --version`
+# exits 255 with "Couldn't fetch main branch". depot_tools' own switch is that
+# file, it belongs to your checkout rather than to a launcher, and a spec that
+# created it would be a profile that writes to the host it is describing.
+
+ro = [
+    "~/depot_tools",
+]
+
+overlay = [
+    # vpython's venv store: ~4 GB of interpreters that every `git cl` executes,
+    # shared with the host. ro fails (it takes a lock file even to read) and
+    # absent HANGS (it rebuilds the venv, with no network to do it over), so
+    # warm-to-read and writable-then-discarded is the only binding that works.
+    # The suffix is your uid.
+    "~/.cache/vpython-root.1000",
+]
+
+path = [
+    # Bound and unresolvable is half a grant: without this, `git cl` is not a
+    # command and `vpython3` is not on the PATH the wrappers look it up on.
+    "~/depot_tools",
+]

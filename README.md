@@ -34,6 +34,10 @@ the core does not depend on any one model or agent.
   hidden inside the sandbox compiler.
 - **`aisan explain`** renders resolved binds and the exact Bubblewrap argv from
   the same `Box` used to launch the process.
+- **User bind specs** (`--binds FILE`, repeatable) name paths to mount `ro`,
+  `rw`, or `overlay`, plus `path` entries prepended to the box PATH. The key
+  grants nothing on its own: every entry must be covered by a mount the same
+  file names. `examples/depot_tools.toml` is a worked example.
 
 The REAPI transport is the largest specialized core component. Remote build
 clients such as siso can speak plaintext HTTP/2 to a local endpoint while the

@@ -20,6 +20,7 @@ them are the same policy. `box.py` is where the two meet.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -148,6 +149,38 @@ class BoxSpec:
         that belongs in a spec written by hand rather than in a combinator.
         """
         return replace(self, binds=(*self.binds, *extra))
+
+    def with_path_prefix(self, dirs: tuple[Path, ...]) -> BoxSpec:
+        """This spec with `dirs` prepended to the box's PATH.
+
+        The one env combinator, and it exists because PATH is the variable
+        whose values are DIRECTORIES: a bind the box cannot resolve by name is
+        half a grant, and completing it adds no reach the bind did not. It is
+        not a general `with_env` -- everything else a payload wants set is a
+        value rather than a mount, and belongs in the spec that names the box's
+        environment outright.
+
+        Prepended, not appended: a caller adding a tool tree means the box to
+        use that one. An absent PATH is set rather than refused, so this
+        composes with a spec whose environment does not name one.
+
+        The LAST entry, not the first. `env` is an ordered tuple of pairs
+        rather than a mapping, and a preset naming a variable that its caller
+        then overrides through `extra_env` leaves two -- which bwrap resolves
+        the way this does, by `--setenv` running in order. Rewriting the first
+        would prepend to the value the box does not use.
+        """
+        if not dirs:
+            return self
+        prefix = os.pathsep.join(str(d) for d in dirs)
+        env = list(self.env)
+        last = max((i for i, (k, _) in enumerate(env) if k == "PATH"), default=None)
+        if last is None:
+            env.append(("PATH", prefix))
+        else:
+            value = env[last][1]
+            env[last] = ("PATH", f"{prefix}{os.pathsep}{value}" if value else prefix)
+        return replace(self, env=tuple(env))
 
     def with_egress(self, extra: list[Backend]) -> BoxSpec:
         """This spec with `extra` backends added. Order is irrelevant here --

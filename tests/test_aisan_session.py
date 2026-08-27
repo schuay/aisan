@@ -122,3 +122,91 @@ def test_net_explain_describes_shared_transport_without_live_secrets(tmp_path, c
     assert "authenticated host-loopback TCP" in result.stdout
     assert "<per-box proxy token>" in result.stdout
     assert "WARNING:" not in result.stderr
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_bind_specs_compose_in_the_order_given(tmp_path, command):
+    """`--binds` is repeatable so a shared tool spec and a per-project one
+    compose without either knowing about the other -- later wins, which is the
+    same rule that governs two entries in one file.
+
+    Through `--explain`, because the merged profile is what the operator
+    reviews: the assertions are on the rendered mounts and on the box's PATH,
+    the two halves a `path` entry has to reach.
+    """
+    repo = tmp_path / "repo"
+    tools = tmp_path / "tools"
+    refs = tmp_path / "refs"
+    for d in (repo, tools, refs):
+        d.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    first = tmp_path / "tools.toml"
+    first.write_text(f'ro = ["{tools}"]\npath = ["{tools}"]\n')
+    second = tmp_path / "project.toml"
+    second.write_text(f'ro = ["{refs}"]\n')
+
+    drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env["HOME"] = str(home)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "aisan.cli.main",
+            command,
+            "--explain",
+            "--binds",
+            str(first),
+            "--binds",
+            str(second),
+            str(repo),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert str(tools) in result.stdout
+    assert str(refs) in result.stdout
+    # Both files are named as inputs, so the artifact says what it was merged
+    # from rather than only what came out.
+    assert str(first) in result.stdout and str(second) in result.stdout
+    path_line = next(
+        line for line in result.stdout.splitlines() if line.strip().startswith("PATH=")
+    )
+    assert path_line.strip().removeprefix("PATH=").split(os.pathsep)[0] == str(tools)
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_a_refused_bind_spec_stops_the_launch(tmp_path, command):
+    """The refusal reaches the operator as a nonzero exit and the file's name,
+    not as a box quietly missing what the file asked for."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    bad = tmp_path / "bad.toml"
+    bad.write_text(f'ro = ["{tmp_path}/a"]\npath = ["{tmp_path}/b"]\n')
+    drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env["HOME"] = str(home)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "aisan.cli.main",
+            command,
+            "--explain",
+            "--binds",
+            str(bad),
+            str(repo),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 2
+    assert str(bad) in result.stderr and "not covered" in result.stderr
