@@ -5,12 +5,14 @@
 
 Provider modules own request policy, credentials, upstream behavior, and error
 envelopes. This module owns only the mechanics they share: request-size and rate
-limits, constant-time token primitives, and UNIX/TCP server lifecycle.
+limits, unambiguous body parsing, constant-time token primitives, and UNIX/TCP
+server lifecycle.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
 import socket
 import time
@@ -22,6 +24,44 @@ from aiohttp import web
 # A prompt plus its history is large but bounded; an exfiltration is not. 32 MiB
 # is far above a normal request and far below a useful bulk-smuggling channel.
 MAX_BODY_BYTES = 32 << 20
+
+
+class AmbiguousBody(ValueError):
+    """A body two conforming JSON parsers may read differently.
+
+    Distinct from "this is not JSON", and the distinction is what a body policy
+    acts on. A document with a repeated key is accepted by both parsers, but
+    which value survives is unspecified -- so the declaration this side inspects
+    need not be the one the upstream acts on, and a policy that approved the
+    reading it happened to get would be approving a capability it never saw.
+    """
+
+
+def json_unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Build one JSON object, refusing a key repeated at any depth.
+
+    An `object_pairs_hook`, so it runs on every object in the document rather
+    than only the top level: the shape worth catching is a `type` stated twice
+    inside one tool declaration, not just a `tools` stated twice beside it.
+    """
+    out: dict[str, object] = {}
+    for key, value in pairs:
+        if key in out:
+            raise AmbiguousBody(f"duplicate key {key!r}")
+        out[key] = value
+    return out
+
+
+def load_json_unambiguous(body: bytes) -> object:
+    """`json.loads` with the repeated-key seam closed.
+
+    Raises `AmbiguousBody` for a document that parses two ways and a plain
+    ValueError for one that does not parse at all -- two different findings,
+    which is why they are two different exceptions. What each proxy does with
+    them is its own policy: see the body policies in `anthropic` (no opinion on
+    a body it cannot read) and `openai_compat` (refuses both).
+    """
+    return json.loads(body, object_pairs_hook=json_unique_pairs)
 
 
 @dataclass

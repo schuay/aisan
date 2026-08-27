@@ -59,7 +59,14 @@ from dataclasses import dataclass
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-from .http import MAX_BODY_BYTES, RateLimit, bearer_token, serve, token_matches
+from .http import (
+    MAX_BODY_BYTES,
+    RateLimit,
+    bearer_token,
+    json_unique_pairs,
+    serve,
+    token_matches,
+)
 from .policy import permits as policy_permits
 from .policy import refusal as policy_refusal
 
@@ -200,7 +207,7 @@ def parse_json_object(body: bytes) -> dict[str, object]:
     try:
         payload = json.loads(
             body,
-            object_pairs_hook=_unique_object,
+            object_pairs_hook=json_unique_pairs,
             parse_constant=_invalid_constant,
         )
     except (UnicodeDecodeError, ValueError) as e:
@@ -208,21 +215,6 @@ def parse_json_object(body: bytes) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise TypeError("request body must be a JSON object")
     return payload
-
-
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """Build one JSON object while refusing duplicate keys.
-
-    JSON leaves duplicate-key handling unspecified. Rejecting them prevents a
-    first-wins upstream from acting on a tool declaration that this parser,
-    which would otherwise keep the last value, never inspected.
-    """
-    out: dict[str, object] = {}
-    for key, value in pairs:
-        if key in out:
-            raise ValueError(f"duplicate key {key!r}")
-        out[key] = value
-    return out
 
 
 def _invalid_constant(value: str) -> object:

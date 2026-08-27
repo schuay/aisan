@@ -524,6 +524,37 @@ def test_body_policy_ignores_bodies_it_has_no_opinion_on():
     assert p.refuse(json.dumps({"tools": ["not an object"]}).encode()) is None
 
 
+def test_body_policy_refuses_duplicate_keys_at_any_depth():
+    """A repeated key resolves one way here and possibly another upstream.
+
+    Python keeps the LAST value, so a benign `custom` declaration written after
+    a server-side one is what this policy would inspect while a first-wins
+    upstream runs the tool it never saw. Both spellings of the seam are refused:
+    a `tools` stated twice, and a `type` stated twice inside one declaration.
+    """
+    bodies = [
+        b'{"tools": [{"type": "web_search_20250305"}], "tools": [{"type": "custom"}]}',
+        b'{"tools": [{"type": "web_search_20250305", "type": "custom"}]}',
+        b'{"mcp_servers": [{"url": "https://x.test"}], "mcp_servers": []}',
+    ]
+    for body in bodies:
+        reason = BodyPolicy().refuse(body)
+        assert reason is not None, body
+        assert "unambiguous" in reason
+
+
+def test_body_policy_still_has_no_opinion_on_a_body_it_cannot_read():
+    """The leniency above it is deliberate and stays.
+
+    Refusing a body that parses two ways is a decision about CAPABILITY -- the
+    upstream may act on a declaration this side never inspected. A body that
+    does not parse at all presents no such disagreement: the upstream rejects
+    it, and refusing here would be this proxy second-guessing a parse rather
+    than gating a capability.
+    """
+    assert BodyPolicy().refuse(b"{not json at all") is None
+
+
 async def test_a_refused_body_never_reaches_the_upstream_or_the_credential(tmp_path):
     """Both halves of the claim, and the second is the easy one to lose.
 

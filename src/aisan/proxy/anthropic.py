@@ -60,14 +60,20 @@ Request-size limits, rate limiting, and Unix-socket serving come from the neutra
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-from .http import MAX_BODY_BYTES, RateLimit, serve, token_matches
+from .http import (
+    MAX_BODY_BYTES,
+    AmbiguousBody,
+    RateLimit,
+    load_json_unambiguous,
+    serve,
+    token_matches,
+)
 from .policy import permits as policy_permits
 from .policy import refusal as policy_refusal
 
@@ -183,9 +189,17 @@ class BodyPolicy:
         rejects malformed bodies itself, and a proxy that second-guessed the
         parse would refuse requests on a disagreement about JSON rather than
         about capability.
+
+        A body that parses TWO ways is refused, and that is not the same
+        leniency read backwards. A repeated key is accepted by both parsers and
+        resolved by neither spec, so the tools this side reads are not
+        necessarily the tools the upstream runs -- the disagreement is about
+        capability, which is the one thing this policy does have an opinion on.
         """
         try:
-            payload = json.loads(body)
+            payload = load_json_unambiguous(body)
+        except AmbiguousBody as e:
+            return f"the sandbox proxy cannot read this body unambiguously: {e}"
         except ValueError:
             return None
         if not isinstance(payload, dict):
