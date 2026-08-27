@@ -25,6 +25,7 @@ from aisan.egress.openai_responses import (
 from aisan.presets.codex import codex, codex_argv, codex_binary
 from aisan.session import (
     interactive_parser,
+    mirror_user_memory,
     parse_interactive_args,
     run_interactive,
     state_dir,
@@ -33,6 +34,15 @@ from aisan.session import (
 from aisan.session_mcp import codex_host_mcp, mcp_ro_binds, mcp_search_path
 
 GIT_CONFIG = Path.home() / ".config" / "git"
+USER_MEMORY = Path.home() / ".codex" / "AGENTS.md"
+
+
+def seed_user_memory(state: Path, source: Path) -> None:
+    """Mirror the host's global AGENTS.md into the state dir, which is the
+    config dir the box reads it from -- `CODEX_HOME`, never ~/.codex.
+    Measured against codex-cli 0.147: the file is read from $CODEX_HOME.
+    See `mirror_user_memory` for why this is a copy and not a bind."""
+    mirror_user_memory(source, state / "AGENTS.md")
 
 
 def parse_args(argv: list[str]):
@@ -70,6 +80,12 @@ async def _main(argv: list[str]) -> int:
     payload_args = tuple(payload)
     if mcp.enabled:
         payload_args = ("--profile", "aisan-host-mcp", *payload_args)
+
+    def prepare() -> None:
+        seed_user_memory(state, USER_MEMORY)
+        if mcp.enabled:
+            mcp.write(mcp_config)
+
     return await run_interactive(
         client="codex",
         harness="codex",
@@ -84,7 +100,7 @@ async def _main(argv: list[str]) -> int:
         binary=codex_binary,
         binds=args.binds,
         explain_only=args.explain,
-        prepare=(lambda: mcp.write(mcp_config)) if mcp.enabled else None,
+        prepare=prepare,
         mcp=mcp,
     )
 

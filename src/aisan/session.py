@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -39,6 +40,31 @@ def state_dir(client: str, repo: Path, *, home: Path | None = None) -> Path:
     """The persistent state directory for one client and repository."""
     base = home if home is not None else Path.home()
     return base / ".cache" / f"aisan-{client}" / repo_key(repo)
+
+
+def mirror_user_memory(source: Path, dst: Path) -> None:
+    """Copy the host's user-level instructions to where a boxed CLI reads them.
+
+    For the clients whose config directory is redirected at the state dir
+    (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`), user memory is read from INSIDE that
+    dir -- so the host file is not read wherever it sits, and a ro bind of it
+    is the fix that looks right and does nothing: measured, a box holding a
+    readable ~/.claude/CLAUDE.md answers that it has no instructions. The
+    redirect is not negotiable either, since the CLI writes its config dir
+    every turn and the host's holds the credential.
+
+    A copy rather than a mount because the state dir is already the launcher's
+    to seed, so this needs no bind and no entry in a user bind spec. Re-copied
+    per launch, which makes the host file the source of truth: memory the agent
+    writes in-box (the state dir is rw) survives only to the next launch.
+
+    A host with no such file is left alone rather than cleared. Nothing here
+    can tell a stale mirror from instructions the agent wrote itself, and of
+    the two ways to be wrong, deleting the operator's file is worse than
+    leaving a per-repo cache directory holding one.
+    """
+    if source.exists():
+        shutil.copyfile(source, dst)
 
 
 def box_id(client: str, repo: Path) -> str:

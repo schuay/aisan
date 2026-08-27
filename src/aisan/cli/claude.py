@@ -38,7 +38,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -46,6 +45,7 @@ from aisan.egress.anthropic import DEFAULT_UPSTREAM, PLACEHOLDER_KEY, AnthropicB
 from aisan.presets.claude_code import claude_code, claude_code_binary
 from aisan.session import (
     interactive_parser,
+    mirror_user_memory,
     parse_interactive_args,
     run_interactive,
     state_dir,
@@ -93,27 +93,10 @@ def seed_state(state: Path, repo: Path) -> None:
 
 
 def seed_user_memory(state: Path, source: Path) -> None:
-    """Mirror the host's user memory into the state dir, where the CLI reads it.
-
-    Binding the host file ro is not enough and looks like it should be: the box
-    then holds a readable ~/.claude/CLAUDE.md that nothing opens, because user
-    memory is read from CLAUDE_CONFIG_DIR/CLAUDE.md and that is the state dir.
-    It cannot be ~/.claude instead -- the config dir is written every turn and
-    that directory holds the credential. Measured both ways: with the bind
-    alone a box asked what its instructions say answers that it has none.
-
-    A copy rather than a mount because the state dir is already this launcher's
-    to seed, so this needs no bind, no symlink, and no entry in a user spec.
-    Re-copied per launch, which makes the host file the source of truth: memory
-    the agent writes in-box (the state dir is rw) survives only to the next one.
-
-    A host with no user memory is left alone rather than cleared. Nothing here
-    can tell a stale mirror from a CLAUDE.md the agent wrote itself, and of the
-    two ways to be wrong, deleting the operator's file is worse than leaving a
-    per-repo cache directory holding one.
-    """
-    if source.exists():
-        shutil.copyfile(source, state / "CLAUDE.md")
+    """Mirror the host's user memory into the state dir, which is the config
+    dir the box reads it from -- `CLAUDE_CONFIG_DIR`, never ~/.claude. See
+    `mirror_user_memory` for why this is a copy and not a bind."""
+    mirror_user_memory(source, state / "CLAUDE.md")
 
 
 def parse_args(argv: list[str]):

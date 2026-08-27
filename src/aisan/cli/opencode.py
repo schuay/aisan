@@ -51,6 +51,7 @@ from pathlib import Path
 
 from aisan.egress.openai_compat import OpenAICompatBackend
 from aisan.presets.opencode import opencode, opencode_binary
+from aisan.sandbox import BindOver, BindSpec
 from aisan.session import (
     interactive_parser,
     parse_interactive_args,
@@ -65,6 +66,36 @@ from aisan.session_mcp import mcp_ro_binds, mcp_search_path, opencode_host_mcp
 # with "Please tell me who you are". ro: the agent reads config, it does not
 # edit it.
 GIT_CONFIG = Path.home() / ".config" / "git"
+
+# Where the HOST's opencode reads its global instructions from. XDG-aware for
+# the same reason the preset's catalog path is: this is wherever the host's own
+# opencode looks.
+USER_MEMORY = (
+    Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    / "opencode"
+    / "AGENTS.md"
+)
+
+
+def user_memory_bind(source: Path) -> list[BindSpec]:
+    """The host's global AGENTS.md mounted where the BOX reads it, or nothing.
+
+    A bind and not a copy, unlike the other two launchers: opencode's config
+    root is not redirected at the state dir -- XDG_CONFIG_HOME deliberately
+    stays unset (the preset says why: setting it would bypass the ro
+    ~/.config/git bind), so the config root lands on the HOME tmpfs and there
+    is no host directory to seed.
+
+    BindOver rather than a plain bind because the source is XDG-resolved on the
+    host while the box always reads $HOME/.config: those are the same path only
+    when XDG_CONFIG_HOME is unset, and a plain bind on a host that sets it would
+    mount the file where nothing looks. Guarded on exists() because a BindOver
+    is never optional, and a host with no global AGENTS.md is a host without
+    one, not a broken profile.
+    """
+    if not source.exists():
+        return []
+    return [BindOver(source, Path.home() / ".config" / "opencode" / "AGENTS.md")]
 
 
 def parse_args(argv: list[str]):
@@ -119,6 +150,9 @@ async def _main(argv: list[str]) -> int:
         ),
         unshare_net=not args.net,
     )
+    # After the preset's binds, before any user spec: the operator's own
+    # instructions are part of the template, and a user spec still shadows.
+    spec = spec.with_binds(user_memory_bind(USER_MEMORY))
     return await run_interactive(
         client="opencode",
         harness="opencode",
