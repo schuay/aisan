@@ -16,6 +16,7 @@ import pytest
 
 from aisan import Box
 from aisan.presets.codex import codex, codex_argv, codex_binary
+from aisan.session import mcp_notice
 from aisan.session_mcp import (
     SessionMCP,
     claude_host_mcp,
@@ -296,3 +297,79 @@ async def test_real_codex_starts_an_imported_mcp_server_inside_the_box(
                 await process.wait()
 
     assert json.loads(marker.read_text()) == {"host_only_visible": False}
+
+
+def test_the_import_notice_names_the_servers_and_the_env_carriers():
+    """The import is by operator choice, but a silent one is not reviewable.
+
+    Each declaration is copied verbatim into the box, so a server carrying an
+    API token in its environment puts that token where the agent can read it --
+    the one thing that widens the box without announcing itself. The notice
+    names the servers, and names again the ones whose environment travels.
+    """
+    config = SessionMCP(
+        document={},
+        commands=("a-mcp", "b-mcp"),
+        kind="json",
+        names=("plain", "tokened"),
+        env_names=("tokened",),
+    )
+
+    notice = mcp_notice(config)
+
+    assert "plain" in notice
+    assert "2 host MCP server(s)" in notice
+    # The env carrier is called out a second time; the plain one is not.
+    assert notice.count("tokened") == 2
+    assert "readable" in notice
+
+
+def test_the_import_notice_omits_the_environment_line_when_none_carries_one():
+    config = SessionMCP(document={}, commands=("a-mcp",), kind="json", names=("plain",))
+
+    notice = mcp_notice(config)
+
+    assert "plain" in notice
+    assert "environment" not in notice
+
+
+def test_imported_servers_report_their_env_carriers_per_client_key(tmp_path):
+    """Claude Code and Codex spell it `env`; opencode spells it `environment`.
+
+    A single spelling would silently under-report on one of the three, which is
+    the failure mode a notice about credentials must not have.
+    """
+    claude_source = tmp_path / ".claude.json"
+    claude_source.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "plain": {"command": "local-mcp"},
+                    "tokened": {"command": "local-mcp", "env": {"TOKEN": "x"}},
+                    "empty-env": {"command": "local-mcp", "env": {}},
+                }
+            }
+        )
+    )
+    claude = claude_host_mcp(claude_source)
+    assert claude.names == ("plain", "tokened", "empty-env")
+    assert claude.env_names == ("tokened",)
+
+    opencode_source = tmp_path / "opencode.json"
+    opencode_source.write_text(
+        json.dumps(
+            {
+                "mcp": {
+                    "plain": {"type": "local", "command": ["local-mcp"]},
+                    "tokened": {
+                        "type": "local",
+                        "command": ["local-mcp"],
+                        "environment": {"TOKEN": "x"},
+                    },
+                }
+            }
+        )
+    )
+    opencode = opencode_host_mcp(opencode_source)
+    assert opencode.names == ("plain", "tokened")
+    assert opencode.env_names == ("tokened",)

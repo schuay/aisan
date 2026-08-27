@@ -30,6 +30,16 @@ class SessionMCP:
     document: dict[str, object]
     commands: tuple[str, ...]
     kind: Literal["json", "toml"]
+    #: The retained server names, for the launcher's import notice. Carried as
+    #: data rather than read back out of `document`, whose top-level key differs
+    #: per client.
+    names: tuple[str, ...] = ()
+    #: Those whose declaration carries environment values. Computed by each
+    #: importer below rather than here, because the key holding them is the
+    #: CLIENT's: Claude Code and Codex spell it `env`, opencode `environment`.
+    #: Worth naming separately because that is where a host token would sit, and
+    #: copying the declaration verbatim puts it inside the box.
+    env_names: tuple[str, ...] = ()
 
     @property
     def enabled(self) -> bool:
@@ -59,6 +69,8 @@ def codex_host_mcp(path: Path | None = None) -> SessionMCP:
         document={"mcp_servers": kept},
         commands=tuple(str(server["command"]) for server in kept.values()),
         kind="toml",
+        names=tuple(kept),
+        env_names=_env_names(kept, "env"),
     )
 
 
@@ -77,6 +89,8 @@ def claude_host_mcp(path: Path | None = None) -> SessionMCP:
         document={"mcpServers": kept},
         commands=tuple(str(server["command"]) for server in kept.values()),
         kind="json",
+        names=tuple(kept),
+        env_names=_env_names(kept, "env"),
     )
 
 
@@ -98,7 +112,26 @@ def opencode_host_mcp(path: Path | None = None) -> SessionMCP:
             continue
         kept[name] = server
         commands.append(command[0])
-    return SessionMCP(document={"mcp": kept}, commands=tuple(commands), kind="json")
+    return SessionMCP(
+        document={"mcp": kept},
+        commands=tuple(commands),
+        kind="json",
+        names=tuple(kept),
+        # opencode's own key, not the `env` the other two use (documented in its
+        # local-server schema alongside `command` and `cwd`).
+        env_names=_env_names(kept, "environment"),
+    )
+
+
+def _env_names(
+    servers: dict[str, dict[str, object]], key: Literal["env", "environment"]
+) -> tuple[str, ...]:
+    """The servers declaring a non-empty environment, under this client's key."""
+    return tuple(
+        name
+        for name, server in servers.items()
+        if isinstance(server.get(key), dict) and server[key]
+    )
 
 
 def mcp_search_path() -> str:

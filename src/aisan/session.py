@@ -21,6 +21,7 @@ from . import userbinds
 from .box import Box
 from .egress.base import PreflightError
 from .explain import explain
+from .session_mcp import SessionMCP
 from .spec import BoxSpec
 
 _TERM_PASSTHROUGH = ("TERM", "COLORTERM", "LANG", "LC_ALL")
@@ -85,6 +86,35 @@ def parse_interactive_args(
     return parser.parse_args(argv[:split]), argv[split + 1 :]
 
 
+def mcp_notice(mcp: SessionMCP) -> str:
+    """What the host MCP import puts inside the box, named server by server.
+
+    The import is by operator choice, but it is the one part of a session the
+    operator does not spell out at the call site: the declarations come from a
+    host config file nobody re-reads at launch, and each is copied VERBATIM --
+    so a server whose declaration carries an API token puts that token in a box
+    the agent can read, past the credential-absence the rest of the profile
+    keeps by subtraction. Everything else that widens the box announces itself
+    (`--net` warns, `--binds` is a path the operator typed); this said nothing.
+
+    Named rather than counted, and the environment-carrying ones named again,
+    because the action it invites is to go look at a specific declaration.
+    """
+    lines = [
+        (
+            f"NOTE: {len(mcp.names)} host MCP server(s) start inside the box:"
+            f" {', '.join(mcp.names)}."
+        )
+    ]
+    if mcp.env_names:
+        lines.append(
+            "      Declared environment values travel with them"
+            f" ({', '.join(mcp.env_names)}); any credential there is readable"
+            " in the box."
+        )
+    return "\n".join(lines)
+
+
 def terminal_env() -> tuple[tuple[str, str], ...]:
     """Terminal variables worth carrying through the box's cleared env."""
     return tuple(
@@ -105,6 +135,7 @@ async def run_interactive(
     binds: Path | None,
     explain_only: bool,
     prepare: Callable[[], None] | None = None,
+    mcp: SessionMCP | None = None,
 ) -> int:
     """Apply user binds, explain or run, and preserve the payload's status."""
     if binds is not None:
@@ -146,6 +177,8 @@ async def run_interactive(
                     " credential files are not mounted.",
                     file=sys.stderr,
                 )
+            if mcp is not None and mcp.enabled:
+                print(mcp_notice(mcp), file=sys.stderr)
             done = await asyncio.to_thread(
                 subprocess.run,
                 box.command(command(box)),

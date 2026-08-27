@@ -132,6 +132,7 @@ async def _main(argv: list[str]) -> int:
         binds=args.binds,
         explain_only=args.explain,
         prepare=(lambda: mcp.write(mcp_config)) if mcp.enabled else None,
+        mcp=mcp,
     )
 
 

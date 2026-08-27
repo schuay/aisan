@@ -151,6 +151,7 @@ async def _main(argv: list[str]) -> int:
         binds=args.binds,
         explain_only=args.explain,
         prepare=prepare,
+        mcp=mcp,
     )
 
 
