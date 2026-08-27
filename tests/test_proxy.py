@@ -643,3 +643,190 @@ async def test_run_with_relay_serves_during_command(tmp_path):
     finally:
         srv.close()
         await srv.wait_closed()
+
+
+# --- the body policy -------------------------------------------------------
+#
+# The allowlists above gate the ENVELOPE of a model call. The body is not inert:
+# a tool the body declares makes GOOGLE fetch, search or execute for the box, so
+# `unshare_net` stops the box dialling out while leaving it able to ask Vertex to
+# dial out on its behalf.
+#
+# The permitted shape is measured against the real client rather than read off
+# the API reference: langchain_google_vertexai builds every tool through
+# `_format_to_gapic_tool`, and both airc paths (chat and the growing-prefix
+# cache) emit exactly `functionDeclarations`. The refused set is deliberately
+# NOT enumerated in the policy -- it is everything else in the union.
+
+
+_REAL_FUNCTION_TOOL = {
+    "functionDeclarations": [
+        {
+            "name": "read_file",
+            "description": "read",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {"path": {"type": "STRING"}},
+                "required": ["path"],
+            },
+        }
+    ]
+}
+
+
+def test_body_policy_permits_the_real_clients_tools():
+    """The negative control: the exact tool shape the SDK emits.
+
+    Taken from `MessageToJson` output for a `Tool` built by
+    `_format_to_gapic_tool`, which is what both the inference and cachedContents
+    paths post. A policy that refused everything would pass every adversarial
+    case below and break the product.
+    """
+    from aisan.proxy.vertex import BodyPolicy
+
+    inference = json.dumps(
+        {
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "tools": [_REAL_FUNCTION_TOOL],
+            "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
+            "generationConfig": {"temperature": 1},
+        }
+    ).encode()
+    cache = json.dumps(
+        {
+            "model": f"projects/{PROJECT}/locations/{LOCATION}/publishers/google/models/{MODEL}",
+            "systemInstruction": {"parts": [{"text": "sys"}]},
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "tools": [_REAL_FUNCTION_TOOL],
+            "ttl": "600s",
+        }
+    ).encode()
+
+    assert BodyPolicy().refuse(inference) is None
+    assert BodyPolicy().refuse(cache) is None
+    # A cache DELETE carries no body, and a body with no tools declares nothing.
+    assert BodyPolicy().refuse(b"") is None
+    assert BodyPolicy().refuse(b'{"contents": []}') is None
+    # The snake_case spelling of the SAME client field. Proto3 JSON requires the
+    # upstream to accept it, so refusing it would refuse a legitimate request.
+    assert BodyPolicy().refuse(b'{"tools": [{"function_declarations": []}]}') is None
+
+
+@pytest.mark.parametrize(
+    ("field", "why"),
+    [
+        ("googleSearch", "Google runs the search and the query is the payload"),
+        ("googleSearchRetrieval", "the same capability under its older name"),
+        ("urlContext", "Google fetches a URL the box chose"),
+        ("codeExecution", "the upstream executes, not the box"),
+        ("retrieval", "retrieval.externalApi names an endpoint for Google to call"),
+        ("enterpriseWebSearch", "search on the upstream's side of the namespace"),
+        ("googleMaps", "an upstream lookup on box-chosen input"),
+        ("computerUse", "the upstream drives a computer for the box"),
+        ("someToolInventedNextYear", "unknown to us; an allowlist refuses it"),
+    ],
+)
+def test_body_policy_refuses_tools_that_execute_upstream(field, why):
+    from aisan.proxy.vertex import BodyPolicy
+
+    body = json.dumps({"tools": [{field: {}}]}).encode()
+    reason = BodyPolicy().refuse(body)
+
+    assert reason is not None, why
+    assert field in reason  # the refusal names what it refused
+
+
+def test_body_policy_refuses_the_snake_case_spelling_of_a_server_tool():
+    """The bypass an allowlist keyed on one spelling would have.
+
+    Proto3 JSON parsers are required to accept the original proto field name as
+    well as the lowerCamelCase form, so the upstream honours `url_context`
+    exactly as it honours `urlContext` -- and a policy that only knew the camel
+    one would forward it.
+    """
+    from aisan.proxy.vertex import BodyPolicy
+
+    for field in ("url_context", "google_search", "code_execution"):
+        body = json.dumps({"tools": [{field: {}}]}).encode()
+        assert BodyPolicy().refuse(body) is not None, field
+
+
+def test_body_policy_refuses_a_server_tool_beside_a_permitted_one():
+    """Smuggling past the entry that looks right. Every field of every entry is
+    checked, not the first one that matches."""
+    from aisan.proxy.vertex import BodyPolicy
+
+    beside = json.dumps({"tools": [_REAL_FUNCTION_TOOL, {"urlContext": {}}]}).encode()
+    within = json.dumps({"tools": [{**_REAL_FUNCTION_TOOL, "urlContext": {}}]}).encode()
+
+    assert BodyPolicy().refuse(beside) is not None
+    assert BodyPolicy().refuse(within) is not None
+
+
+def test_body_policy_refuses_shapes_it_cannot_classify():
+    """The only client is a REST SDK emitting MessageToJson output, so a body
+    this cannot read is not a disagreement about JSON -- it is not a request the
+    client sent. Refused, including the duplicate-key seam."""
+    from aisan.proxy.vertex import BodyPolicy
+
+    bodies = [
+        b"{not json",
+        b'["an", "array"]',
+        b'{"tools": "not a list"}',
+        b'{"tools": ["not an object"]}',
+        b'{"tools": [{"functionDeclarations": []}], "tools": [{"urlContext": {}}]}',
+    ]
+    for body in bodies:
+        assert BodyPolicy().refuse(body) is not None, body
+
+
+async def test_a_refused_body_never_reaches_the_upstream_or_the_credential(tmp_path):
+    """Both halves, and the second is the easy one to lose: the check runs
+    before `token()`, so a refused request does not spend a mint."""
+    from aiohttp import ClientSession
+
+    import aisan.proxy.vertex as v
+
+    reached = False
+    minted = 0
+
+    async def upstream(request: web.Request) -> web.Response:
+        nonlocal reached
+        reached = True
+        return web.json_response({})
+
+    async def token() -> str:
+        nonlocal minted
+        minted += 1
+        return "real-bearer"
+
+    up_url, up_runner = await _upstream_server(upstream)
+    orig_up = v._upstream
+    v._upstream = lambda _loc: up_url
+    try:
+        app = make_app(allowlist=_allow(), token=token, location=LOCATION)
+        sock = tmp_path / "vertex.sock"
+        runner = await serve_proxy(sock, app)
+        relay = await serve_relay(sock, 0)
+        port = relay.sockets[0].getsockname()[1]
+        try:
+            async with (
+                ClientSession() as s,
+                s.post(
+                    f"http://127.0.0.1:{port}{BASE}"
+                    f"/publishers/google/models/{MODEL}:generateContent",
+                    data=json.dumps({"tools": [{"urlContext": {}}]}).encode(),
+                ) as r,
+            ):
+                assert r.status == 403
+                assert "urlContext" in json.loads(await r.text())["error"]["message"]
+        finally:
+            relay.close()
+            await relay.wait_closed()
+            await runner.cleanup()
+    finally:
+        v._upstream = orig_up
+        await up_runner.cleanup()
+
+    assert not reached, "a refused body must not reach upstream"
+    assert minted == 0, "a refused body must not spend a credential mint"

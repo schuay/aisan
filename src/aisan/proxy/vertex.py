@@ -20,6 +20,10 @@ one:
   anything the box sends is data.
 - Two request shapes are reachable, both POST-or-DELETE on one host: model
   inference, and the cached-content lifecycle the growing-prefix cache needs.
+- The body may declare only the tools that run IN the box. Neither of the above
+  reads the body, and on this upstream the body is not inert: a declared
+  `googleSearch` or `urlContext` makes Google fetch a URL the box chose, which
+  is a route off a machine the box otherwise has no route off. See `BodyPolicy`.
 
 Token-file brokering is what this replaces: there the box held a
 short-lived token, here it holds nothing.
@@ -36,12 +40,21 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 # Re-exported for compatibility; new shared-infrastructure imports should use
 # `aisan.proxy.http` directly.
-from .http import MAX_BODY_BYTES, RateLimit, run_forever, serve
+from .http import (
+    MAX_BODY_BYTES,
+    AmbiguousBody,
+    RateLimit,
+    load_json_unambiguous,
+    run_forever,
+    serve,
+)
 from .policy import permits as policy_permits
+from .policy import refusal as policy_refusal
 
 __all__ = [
     "MAX_BODY_BYTES",
     "Allowlist",
+    "BodyPolicy",
     "RateLimit",
     "make_app",
     "run_forever",
@@ -104,6 +117,87 @@ class Allowlist:
         return any(p.match(path) for p in self._patterns())
 
 
+# The one `Tool` field that executes IN THE BOX: the model emits a call, the
+# client runs it, the result goes back as a message. BOTH spellings, because the
+# upstream accepts both and an allowlist that knew only one is bypassed by
+# sending the other -- proto3 JSON requires a parser to take the original
+# snake_case field name as well as the lowerCamelCase form (protobuf.dev, JSON
+# mapping), and the REST transport this proxy fronts emits the camel one
+# (measured: `MessageToJson` defaults to `functionDeclarations`).
+#
+# Every OTHER field of the union is the upstream acting on the box's behalf, and
+# they are deliberately not enumerated here: an allowlist means a field Google
+# adds next year is refused rather than forwarded. As of the v1/v1beta1 discovery
+# documents that union also holds googleSearch, googleSearchRetrieval, urlContext,
+# codeExecution, retrieval, enterpriseWebSearch, googleMaps, computerUse,
+# parallelAiSearch and exaAiSearch -- retrieval.externalApi being the sharpest of
+# them, since it names an arbitrary endpoint for Google's servers to call.
+CLIENT_TOOL_FIELDS = frozenset({"functionDeclarations", "function_declarations"})
+
+
+@dataclass(frozen=True)
+class BodyPolicy:
+    """Which capabilities the body may declare.
+
+    The path allowlist gates the ENVELOPE of a model call, and on this upstream
+    the body is not inert: the tools it declares make GOOGLE's servers fetch,
+    search or execute on the box's behalf. `unshare_net` stops the box dialling
+    out; it does not stop the box asking Vertex to dial out for it, and the URL
+    IS the payload -- a fetch of `https://x.example/<bytes>` has exfiltrated them
+    whatever comes back. Same posture as the Anthropic and OpenAI-compatible
+    policies, one protocol over.
+
+    Both routes the path allowlist reaches are gated, not just inference:
+    `cachedContents` takes the same `tools` array (measured against the real
+    client, which posts one), so a policy that read only `generateContent` would
+    leave "cache the tool, then reference the cache" open.
+
+    Bounded, and worth stating so the claim is not overread: this refuses a route
+    off the machine for bytes the box already holds. It is not what keeps the
+    credential out -- that is the absence of any bind naming it.
+    """
+
+    client_fields: frozenset[str] = CLIENT_TOOL_FIELDS
+
+    def refuse(self, body: bytes) -> str | None:
+        """The reason to refuse `body`, or None to permit it.
+
+        An empty body is permitted: a cache DELETE carries none, and a request
+        with nothing in it declares nothing. Anything else that this parser
+        cannot read as one unambiguous JSON object IS refused -- unlike the
+        Anthropic policy, which has an upstream whose leniency was measured.
+        Here the only client is a REST SDK emitting `MessageToJson` output, so a
+        body this cannot classify is not a disagreement about JSON, it is a
+        request nobody legitimate sent.
+        """
+        if not body:
+            return None
+        try:
+            payload = load_json_unambiguous(body)
+        except AmbiguousBody as e:
+            return f"the sandbox proxy cannot read this body unambiguously: {e}"
+        except ValueError as e:
+            return f"request body is not JSON the sandbox proxy can classify: {e}"
+        if not isinstance(payload, dict):
+            return "request body must be a JSON object"
+
+        tools = payload.get("tools")
+        if tools is None:
+            return None
+        if not isinstance(tools, list):
+            return "`tools` must be an array"
+        for tool in tools:
+            if not isinstance(tool, dict):
+                return "every tool must be a JSON object"
+            for field in tool:
+                if field not in self.client_fields:
+                    return (
+                        f"tool field {field!r} executes on the upstream, not in"
+                        " the sandbox, and is not permitted"
+                    )
+        return None
+
+
 def _error(status: int, message: str, *, streaming: bool) -> web.Response:
     """A refusal the client can actually parse.
 
@@ -137,8 +231,10 @@ def make_app(
     token: TokenSource,
     location: str,
     rate: RateLimit | None = None,
+    body: BodyPolicy | None = None,
 ) -> web.Application:
     limiter = rate or RateLimit()
+    body_policy = body or BodyPolicy()
     upstream = _upstream(location)
 
     async def handle(request: web.Request) -> web.StreamResponse:
@@ -161,6 +257,17 @@ def make_app(
             return _error(413, "request body too large", streaming=streaming)
         if len(body) > MAX_BODY_BYTES:
             return _error(413, "request body too large", streaming=streaming)
+
+        # Before `token()`: no reason to read the credential for a request being
+        # refused. Through `policy_refusal` for the same reason the path check
+        # goes through `policy_permits` -- a policy that raises must deny, not
+        # tear the connection down as something the client will retry into.
+        reason = policy_refusal(
+            lambda: body_policy.refuse(body), subject=f"body of {request.path}"
+        )
+        if reason is not None:
+            log.warning("vertex proxy: refused body: %s", reason)
+            return _error(403, reason, streaming=streaming)
 
         # Our own headers only: nothing the box sent is forwarded.
         headers = {
