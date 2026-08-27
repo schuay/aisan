@@ -31,6 +31,7 @@
   [..] rw       <MAIN>/.git/worktrees/wt
   [..] ro-pin   <MAIN>/.git/worktrees/wt/commondir
   [..] ro-pin   <MAIN>/.git/worktrees/wt/config.worktree
+  [..] ro-pin   <MAIN>/.git/objects/pack
   <AISAN RUNTIME>
   [..] seal-ro  <MAIN>/.git/worktrees
 
@@ -40,9 +41,13 @@
 == environment (the box's complete environment; --clearenv first) ==
   AI_AGENT=aisan
   DEBIAN_FRONTEND=noninteractive
-  GIT_CONFIG_COUNT=1
+  GIT_CONFIG_COUNT=3
   GIT_CONFIG_KEY_0=gc.auto
+  GIT_CONFIG_KEY_1=gc.pruneExpire
+  GIT_CONFIG_KEY_2=gc.worktreePruneExpire
   GIT_CONFIG_VALUE_0=0
+  GIT_CONFIG_VALUE_1=never
+  GIT_CONFIG_VALUE_2=never
   GIT_PAGER=cat
   GIT_TERMINAL_PROMPT=0
   HOME=<HOME>
@@ -141,6 +146,9 @@
   --ro-bind
   <MAIN>/.git/worktrees/wt/config.worktree
   <MAIN>/.git/worktrees/wt/config.worktree
+  --ro-bind
+  <MAIN>/.git/objects/pack
+  <MAIN>/.git/objects/pack
   <AISAN RUNTIME>
   --remount-ro
   <MAIN>/.git/worktrees
@@ -174,13 +182,25 @@
   <DEPOT_TOOLS>:/usr/bin
   --setenv
   GIT_CONFIG_COUNT
-  1
+  3
   --setenv
   GIT_CONFIG_KEY_0
   gc.auto
   --setenv
   GIT_CONFIG_VALUE_0
   0
+  --setenv
+  GIT_CONFIG_KEY_1
+  gc.pruneExpire
+  --setenv
+  GIT_CONFIG_VALUE_1
+  never
+  --setenv
+  GIT_CONFIG_KEY_2
+  gc.worktreePruneExpire
+  --setenv
+  GIT_CONFIG_VALUE_2
+  never
   --setenv
   PRESUBMIT_SKIP_NETWORK
   1

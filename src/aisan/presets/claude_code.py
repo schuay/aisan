@@ -71,6 +71,7 @@ import shutil
 from pathlib import Path
 
 from ..egress.base import Backend
+from ..gitbinds import GC_ENV, git_binds
 from ..sandbox import RO, RW, Bind, BindSpec
 from ..spec import DEFANG_ENV, BoxSpec, Limits
 
@@ -140,6 +141,17 @@ def claude_code(
     home = Path.home()
     binds: list[BindSpec] = [
         *(Bind(p, RO, optional=True) for p in extra_ro),
+        # The .git policy for a linked worktree: the common dir rw so git works,
+        # its steering files pinned ro, sibling worktrees sealed away, and this
+        # session's own dir punched back through. Empty for a plain checkout,
+        # whose .git is inside the rw root already.
+        #
+        # `pin_packs` under unshare_net: the seal removes the siblings' HEAD and
+        # index as reachability roots, so an in-box `git gc` would prune objects
+        # only they reference out of the SHARED store (measured -- gitbinds
+        # documents it). A ro objects/pack stops that; it also stops any in-box
+        # fetch, which a box with its own network namespace cannot do anyway.
+        *git_binds(worktree, pin_packs=unshare_net),
         # After the ro binds: the state dir is the box's own and nothing may
         # shadow it. `config` stays ro even though it sits under the same HOME
         # tmpfs -- the agent reads its policy, it does not edit it.
@@ -165,6 +177,7 @@ def claude_code(
         tmpfs=(("/tmp", tmp_size_mb << 20), (str(home), home_size_mb << 20)),  # noqa: S108
         env=(
             *DEFANG_ENV.items(),
+            *GC_ENV,
             ("HOME", str(home)),
             ("PATH", "/usr/bin"),
             # The rw half of the config split. Also where a CLAUDE.md is read

@@ -15,6 +15,7 @@ asserts them. Here the subject is the profile.
 """
 
 import importlib
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,9 @@ from conftest import run_boxed
 
 from aisan import Box
 from aisan.gitbinds import external_symlink_targets, git_binds
+from aisan.presets.claude_code import claude_code
+from aisan.presets.codex import codex
+from aisan.presets.opencode import opencode
 from aisan.presets.v8_job import v8_job
 from aisan.sandbox import RO, RW, Bind, Overlay, Seal
 
@@ -354,3 +358,151 @@ def test_a_host_without_vpython_still_builds_a_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(preset, "_vpython_cache", lambda: tmp_path / "nope")
     _, wt = _fake_checkout(tmp_path)
     assert not [b for b in v8_job(wt).binds if isinstance(b, Overlay)]
+
+
+# --- the shared .git of a linked worktree ------------------------------------
+
+
+def _linked_worktree(tmp_path: Path) -> tuple[Path, Path, str]:
+    """A main checkout, our worktree, and a SIBLING holding a commit only its
+    own detached HEAD references. Returns (worktree, sibling, sha).
+
+    Real git rather than a hand-built layout: what is under test is what git
+    itself concludes from the layout, and the pointers/reachability rules are
+    exactly the part a fake would get to invent.
+    """
+    git = ("git", "-c", "user.email=t@t", "-c", "user.name=t")
+    main = tmp_path / "main"
+    subprocess.run(["git", "init", "-q", str(main)], check=True)
+    subprocess.run(
+        [*git, "commit", "-q", "--allow-empty", "-m", "base"], cwd=main, check=True
+    )
+    wt, sib = tmp_path / "wt", tmp_path / "sib"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(wt), "-b", "b"], cwd=main, check=True
+    )
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "--detach", str(sib)], cwd=main, check=True
+    )
+    (sib / "f.txt").write_text("only reachable from the sibling's HEAD\n")
+    subprocess.run(["git", "add", "f.txt"], cwd=sib, check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "detached"], cwd=sib, check=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=sib,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return wt, sib, sha
+
+
+def test_an_interactive_preset_applies_the_worktree_git_policy(tmp_path):
+    """The interactive presets get the same .git policy as the job profile.
+
+    Before this they got none, so a linked worktree simply did not work in a
+    session -- and the operator's fix was a hand-written rw bind of the common
+    .git, which is the policy MINUS every pin. Making it the default is what
+    stops the escape hatch from being the dangerous path.
+    """
+    wt, _, _ = _linked_worktree(tmp_path)
+    (tmp_path / "state").mkdir()
+    spec = claude_code(wt, state=tmp_path / "state", unshare_net=True)
+    modes = {b.path: _mode_at(spec, b.path) for b in spec.binds if hasattr(b, "path")}
+    common = (tmp_path / "main" / ".git").resolve()
+    assert modes[common] == "rw"  # git needs to write refs and objects
+    assert modes[common / "hooks"] == "ro"  # but not what steers host-side git
+    assert modes[common / "config"] == "ro"
+    assert any(isinstance(b, Seal) for b in spec.binds)  # siblings are absent
+
+
+@pytest.mark.parametrize("unshare_net", [True, False])
+def test_the_pack_pin_follows_the_network_mode(tmp_path, unshare_net):
+    """Pinned when the box has its own namespace, absent when it shares the
+    host's. The pin is what stops an in-box gc pruning a sibling's objects, and
+    its cost is that index-pack cannot run -- which only matters in a box that
+    could have fetched in the first place."""
+    wt, _, _ = _linked_worktree(tmp_path)
+    (tmp_path / "state").mkdir()
+    spec = claude_code(wt, state=tmp_path / "state", unshare_net=unshare_net)
+    packs = (tmp_path / "main" / ".git" / "objects" / "pack").resolve()
+    # Asked of the bind list rather than the resolved mounts: when the pin is
+    # absent the path is not a mount point at all, it is writable through the
+    # common .git bind above it.
+    pinned = Bind(packs, RO) in spec.binds
+    assert pinned is unshare_net
+
+
+def test_a_plain_checkout_gets_no_git_policy_at_all(tmp_path):
+    """The hazard is a .git SHARED with worktrees the box cannot see. A plain
+    checkout's .git is inside the rw root and inside the session's perimeter,
+    so the policy is empty rather than merely harmless."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    state = tmp_path / "state"
+    state.mkdir()
+    spec = claude_code(repo, state=state, unshare_net=True)
+    assert spec.binds == (Bind(state, RW),)  # the state dir, and nothing else
+
+
+@pytest.mark.parametrize(
+    "preset",
+    [
+        lambda wt, st: claude_code(wt, state=st, unshare_net=True),
+        lambda wt, st: codex(wt, state=st, unshare_net=True),
+        lambda wt, st: opencode(wt, state=st, unshare_net=True),
+        lambda wt, st: v8_job(wt, unshare_net=True),
+    ],
+)
+def test_every_preset_disables_git_gc_in_the_box(tmp_path, preset):
+    """Through the environment, so it needs no host state and cannot outlive
+    the box. Defence in depth rather than the guard -- the pack pin is the
+    guard -- but it stops the automatic path before it starts."""
+    wt, _, _ = _linked_worktree(tmp_path)
+    env = dict(preset(wt, tmp_path / "state").env)
+    assert env["GIT_CONFIG_COUNT"] == "3"
+    keys = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(3)}
+    assert keys == {
+        "gc.auto": "0",
+        "gc.pruneExpire": "never",
+        "gc.worktreePruneExpire": "never",
+    }
+
+
+async def test_an_in_box_gc_cannot_destroy_a_sibling_worktrees_objects(tmp_path):
+    """The regression this policy exists for, from inside a real box.
+
+    The chain it breaks: the box binds the SHARED .git but not the sibling
+    worktrees' directories, so git concludes those worktrees were deleted (it
+    reports them `prunable`), and the seal that stops it acting on that also
+    removes their HEAD and index as reachability roots -- after which a gc
+    prunes objects only they reference, out of a store the host is still using.
+    Measured before the pin: the sibling's commit was destroyed and it was left
+    at "fatal: bad object HEAD".
+
+    Asserted on the HOST after the box exits, because that is where the damage
+    would be, and with `--prune=now` because the danger is the command an agent
+    types rather than the one git runs on its own.
+    """
+    wt, sib, sha = _linked_worktree(tmp_path)
+    spec = claude_code(wt, state=tmp_path / "state", unshare_net=True)
+    (tmp_path / "state").mkdir()
+    box = Box(spec, box_id=f"gc-{tmp_path.name}")
+    with box.staged():
+        out = await run_boxed(
+            f"cd {wt} && git gc --prune=now; git status --porcelain", sandbox=box
+        )
+    # The session's own git still works: the point is a guard, not a broken box.
+    assert "exit 0" in out
+    alive = subprocess.run(
+        ["git", "cat-file", "-e", sha], cwd=tmp_path / "main", check=False
+    )
+    assert alive.returncode == 0, f"the sibling's commit was collected:\n{out}"
+    still_registered = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=sib,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert still_registered.returncode == 0, f"the sibling worktree was broken:\n{out}"

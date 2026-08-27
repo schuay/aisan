@@ -11,18 +11,40 @@
 == tmpfs mounts (mounted before binds; intended writable scratch) ==
   [..] <TMP>  (2147483648)
   [..] <HOME>  (1073741824  <- $HOME)
+  [..] <MAIN>/.git/worktrees  (no size)
 
 == binds in argv order (later shadows earlier on overlap) ==
   [..] system   /usr
   [..] system   /etc
   [..] system   /run/systemd/journal/stdout
   [..] rw-root  <ROOT>
+  [..] rw       <MAIN>/.git
+  [..] ro-pin   <ROOT>/.git
+  [..] ro-pin   <MAIN>/.git/config
+  [..] ro-pin   <MAIN>/.git/config.worktree
+  [..] ro-pin   <MAIN>/.git/objects/info/alternates
+  [..] ro-pin   <MAIN>/.git/hooks
+  [..] rw       <MAIN>/.git/worktrees/wt
+  [..] ro-pin   <MAIN>/.git/worktrees/wt/commondir
+  [..] ro-pin   <MAIN>/.git/worktrees/wt/config.worktree
+  [..] ro-pin   <MAIN>/.git/objects/pack
   <AISAN RUNTIME>
+  [..] seal-ro  <MAIN>/.git/worktrees
+
+== sealed directories (empty in the box; nothing creatable) ==
+  <MAIN>/.git/worktrees
 
 == environment (the box's complete environment; --clearenv first) ==
   AI_AGENT=aisan
   CODEX_HOME=<ROOT>/.aisan-codex-state
   DEBIAN_FRONTEND=noninteractive
+  GIT_CONFIG_COUNT=3
+  GIT_CONFIG_KEY_0=gc.auto
+  GIT_CONFIG_KEY_1=gc.pruneExpire
+  GIT_CONFIG_KEY_2=gc.worktreePruneExpire
+  GIT_CONFIG_VALUE_0=0
+  GIT_CONFIG_VALUE_1=never
+  GIT_CONFIG_VALUE_2=never
   GIT_PAGER=cat
   GIT_TERMINAL_PROMPT=0
   HOME=<HOME>
@@ -78,7 +100,41 @@
   --bind
   <ROOT>
   <ROOT>
+  --bind
+  <MAIN>/.git
+  <MAIN>/.git
+  --ro-bind
+  <ROOT>/.git
+  <ROOT>/.git
+  --ro-bind
+  <MAIN>/.git/config
+  <MAIN>/.git/config
+  --ro-bind
+  <MAIN>/.git/config.worktree
+  <MAIN>/.git/config.worktree
+  --ro-bind
+  <MAIN>/.git/objects/info/alternates
+  <MAIN>/.git/objects/info/alternates
+  --ro-bind
+  <MAIN>/.git/hooks
+  <MAIN>/.git/hooks
+  --tmpfs
+  <MAIN>/.git/worktrees
+  --bind
+  <MAIN>/.git/worktrees/wt
+  <MAIN>/.git/worktrees/wt
+  --ro-bind
+  <MAIN>/.git/worktrees/wt/commondir
+  <MAIN>/.git/worktrees/wt/commondir
+  --ro-bind
+  <MAIN>/.git/worktrees/wt/config.worktree
+  <MAIN>/.git/worktrees/wt/config.worktree
+  --ro-bind
+  <MAIN>/.git/objects/pack
+  <MAIN>/.git/objects/pack
   <AISAN RUNTIME>
+  --remount-ro
+  <MAIN>/.git/worktrees
   --unshare-pid
   --unshare-ipc
   --unshare-uts
@@ -101,6 +157,27 @@
   --setenv
   AI_AGENT
   aisan
+  --setenv
+  GIT_CONFIG_COUNT
+  3
+  --setenv
+  GIT_CONFIG_KEY_0
+  gc.auto
+  --setenv
+  GIT_CONFIG_VALUE_0
+  0
+  --setenv
+  GIT_CONFIG_KEY_1
+  gc.pruneExpire
+  --setenv
+  GIT_CONFIG_VALUE_1
+  never
+  --setenv
+  GIT_CONFIG_KEY_2
+  gc.worktreePruneExpire
+  --setenv
+  GIT_CONFIG_VALUE_2
+  never
   --setenv
   HOME
   <HOME>

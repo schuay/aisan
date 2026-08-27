@@ -35,18 +35,9 @@ import shutil
 from pathlib import Path
 
 from ..egress.base import Backend
-from ..gitbinds import external_symlink_targets, git_binds
+from ..gitbinds import GC_ENV, external_symlink_targets, git_binds
 from ..sandbox import RO, Bind, BindSpec, Overlay
 from ..spec import DEFANG_ENV, BoxSpec, Limits
-
-# In-sandbox git must not auto-gc: the common .git is bound rw, so a repack
-# triggered from a job turn would rewrite the SHARED packed-refs/objects out
-# from under the main checkout and any concurrent worktree. Disable it.
-_GIT_ENV = (
-    ("GIT_CONFIG_COUNT", "1"),
-    ("GIT_CONFIG_KEY_0", "gc.auto"),
-    ("GIT_CONFIG_VALUE_0", "0"),
-)
 
 # `git cl presubmit` fetches the live CL description and validates OWNERS
 # against Gerrit, both over authenticated /a/ endpoints. Those need an SSO
@@ -154,7 +145,7 @@ def v8_job(
     binds: list[BindSpec] = [
         *(Overlay(p) for p in _tool_cache_overlays()),
         *(Bind(p, RO, optional=True) for p in ro),
-        *git_binds(worktree),
+        *git_binds(worktree, pin_packs=unshare_net),
     ]
     return BoxSpec(
         root=worktree,
@@ -175,7 +166,7 @@ def v8_job(
             *DEFANG_ENV.items(),
             ("HOME", str(home)),
             ("PATH", path_env),
-            *_GIT_ENV,
+            *GC_ENV,
             *_PRESUBMIT_ENV,
         ),
         egress=egress,
