@@ -99,3 +99,37 @@ def test_claude_defaults_to_the_anthropic_api(monkeypatch):
     args, payload = module.parse_args([])
     assert args.upstream == DEFAULT_UPSTREAM
     assert payload == []
+
+
+def test_user_memory_lands_where_the_cli_reads_it(tmp_path):
+    """The state dir is CLAUDE_CONFIG_DIR, which is where user memory is read
+    from -- a mirror anywhere else is a file the box never opens."""
+    claude = importlib.import_module("aisan.cli.claude")
+    state = tmp_path / "state"
+    state.mkdir()
+    source = tmp_path / "CLAUDE.md"
+    source.write_text("host memory\n")
+
+    claude.seed_user_memory(state, source)
+    assert (state / "CLAUDE.md").read_text() == "host memory\n"
+
+    # The host file is the source of truth: an in-box edit lasts one session.
+    (state / "CLAUDE.md").write_text("agent memory\n")
+    source.write_text("host memory, edited\n")
+    claude.seed_user_memory(state, source)
+    assert (state / "CLAUDE.md").read_text() == "host memory, edited\n"
+
+
+def test_a_host_without_user_memory_leaves_the_state_dir_alone(tmp_path):
+    """Nothing here can tell a stale mirror from memory the agent wrote, so a
+    missing source seeds nothing rather than deleting the operator's file."""
+    claude = importlib.import_module("aisan.cli.claude")
+    state = tmp_path / "state"
+    state.mkdir()
+
+    claude.seed_user_memory(state, tmp_path / "absent.md")
+    assert not (state / "CLAUDE.md").exists()
+
+    (state / "CLAUDE.md").write_text("agent memory\n")
+    claude.seed_user_memory(state, tmp_path / "absent.md")
+    assert (state / "CLAUDE.md").read_text() == "agent memory\n"
