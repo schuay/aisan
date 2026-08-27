@@ -76,11 +76,14 @@ def test_header_allowlist_forwards_protocol_and_drops_everything_else():
     # Credentials: always ours, never the box's.
     assert not h.permits("x-api-key")
     assert not h.permits("authorization")
+    # An identifier, not protocol: forwarded so a session-keyed upstream can
+    # tell two boxed sessions apart, at the cost of the box choosing the value.
+    assert h.permits("x-claude-code-session-id")
     # Telemetry describing a machine that is not the host.
     assert not h.permits("x-stainless-os")
     assert not h.permits("x-stainless-runtime-version")
     assert not h.permits("user-agent")
-    assert not h.permits("x-claude-code-session-id")
+    assert not h.permits("x-app")
     # Framing the host half's own connection computes for itself.
     assert not h.permits("host")
     assert not h.permits("content-length")
@@ -171,6 +174,7 @@ async def test_the_boxs_key_is_dropped_and_the_real_bearer_attached(tmp_path):
                     "anthropic-beta": "claude-code-20250219",
                     "x-stainless-os": "Linux",
                     "user-agent": "claude-cli/2.1.219",
+                    "x-claude-code-session-id": "a-session-the-box-opened",
                 },
             ) as r,
         ):
@@ -183,6 +187,9 @@ async def test_the_boxs_key_is_dropped_and_the_real_bearer_attached(tmp_path):
     assert got["anthropic-version"] == "2023-06-01"
     assert got["anthropic-beta"] == "claude-code-20250219"
     assert "x-stainless-os" not in got
+    # Forwarded VERBATIM, which is the trade: an upstream keying state off it
+    # can tell boxed sessions apart, and the value is whatever the box sent.
+    assert got["x-claude-code-session-id"] == "a-session-the-box-opened"
     # aiohttp sets its own user-agent on the outbound request, so the assertion
     # is that the BOX's did not survive, not that the header is absent.
     assert got.get("user-agent", "") != "claude-cli/2.1.219"

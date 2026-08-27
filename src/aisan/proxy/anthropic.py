@@ -26,7 +26,8 @@ allowlist in both directions:
 
 - FORWARDED: what the API needs to answer correctly. `anthropic-version` and
   `anthropic-beta` (protocol selectors, measured required), `accept` (the client
-  asks for SSE and parses what it asked for).
+  asks for SSE and parses what it asked for). Plus `x-claude-code-session-id`,
+  which is none of those and is explained on its own below.
 - DROPPED, always: `x-api-key` and `authorization`. The box's key is a
   placeholder by construction, so forwarding it forwards nothing useful -- and a
   prompt-injected agent that sets one would be choosing the string we send
@@ -34,13 +35,36 @@ allowlist in both directions:
   `content-length`, `accept-encoding`): the client session computes those for the
   connection it actually opens, and a forwarded copy describes the wrong one.
 - DROPPED, by judgement: the `x-stainless-*` set (arch, os, lang, runtime,
-  runtime-version, package-version, retry-count, timeout), plus `user-agent`,
-  `x-app` and `x-claude-code-session-id`. These are SDK telemetry. Six of them
-  describe the MACHINE -- operating system, architecture, runtime version -- and
-  the point of the box is that it is not the host; the rest name a client
-  session the host half did not open. None is required: verified by driving a
-  real `claude -p` through this proxy with them dropped. Dropping is the
+  runtime-version, package-version, retry-count, timeout), plus `user-agent`
+  and `x-app`. These are SDK telemetry. Six of them describe the MACHINE --
+  operating system, architecture, runtime version -- and the point of the box
+  is that it is not the host. None is required: verified by driving a real
+  `claude -p` through this proxy with them dropped. Dropping is the
   fail-closed direction and it costs nothing measurable.
+
+`x-claude-code-session-id` is forwarded, and it is the one entry here that buys
+something at a cost rather than nothing at a cost. It is a client-generated
+identifier for the session making the request. The API does not require it --
+`claude -p` completes with it dropped -- but an upstream that keys PER-SESSION
+state off it cannot tell two boxed sessions apart without it, and collapses
+every one of them into a single bucket. That is the whole reason it is here: an
+operator pointing this proxy at such an upstream gets per-session behaviour that
+matches an unsandboxed client, which is the parity the box is otherwise trying
+to preserve.
+
+What it costs is a difference in KIND from the other three. Those are protocol:
+box-chosen bytes whose effect is bounded by the API's own parser. An identifier
+is bytes an upstream may use as a state key, so forwarding it means the box can
+name a session it did not open -- writing its own state into another session's
+bucket, on an upstream that trusts the id. It is not a credential and it does
+not describe the host, which is what separates it from the set above; it is a
+capability only against an upstream that treats client-supplied ids as
+authoritative, and such an upstream has to namespace or sanitise them anyway.
+
+The narrower rule -- forward it only for upstreams that want it -- is
+deliberately NOT taken: it would make this allowlist depend on which upstream a
+caller configured, and a boundary whose strength depends on the last caller is
+the property this module exists to avoid.
 
 Everything not named is dropped. A new header the client starts sending arrives
 as "the API behaves slightly differently", which is a debuggable outcome; the
@@ -93,6 +117,10 @@ FORWARD_HEADERS = frozenset(
         "anthropic-version",
         "anthropic-beta",
         "accept",
+        # Not protocol: an identifier, forwarded so a session-keyed upstream can
+        # tell boxed sessions apart. The box chooses its value -- see the module
+        # docstring for what that is and is not worth.
+        "x-claude-code-session-id",
     }
 )
 
