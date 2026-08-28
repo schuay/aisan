@@ -114,10 +114,11 @@ class ReapiBackend(Backend):
     # capability for anything on the machine, and the insecure mode this module's
     # docstring describes leaves the box nothing to prove itself with.
     #
-    # TODO(jgruber): give shared-net boxes an explicit opt-in that binds
-    # LUCI_STORE ro and lets siso authenticate itself -- acceptable only because
-    # these boxes are local and semi-unattended, and deliberately something that
-    # has to defeat the credential guard below rather than pass it quietly.
+    # A shared-net box takes the other route instead: the `rbe-with-net-unsafe`
+    # egress profile mounts LUCI_STORE and lets siso authenticate as the
+    # operator. Naming the store below is what keeps the two mutually exclusive
+    # -- asking for both refuses on the credential guard rather than serving a
+    # proxy to a box that already holds the credential.
     supports_shared_net = False
 
     def __init__(

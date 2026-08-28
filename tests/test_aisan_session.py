@@ -265,3 +265,49 @@ def test_naming_one_profile_twice_is_not_two_of_it(tmp_path, command):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.count("rbe.sock") == 1
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_the_shared_net_profile_is_the_one_that_survives_net(tmp_path, command):
+    # The other profile refuses --net; this one exists for it. What it grants is
+    # a mount of the credential store, so the launch has to say so.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tmp_path / "home" / ".config" / "chrome_infra" / "auth").mkdir(parents=True)
+
+    result = _cli(
+        tmp_path,
+        [command, "--egress", "rbe-with-net-unsafe", "--net", "--explain", str(repo)],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "chrome_infra" in result.stdout
+    assert "luci credential" in result.stderr
+
+
+@pytest.mark.parametrize("command", ["claude"])
+def test_the_two_rbe_profiles_are_mutually_exclusive(tmp_path, command):
+    # One keeps the credential on the host and serves a proxy; the other hands
+    # the box the credential. Together they would serve a proxy to a box that
+    # already holds what the proxy exists to withhold, and the credential guard
+    # is what says so.
+    repo = tmp_path / "repo"
+    (repo / "build" / "config" / "siso").mkdir(parents=True)
+    (repo / "build" / "config" / "siso" / ".sisoenv").write_text("SISO_PROJECT=x\n")
+    (tmp_path / "home" / ".config" / "chrome_infra" / "auth").mkdir(parents=True)
+
+    result = _cli(
+        tmp_path,
+        [
+            command,
+            "--egress",
+            "v8-rbe",
+            "--egress",
+            "rbe-with-net-unsafe",
+            "--explain",
+            str(repo),
+        ],
+    )
+
+    assert "REFUSED" in result.stdout + result.stderr
+    assert "expose the rbe backend's credential" in result.stdout + result.stderr

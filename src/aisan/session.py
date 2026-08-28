@@ -97,9 +97,10 @@ def interactive_parser(prog: str, executable: str) -> argparse.ArgumentParser:
         metavar="NAME",
         action="append",
         choices=sorted(EGRESS_PROFILES),
-        help="add a named egress profile's backends to the box (one of:"
-        f" {', '.join(sorted(EGRESS_PROFILES))}). Repeatable; needs the"
-        " isolated network, so not with --net",
+        help="add a named egress profile's backends and mounts to the box"
+        f" (one of: {', '.join(sorted(EGRESS_PROFILES))}). Repeatable; a"
+        " profile serving a proxy needs the isolated network, so not with"
+        " --net",
     )
     parser.add_argument(
         "--explain",
@@ -179,20 +180,12 @@ async def run_interactive(
     """Apply egress profiles and user binds, explain or run, keep the status."""
     # Before the user files, because `userbinds.load` refuses a bind that would
     # expose a backend's credential and can only refuse the backends it is given.
-    if egress_profiles and not spec.unshare_net:
-        print(
-            "--egress needs the box's own network: on the host's loopback the"
-            " backend would be an unauthenticated credential capability for"
-            " anything on this machine. Drop --net.",
-            file=sys.stderr,
-        )
-        return 2
     # Named once each: the flag is repeatable so several profiles compose, and
     # naming one twice is a typo rather than a request for two of it -- which
     # BoxSpec would refuse anyway, on a port collision nobody typed.
     for name in dict.fromkeys(egress_profiles or []):
-        backends = EGRESS_PROFILES[name](repo)
-        if not backends:
+        profile = EGRESS_PROFILES[name](repo)
+        if not profile:
             # A profile whose tree has nothing for it is not a refusal, but it
             # must not be silent either: the operator asked for a route, and a
             # box that quietly has none looks identical to one that works.
@@ -202,11 +195,28 @@ async def run_interactive(
                 file=sys.stderr,
             )
             continue
+        # Per profile rather than for --egress as a whole, because whether a
+        # route survives a shared namespace is a property of its transport: a
+        # backend without the authenticated host-loopback path would be a
+        # credential capability for everything on the machine, while a profile
+        # that is only mounts has no port to expose.
+        stranded = [b.name for b in profile.backends if not b.supports_shared_net]
+        if stranded and not spec.unshare_net:
+            print(
+                f"--egress {name} needs the box's own network: {', '.join(stranded)}"
+                " would otherwise answer on the host's loopback, unauthenticated."
+                " Drop --net.",
+                file=sys.stderr,
+            )
+            return 2
         try:
-            spec = spec.with_egress(list(backends))
+            spec = spec.with_egress(list(profile.backends))
         except ValueError as e:
             print(f"--egress {name}: {e}", file=sys.stderr)
             return 2
+        spec = spec.with_binds(list(profile.binds))
+        if profile.notice:
+            print(profile.notice, file=sys.stderr)
 
     # In the order given, each file applied whole: later-wins is the model's
     # only precedence rule, so two files compose the same way two entries in

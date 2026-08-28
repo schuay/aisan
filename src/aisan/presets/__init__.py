@@ -20,12 +20,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from ..egress.base import Backend
+from ..egress.base import EgressProfile
 from ..spec import BoxSpec
 from .claude_code import claude_code, claude_code_default
 from .codex import codex, codex_default
 from .opencode import opencode, opencode_default
-from .v8_job import v8_job, v8_job_default, v8_rbe
+from .v8_job import v8_job, v8_job_default, v8_rbe, v8_rbe_shared_net
 
 PRESETS: dict[str, Callable[[Path], BoxSpec]] = {
     "claude_code": claude_code_default,
@@ -39,8 +39,12 @@ PRESETS: dict[str, Callable[[Path], BoxSpec]] = {
 # egress route -- an RBE project, where a checkout keeps its config -- lives in
 # the preset module that already owns those facts, and the launchers know only
 # that names exist.
-EGRESS_PROFILES: dict[str, Callable[[Path], tuple[Backend, ...]]] = {
+EGRESS_PROFILES: dict[str, Callable[[Path], EgressProfile]] = {
     "v8-rbe": v8_rbe,
+    # The shared-network route, which trades the proxy's whole property away.
+    # Spelled out in the name because the flag is the only place an operator
+    # sees the choice.
+    "rbe-with-net-unsafe": v8_rbe_shared_net,
 }
 
 __all__ = [
@@ -55,4 +59,5 @@ __all__ = [
     "v8_job",
     "v8_job_default",
     "v8_rbe",
+    "v8_rbe_shared_net",
 ]

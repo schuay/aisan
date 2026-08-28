@@ -34,7 +34,7 @@ import os
 import shutil
 from pathlib import Path
 
-from ..egress.base import Backend
+from ..egress.base import Backend, EgressProfile
 from ..gitbinds import GC_ENV, external_symlink_targets, git_binds
 from ..sandbox import RO, Bind, BindSpec, Overlay
 from ..spec import DEFANG_ENV, BoxSpec, Limits
@@ -120,8 +120,8 @@ def sisoenv_paths(root: Path) -> list[Path]:
     return sorted(found)
 
 
-def v8_rbe(root: Path) -> tuple[Backend, ...]:
-    """The RBE backend for a box rooted at a V8 tree, or nothing.
+def v8_rbe(root: Path) -> EgressProfile:
+    """Remote builds through the host-side proxy, for a box with its own network.
 
     The `EGRESS_PROFILES` entry. Imported inside the function because the
     backend pulls in the proxy stack, and a preset import should not.
@@ -132,7 +132,43 @@ def v8_rbe(root: Path) -> tuple[Backend, ...]:
     from ..egress.reapi import ReapiBackend
 
     paths = sisoenv_paths(root)
-    return (ReapiBackend(project=RBE_PROJECT, sisoenv=paths),) if paths else ()
+    if not paths:
+        return EgressProfile()
+    return EgressProfile(backends=(ReapiBackend(project=RBE_PROJECT, sisoenv=paths),))
+
+
+def v8_rbe_shared_net(_root: Path) -> EgressProfile:
+    """Remote builds for a `--net` box, by giving it the luci credential.
+
+    The proxy cannot serve a shared namespace -- its loopback is the host's, so
+    the port would be usable by anything on the machine -- and siso in insecure
+    mode has nothing to prove itself with. The remaining route is the one the
+    proxy exists to avoid: mount the store and let the build authenticate as the
+    operator.
+
+    What that costs is stated rather than implied. The box gets a cloud-scoped
+    luci token for as long as it runs, and that token resolves to the full user
+    account at chromium-review (see `mint.rbe_token`), so this is a session that
+    could push a CL. It is offered because these boxes are local and
+    semi-unattended, and it is named `unsafe` in the registry so no one reaches
+    for it by accident.
+
+    RO, per `Overlay`'s own rule: a credential is what the box must not change
+    even locally. A token refresh that wants to write its cache will fail to
+    cache; it will not fail to mint.
+    """
+    from ..egress.reapi import LUCI_STORE
+
+    if not LUCI_STORE.is_dir():
+        return EgressProfile()
+    return EgressProfile(
+        binds=(Bind(LUCI_STORE, RO),),
+        notice=(
+            f"WARNING: {LUCI_STORE} is mounted in the box: the session holds a"
+            " luci credential that resolves to your full account, chromium-review"
+            " included, for as long as it runs."
+        ),
+    )
 
 
 def v8_job(

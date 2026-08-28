@@ -29,8 +29,15 @@ import pytest
 
 from aisan import Box
 from aisan.egress.reapi import ReapiBackend
-from aisan.presets.v8_job import sisoenv_path, sisoenv_paths, v8_job, v8_rbe
+from aisan.presets.v8_job import (
+    sisoenv_path,
+    sisoenv_paths,
+    v8_job,
+    v8_rbe,
+    v8_rbe_shared_net,
+)
 from aisan.proxy.rbe import UPSTREAM_HOST
+from aisan.sandbox import RO
 
 PROJECT = "rbe-chromium-untrusted"
 
@@ -210,10 +217,10 @@ def test_the_profile_finds_the_checkouts_and_dedupes_the_shared_file(tmp_path):
     (root / "wt" / "build").symlink_to(root / "main" / "build")
 
     assert sisoenv_paths(root) == sorted({main / ".sisoenv", other / ".sisoenv"})
-    (backend,) = v8_rbe(root)
+    (backend,) = v8_rbe(root).backends
     assert backend.name == "rbe"
     # Nothing to override is a box without the fast path, not a refusal.
-    assert v8_rbe(tmp_path / "empty") == ()
+    assert not v8_rbe(tmp_path / "empty")
 
 
 def test_a_single_sisoenv_may_arrive_as_a_string(tmp_path):
@@ -233,3 +240,26 @@ def test_a_single_sisoenv_may_arrive_as_a_string(tmp_path):
     overrides = [b for b in backend.box_binds(rt) if b.dst != Path("/etc/hosts")]
 
     assert [b.dst for b in overrides] == [dst]
+
+
+def test_the_shared_net_profile_mounts_the_credential_and_says_so(
+    monkeypatch, tmp_path
+):
+    # The route that trades the proxy's property away: no backend, because the
+    # box talks to Google itself, and the mount is the whole grant. RO -- a
+    # credential is what the box must not change even locally.
+    store = tmp_path / "chrome_infra"
+    (store / "auth").mkdir(parents=True)
+    monkeypatch.setattr("aisan.egress.reapi.LUCI_STORE", store)
+
+    profile = v8_rbe_shared_net(tmp_path)
+
+    assert profile.backends == ()
+    assert [(b.path, b.mode) for b in profile.binds] == [(store, RO)]
+    assert "luci credential" in profile.notice
+
+
+def test_the_shared_net_profile_needs_a_store_to_mount(monkeypatch, tmp_path):
+    monkeypatch.setattr("aisan.egress.reapi.LUCI_STORE", tmp_path / "absent")
+
+    assert not v8_rbe_shared_net(tmp_path)

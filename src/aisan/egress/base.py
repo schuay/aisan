@@ -194,6 +194,31 @@ class Backend(abc.ABC):
         yield  # pragma: no cover -- makes this an async generator for typing
 
 
+@dataclass(frozen=True)
+class EgressProfile:
+    """What one `--egress NAME` contributes to a box.
+
+    Backends are the usual grant: a host half holding the credential, and an
+    endpoint in the box. `binds` is for the route that has no host half -- a
+    box reaching a service directly, with the credential mounted -- and it is
+    what makes such a profile expressible without teaching the launcher what
+    the mount is for.
+
+    `notice` is printed by the launcher when the profile applies. A preset may
+    not do anything a caller could not have written by hand, printing included,
+    but a profile that widens the boundary has to announce itself: carrying the
+    sentence as data leaves the knowledge in the profile and the printing in the
+    launcher.
+    """
+
+    backends: tuple[Backend, ...] = ()
+    binds: tuple[BindSpec, ...] = ()
+    notice: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.backends or self.binds)
+
+
 def credential_exposure(
     binds: tuple[BindSpec, ...], backends: tuple[Backend, ...]
 ) -> tuple[Path, Backend, Path] | None:
