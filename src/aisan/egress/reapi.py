@@ -109,19 +109,15 @@ class ReapiBackend(Backend):
     name = "rbe"
     port = PORT
 
-    # Stays False, and the reason is the transport rather than an omission: under
-    # --net the relay's loopback IS the host's, so the port would be an
-    # unauthenticated credential capability for anything on the machine. siso
-    # runs -reapi_insecure and gRPC-Go will not attach credentials on an insecure
-    # connection, so the box has no standard way to prove which box it is.
+    # False by transport rather than by omission: under --net the relay's
+    # loopback IS the host's, so the port would be an unauthenticated credential
+    # capability for anything on the machine, and the insecure mode this module's
+    # docstring describes leaves the box nothing to prove itself with.
     #
     # TODO(jgruber): give shared-net boxes an explicit opt-in that binds
-    # LUCI_STORE ro and lets siso authenticate itself. That hands the box a
-    # cloud-scoped luci token -- Gerrit-capable while it lives, see
-    # mint.rbe_token -- and is acceptable only because these boxes are local and
-    # semi-unattended. It also has to defeat the credential guard the
-    # `credentials` tuple below arms, deliberately: the grant should be a line
-    # somebody wrote, not a bind that quietly passes.
+    # LUCI_STORE ro and lets siso authenticate itself -- acceptable only because
+    # these boxes are local and semi-unattended, and deliberately something that
+    # has to defeat the credential guard below rather than pass it quietly.
     supports_shared_net = False
 
     def __init__(
@@ -142,9 +138,13 @@ class ReapiBackend(Backend):
         # Several, because a box is not always rooted at one checkout: a gclient
         # root holds the main tree and its worktrees, and worktrees on different
         # DEPS hashes resolve to DIFFERENT shared .sisoenv files. Binding one of
-        # them leaves the rest reading the checkout's own bare instance name,
-        # which Google rejects as CONSUMER_INVALID.
-        self._sisoenv_dsts = (sisoenv,) if isinstance(sisoenv, Path) else tuple(sisoenv)
+        # them leaves the rest reading their own bare instance name.
+        #
+        # A str is one path, not an iterable of them: tuple() over it yields a
+        # destination per CHARACTER, and bwrap would be handed fifteen mounts
+        # nobody asked for rather than a refusal.
+        one = isinstance(sisoenv, str | Path)
+        self._sisoenv_dsts = (Path(sisoenv),) if one else tuple(sisoenv)
         self.credentials = (LUCI_STORE,)
         self._token = RefreshingToken(mint or mint_rbe_token)
 

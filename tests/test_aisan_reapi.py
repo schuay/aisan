@@ -168,12 +168,9 @@ async def test_the_box_holds_no_luci_credential(tmp_path):
 
 
 def test_every_checkout_under_the_root_gets_the_override(tmp_path):
-    # A box rooted above several checkouts is the interactive shape: a gclient
-    # root holds the main tree and its worktrees, and worktrees on different DEPS
-    # hashes resolve to DIFFERENT shared .sisoenv files. One bind-over would
-    # leave the rest reading their own bare instance name, which Google rejects
-    # as CONSUMER_INVALID -- a mid-build failure in exactly the trees the
-    # operator did not test.
+    # A box rooted above several checkouts is the interactive shape, and one
+    # bind-over would leave every other checkout on its own instance name: a
+    # mid-build failure in exactly the trees the operator did not test.
     root = tmp_path / "root"
     dsts = []
     for name in ("main", "wt-a", "wt-b"):
@@ -217,3 +214,22 @@ def test_the_profile_finds_the_checkouts_and_dedupes_the_shared_file(tmp_path):
     assert backend.name == "rbe"
     # Nothing to override is a box without the fast path, not a refusal.
     assert v8_rbe(tmp_path / "empty") == ()
+
+
+def test_a_single_sisoenv_may_arrive_as_a_string(tmp_path):
+    # str is iterable, so the multi-destination branch would silently turn one
+    # path into a destination per character.
+    dst = tmp_path / "build" / "config" / "siso" / ".sisoenv"
+    dst.parent.mkdir(parents=True)
+    dst.touch()
+    rt = tmp_path / "rt"
+    rt.mkdir()
+    backend = ReapiBackend(
+        project=PROJECT,
+        sisoenv=str(dst),
+        mint=lambda: asyncio.sleep(0, result="fake-token"),
+    )
+    backend.prepare(rt)
+    overrides = [b for b in backend.box_binds(rt) if b.dst != Path("/etc/hosts")]
+
+    assert [b.dst for b in overrides] == [dst]

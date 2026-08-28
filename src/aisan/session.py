@@ -187,8 +187,26 @@ async def run_interactive(
             file=sys.stderr,
         )
         return 2
-    for name in egress_profiles or []:
-        spec = spec.with_egress(list(EGRESS_PROFILES[name](repo)))
+    # Named once each: the flag is repeatable so several profiles compose, and
+    # naming one twice is a typo rather than a request for two of it -- which
+    # BoxSpec would refuse anyway, on a port collision nobody typed.
+    for name in dict.fromkeys(egress_profiles or []):
+        backends = EGRESS_PROFILES[name](repo)
+        if not backends:
+            # A profile whose tree has nothing for it is not a refusal, but it
+            # must not be silent either: the operator asked for a route, and a
+            # box that quietly has none looks identical to one that works.
+            print(
+                f"NOTE: egress profile {name} found nothing to serve in {repo};"
+                " the box gets no route from it.",
+                file=sys.stderr,
+            )
+            continue
+        try:
+            spec = spec.with_egress(list(backends))
+        except ValueError as e:
+            print(f"--egress {name}: {e}", file=sys.stderr)
+            return 2
 
     # In the order given, each file applied whole: later-wins is the model's
     # only precedence rule, so two files compose the same way two entries in

@@ -56,6 +56,27 @@ def test_staged_directory_removes_only_what_it_created(tmp_path):
     assert not (existing / "client").exists()
 
 
+def _cli(tmp_path, argv):
+    """A launcher run against a HOME of its own.
+
+    The scrub matters: the launchers discover host MCP config through these
+    variables, and one inherited from THIS environment (an aisan box exports
+    OPENCODE_CONFIG) leaks the host's servers into a test that owns only HOME.
+    """
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env["HOME"] = str(home)
+    return subprocess.run(
+        [sys.executable, "-m", "aisan.cli.main", *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -67,56 +88,18 @@ def test_staged_directory_removes_only_what_it_created(tmp_path):
 def test_explain_leaves_no_persistent_session_state(tmp_path, command):
     repo = tmp_path / "repo"
     repo.mkdir()
-    home = tmp_path / "home"
-    home.mkdir()
-    # The launchers discover host MCP config through these when set; without
-    # the scrub, a value inherited from THIS environment (an aisan box exports
-    # OPENCODE_CONFIG) leaks the host's servers into a test that owns only HOME.
-    drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
-    env = {k: v for k, v in os.environ.items() if k not in drop}
-    env["HOME"] = str(home)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "aisan.cli.main",
-            command,
-            "--explain",
-            str(repo),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
+    result = _cli(tmp_path, [command, "--explain", str(repo)])
+
     assert result.returncode == 0, result.stderr
-    assert not (home / ".cache").exists()
+    assert not (tmp_path / "home" / ".cache").exists()
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_net_explain_describes_shared_transport_without_live_secrets(tmp_path, command):
     repo = tmp_path / "repo"
     repo.mkdir()
-    home = tmp_path / "home"
-    home.mkdir()
-    drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
-    env = {k: v for k, v in os.environ.items() if k not in drop}
-    env["HOME"] = str(home)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "aisan.cli.main",
-            command,
-            "--net",
-            "--explain",
-            str(repo),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
+    result = _cli(tmp_path, [command, "--net", "--explain", str(repo)])
+
     assert result.returncode == 0, result.stderr
     assert "shared host namespace" in result.stdout
     assert "authenticated host-loopback TCP" in result.stdout
@@ -212,22 +195,6 @@ def test_a_refused_bind_spec_stops_the_launch(tmp_path, command):
     assert str(bad) in result.stderr and "not covered" in result.stderr
 
 
-def _cli(tmp_path, argv):
-    """A launcher run with its own HOME, as the explain tests do."""
-    home = tmp_path / "home"
-    home.mkdir(exist_ok=True)
-    drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
-    env = {k: v for k, v in os.environ.items() if k not in drop}
-    env["HOME"] = str(home)
-    return subprocess.run(
-        [sys.executable, "-m", "aisan.cli.main", *argv],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
-
-
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_an_egress_profile_reaches_the_box(tmp_path, command):
     repo = tmp_path / "repo"
@@ -237,7 +204,9 @@ def test_an_egress_profile_reaches_the_box(tmp_path, command):
     result = _cli(tmp_path, [command, "--egress", "v8-rbe", "--explain", str(repo)])
 
     assert result.returncode == 0, result.stderr
-    assert "rbe" in result.stdout
+    # The backend's own line in the egress section, not any path that
+    # happens to spell it.
+    assert "rbe.sock" in result.stdout
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
@@ -264,3 +233,35 @@ def test_an_unknown_egress_profile_is_refused_by_name(tmp_path, command):
 
     assert result.returncode == 2
     assert "v8-rbe" in result.stderr
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_a_profile_that_finds_nothing_says_so(tmp_path, command):
+    # A tree the profile has nothing for is not a refusal, but silence would
+    # leave a box that looks identical to a working one: the operator asked for
+    # a route and got none.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = _cli(tmp_path, [command, "--egress", "v8-rbe", "--explain", str(repo)])
+
+    assert result.returncode == 0, result.stderr
+    assert "v8-rbe found nothing" in result.stderr
+    assert "rbe.sock" not in result.stdout
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_naming_one_profile_twice_is_not_two_of_it(tmp_path, command):
+    # Two of one backend collide on name and port, and BoxSpec refuses the mix.
+    # The operator typed a repeat, not a request for a second route.
+    repo = tmp_path / "repo"
+    (repo / "build" / "config" / "siso").mkdir(parents=True)
+    (repo / "build" / "config" / "siso" / ".sisoenv").write_text("SISO_PROJECT=x\n")
+
+    result = _cli(
+        tmp_path,
+        [command, "--egress", "v8-rbe", "--egress", "v8-rbe", "--explain", str(repo)],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("rbe.sock") == 1
