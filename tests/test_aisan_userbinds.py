@@ -240,3 +240,107 @@ def test_a_sibling_prefix_does_not_cover_a_path_entry(tmp_path):
     f = _spec_file(tmp_path, 'ro = ["/tools"]\npath = ["/toolsx"]\n')
     with pytest.raises(ValueError, match="not covered"):
         load(f)
+
+
+def _named_spec(path: Path, body: str) -> Path:
+    """A spec file at a path the caller chose.
+
+    `_spec_file` above always writes binds.toml; an include tree needs several
+    files that can name each other.
+    """
+    path.write_text(body)
+    return path
+
+
+def test_include_expands_in_place_and_the_includer_shadows(tmp_path):
+    # The point of the key: composition order is a fact about the files, not
+    # about the operator's shell history.
+    (tmp_path / "base").mkdir()
+    _named_spec(tmp_path / "base" / "tools.toml", 'ro = ["~/tools"]\n')
+    outer = _named_spec(
+        tmp_path / "outer.toml",
+        'include = ["base/tools.toml"]\nrw = ["~/tools"]\n',
+    )
+
+    spec = load(outer)
+
+    # Included first, so the rw the outer file names lands later and wins.
+    assert [(b.path, getattr(b, "mode", None)) for b in spec.binds] == [
+        (Path.home() / "tools", RO),
+        (Path.home() / "tools", RW),
+    ]
+
+
+def test_an_include_resolves_against_the_including_file(tmp_path):
+    # Same rule the mount keys follow, which is what lets a directory of specs
+    # name each other by basename.
+    (tmp_path / "d").mkdir()
+    _named_spec(tmp_path / "d" / "inner.toml", 'ro = ["~/inner"]\n')
+    outer = _named_spec(tmp_path / "d" / "outer.toml", 'include = ["inner.toml"]\n')
+
+    assert [b.path for b in load(outer).binds] == [Path.home() / "inner"]
+
+
+def test_a_diamond_mounts_once(tmp_path):
+    _named_spec(tmp_path / "leaf.toml", 'ro = ["~/leaf"]\n')
+    _named_spec(tmp_path / "mid.toml", 'include = ["leaf.toml"]\n')
+    top = _named_spec(tmp_path / "top.toml", 'include = ["leaf.toml", "mid.toml"]\n')
+
+    assert [b.path for b in load(top).binds] == [Path.home() / "leaf"]
+
+
+def test_an_include_cycle_is_refused_by_name(tmp_path):
+    a = _named_spec(tmp_path / "a.toml", 'include = ["b.toml"]\n')
+    _named_spec(tmp_path / "b.toml", 'include = ["a.toml"]\n')
+
+    with pytest.raises(ValueError, match="include cycle"):
+        load(a)
+
+
+def test_a_file_including_itself_is_a_cycle_not_a_repeat(tmp_path):
+    a = _named_spec(tmp_path / "self.toml", 'include = ["self.toml"]\n')
+
+    with pytest.raises(ValueError, match="include cycle"):
+        load(a)
+
+
+def test_a_missing_include_names_the_file_that_asked_for_it(tmp_path):
+    outer = _named_spec(tmp_path / "outer.toml", 'include = ["gone.toml"]\n')
+
+    with pytest.raises(ValueError, match=r"outer\.toml: include .*gone\.toml"):
+        load(outer)
+
+
+def test_a_path_entry_may_rest_on_an_included_mount(tmp_path):
+    # The coverage check counts what the file chose to include: both lines are
+    # still in front of the reader, one naming the file and one the directory.
+    _named_spec(tmp_path / "tools.toml", 'ro = ["~/tools"]\n')
+    outer = _named_spec(
+        tmp_path / "outer.toml",
+        'include = ["tools.toml"]\npath = ["~/tools/bin"]\n',
+    )
+
+    spec = load(outer)
+
+    assert spec.path == (Path.home() / "tools" / "bin",)
+
+
+def test_the_credential_guard_reaches_inside_an_include(tmp_path):
+    # The guard is the reason `load` takes the egress tuple, and an include is
+    # a second way for an unreviewed file to name the credential. The refusal
+    # names the file that wrote the line, not the one that included it.
+    creds = tmp_path / "creds.json"
+    creds.write_text("{}")
+    _named_spec(tmp_path / "inner.toml", f'ro = ["{creds.parent}"]\n')
+    outer = _named_spec(tmp_path / "outer.toml", 'include = ["inner.toml"]\n')
+
+    with pytest.raises(ValueError, match=r"inner\.toml: .* would expose"):
+        load(outer, egress=(AnthropicBackend(credentials=creds),))
+
+
+def test_a_malformed_include_names_the_inner_file(tmp_path):
+    _named_spec(tmp_path / "inner.toml", 'wr = ["~/typo"]\n')
+    outer = _named_spec(tmp_path / "outer.toml", 'include = ["inner.toml"]\n')
+
+    with pytest.raises(ValueError, match=r"inner\.toml: unknown key"):
+        load(outer)

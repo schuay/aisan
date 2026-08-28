@@ -37,7 +37,10 @@ the core does not depend on any one model or agent.
 - **User bind specs** (`--binds FILE`, repeatable) name paths to mount `ro`,
   `rw`, or `overlay`, plus `path` entries prepended to the box PATH. The key
   grants nothing on its own: every entry must be covered by a mount the same
-  file names. `examples/depot_tools.toml` is a worked example.
+  file names. `include` pulls in other spec files, expanded in place and
+  before the including file's own keys, so a growing collection composes in an
+  order the files state rather than one the command line implies.
+  `examples/depot_tools.toml` is a worked example.
 
 The REAPI transport is the largest specialized core component. Remote build
 clients such as siso can speak plaintext HTTP/2 to a local endpoint while the

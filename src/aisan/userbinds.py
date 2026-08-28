@@ -1,7 +1,7 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""User-written bind specs: a four-key TOML file, appended to a preset.
+"""User-written bind specs: a five-key TOML file, appended to a preset.
 
 The launchers' escape hatch until now was "copy the script and edit it",
 which forks the template the moment a session wants one more directory. This
@@ -24,10 +24,29 @@ defined::
     path = [                     # prepended to the box PATH
         "~/tooling",             # must be covered by a mount named above
     ]
+    include = [                  # other spec files, expanded in place
+        "./base-userbinds.toml", # BEFORE this file's own keys, so this
+    ]                            # file shadows what it includes
 
 `~` expands, and a relative path resolves against the FILE's directory, so a
 spec checked into a repo can name its neighbours without knowing where the
-checkout lives.
+checkout lives. `include` is the same resolution applied to spec files, which
+is what lets a set of them live in one directory and name each other by
+basename.
+
+`include` exists because the alternative ways to compose a growing collection
+are both worse. Repeating `--binds` per file puts the order in the operator's
+shell history, where the next reader cannot see it; a glob puts it in
+lexicographic filename order, where nobody can see it and a rename silently
+changes which file wins. An include list is the order, written down in the file
+that depends on it. Expansion is depth-first and in the order given, each file
+still applied whole -- so later-wins remains the one precedence rule, and an
+including file shadows what it includes.
+
+A file already expanded is not expanded again: a diamond is two paths to one
+file, not a request to mount it twice. A file that includes itself, however
+transitively, is a refusal naming the chain -- unlike the diamond, that is
+never what anybody meant.
 
 The three optionality defaults are the ones the repo measured rather than
 picked: a ro reference bind that has vanished is a bind to skip
@@ -54,7 +73,9 @@ reader can see at once.
 Same reasoning for what is absent on purpose: env VALUES (capability, not
 mount -- a key naming one is the grant this format refuses, and a payload
 that needs one has its own configuration to put it in), removals,
-reordering, globs, Seal and BindOver.
+reordering, globs, Seal and BindOver. `include` names files rather than
+patterns for the same reason globs are absent from the mount keys: the set it
+resolves to has to be readable off the page.
 
 The credential guard is why `load` takes the egress tuple. Until now every
 bind source was audited code plus a snapshot; a user file is the first
@@ -89,6 +110,10 @@ __all__ = ["UserSpec", "load"]
 # no mount and is checked against these.
 _MOUNT_KEYS = ("overlay", "ro", "rw")
 
+# Every key a spec file may carry. `include` is neither a mount nor checked
+# against them -- it names other spec files.
+_KEYS = (*_MOUNT_KEYS, "path", "include")
+
 
 @dataclass(frozen=True)
 class UserSpec:
@@ -113,18 +138,56 @@ def load(path: Path, *, egress: tuple[Backend, ...] = ()) -> UserSpec:
     FileNotFoundError propagates: a missing spec file is the caller's path
     being wrong, not this file's contents.
     """
+    return _load(path, egress, [], set())
+
+
+def _load(
+    path: Path,
+    egress: tuple[Backend, ...],
+    chain: list[Path],
+    expanded: set[Path],
+) -> UserSpec:
+    """`load` plus the two things an include tree needs to carry.
+
+    `chain` is the include path taken to get here, resolved, for cycle
+    detection and for the message that names it. `expanded` is every file the
+    whole tree has already applied, so a diamond mounts once.
+    """
+    here = path.resolve()
+    if here in chain:
+        raise ValueError(
+            f"{path}: include cycle: " + " -> ".join(str(p) for p in (*chain, here))
+        )
+    expanded.add(here)
     try:
         with path.open("rb") as f:
             doc = tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"{path} is not valid TOML: {e}") from e
 
-    unknown = sorted(set(doc) - {*_MOUNT_KEYS, "path"})
+    unknown = sorted(set(doc) - set(_KEYS))
     if unknown:
         raise ValueError(
             f"{path}: unknown key(s) {', '.join(map(repr, unknown))};"
-            f" expected any of {', '.join(map(repr, (*_MOUNT_KEYS, 'path')))}"
+            f" expected any of {', '.join(map(repr, _KEYS))}"
         )
+
+    inner_binds: list[BindSpec] = []
+    inner_dirs: list[Path] = []
+    for spec_file in _entries(path, doc.get("include", []), "include"):
+        # Skip only a file some OTHER branch already applied. One that is on
+        # the way here is a cycle, and must reach _load's check rather than be
+        # quietly dropped as a repeat.
+        target = spec_file.resolve()
+        if target in expanded and target not in (*chain, here):
+            continue
+        if not spec_file.is_file():
+            # Not the bare FileNotFoundError the caller's own path raises: this
+            # one has an includer to name, and the pair is the fix.
+            raise ValueError(f"{path}: include {spec_file} is not a file")
+        inner = _load(spec_file, egress, [*chain, here], expanded)
+        inner_binds += inner.binds
+        inner_dirs += inner.path
 
     # Absent keys default to empty lists -- a file with only `ro` is a file
     # with no writable binds, not a malformed one.
@@ -138,12 +201,21 @@ def load(path: Path, *, egress: tuple[Backend, ...] = ()) -> UserSpec:
                 f"{path}: {both[0]} appears in both {a} and {b} -- pick one"
             )
 
-    binds: list[BindSpec] = [Overlay(p) for p in _dedup(mounts["overlay"])]
+    # Includes first, so this file's own keys shadow them -- the same
+    # later-wins the launcher applies between two --binds files. A path this
+    # file mounts rw over an include's ro is that rule doing its job, which is
+    # why the cross-key refusal below stays WITHIN one document.
+    binds: list[BindSpec] = [*inner_binds]
+    binds += [Overlay(p) for p in _dedup(mounts["overlay"])]
     binds += [Bind(p, RO, optional=True) for p in _dedup(mounts["ro"])]
     binds += [Bind(p, RW) for p in _dedup(mounts["rw"])]
 
-    dirs = _dedup(_entries(path, doc.get("path", []), "path"))
+    dirs = _dedup([*inner_dirs, *_entries(path, doc.get("path", []), "path")])
+    # What this file mounts, counting what it chose to include: a PATH entry
+    # covered by an included mount is covered, and the reader still has both
+    # lines in front of them -- one names the file, the other the directory.
     mounted = [p for key in _MOUNT_KEYS for p in mounts[key]]
+    mounted += [b.path for b in inner_binds if hasattr(b, "path")]
     uncovered = [d for d in dirs if not any(d.is_relative_to(m) for m in mounted)]
     if uncovered:
         raise ValueError(

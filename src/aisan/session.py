@@ -88,7 +88,7 @@ def interactive_parser(prog: str, executable: str) -> argparse.ArgumentParser:
         type=Path,
         metavar="FILE",
         action="append",
-        help="user bind spec, TOML (keys: ro, rw, overlay, path); appended"
+        help="user bind spec, TOML (keys: ro, rw, overlay, path, include); appended"
         " after the preset's binds, so these shadow. Repeatable, applied in"
         " the order given (see aisan.userbinds)",
     )
