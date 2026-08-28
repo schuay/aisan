@@ -29,7 +29,7 @@ import pytest
 
 from aisan import Box
 from aisan.egress.reapi import ReapiBackend
-from aisan.presets.v8_job import sisoenv_path, v8_job
+from aisan.presets.v8_job import sisoenv_path, sisoenv_paths, v8_job, v8_rbe
 from aisan.proxy.rbe import UPSTREAM_HOST
 
 PROJECT = "rbe-chromium-untrusted"
@@ -165,3 +165,55 @@ async def test_the_box_holds_no_luci_credential(tmp_path):
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "0", f"credential env in the box: {r.stdout}"
     assert creds.returncode != 0, f"the box can read a luci token: {creds.stdout!r}"
+
+
+def test_every_checkout_under_the_root_gets_the_override(tmp_path):
+    # A box rooted above several checkouts is the interactive shape: a gclient
+    # root holds the main tree and its worktrees, and worktrees on different DEPS
+    # hashes resolve to DIFFERENT shared .sisoenv files. One bind-over would
+    # leave the rest reading their own bare instance name, which Google rejects
+    # as CONSUMER_INVALID -- a mid-build failure in exactly the trees the
+    # operator did not test.
+    root = tmp_path / "root"
+    dsts = []
+    for name in ("main", "wt-a", "wt-b"):
+        d = root / name / "build" / "config" / "siso"
+        d.mkdir(parents=True)
+        (d / ".sisoenv").write_text("SISO_PROJECT=not-the-override\n")
+        dsts.append(d / ".sisoenv")
+
+    rt = tmp_path / "rt"
+    rt.mkdir()
+    backend = ReapiBackend(
+        project=PROJECT,
+        sisoenv=dsts,
+        mint=lambda: asyncio.sleep(0, result="fake-token"),
+    )
+    backend.prepare(rt)
+    overrides = [b for b in backend.box_binds(rt) if b.dst != Path("/etc/hosts")]
+
+    assert [b.dst for b in overrides] == dsts
+    # One source for all of them: the instance is a property of the box, not of
+    # which checkout the agent happens to build in.
+    assert {b.src for b in overrides} == {backend.sisoenv_path(rt)}
+
+
+def test_the_profile_finds_the_checkouts_and_dedupes_the_shared_file(tmp_path):
+    # Worktrees share the file by symlinking into a checkout: three trees, two
+    # distinct .sisoenv. Deduplication is not cosmetic -- two bind-overs of one
+    # destination is an ambiguous mount order.
+    root = tmp_path / "root"
+    main = root / "main" / "build" / "config" / "siso"
+    main.mkdir(parents=True)
+    (main / ".sisoenv").write_text("SISO_PROJECT=upstream\n")
+    other = root / "other" / "build" / "config" / "siso"
+    other.mkdir(parents=True)
+    (other / ".sisoenv").write_text("SISO_PROJECT=upstream\n")
+    (root / "wt").mkdir()
+    (root / "wt" / "build").symlink_to(root / "main" / "build")
+
+    assert sisoenv_paths(root) == sorted({main / ".sisoenv", other / ".sisoenv"})
+    (backend,) = v8_rbe(root)
+    assert backend.name == "rbe"
+    # Nothing to override is a box without the fast path, not a refusal.
+    assert v8_rbe(tmp_path / "empty") == ()

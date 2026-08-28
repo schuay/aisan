@@ -22,6 +22,7 @@ from . import userbinds
 from .box import Box
 from .egress.base import PreflightError
 from .explain import explain
+from .presets import EGRESS_PROFILES
 from .session_mcp import SessionMCP
 from .spec import BoxSpec
 
@@ -90,6 +91,15 @@ def interactive_parser(prog: str, executable: str) -> argparse.ArgumentParser:
         help="user bind spec, TOML (keys: ro, rw, overlay, path); appended"
         " after the preset's binds, so these shadow. Repeatable, applied in"
         " the order given (see aisan.userbinds)",
+    )
+    parser.add_argument(
+        "--egress",
+        metavar="NAME",
+        action="append",
+        choices=sorted(EGRESS_PROFILES),
+        help="add a named egress profile's backends to the box (one of:"
+        f" {', '.join(sorted(EGRESS_PROFILES))}). Repeatable; needs the"
+        " isolated network, so not with --net",
     )
     parser.add_argument(
         "--explain",
@@ -161,11 +171,25 @@ async def run_interactive(
     command: Callable[[Box], list[str]],
     binary: Callable[[], Path | None],
     binds: list[Path] | None,
+    egress_profiles: list[str] | None,
     explain_only: bool,
     prepare: Callable[[], None] | None = None,
     mcp: SessionMCP | None = None,
 ) -> int:
-    """Apply user binds, explain or run, and preserve the payload's status."""
+    """Apply egress profiles and user binds, explain or run, keep the status."""
+    # Before the user files, because `userbinds.load` refuses a bind that would
+    # expose a backend's credential and can only refuse the backends it is given.
+    if egress_profiles and not spec.unshare_net:
+        print(
+            "--egress needs the box's own network: on the host's loopback the"
+            " backend would be an unauthenticated credential capability for"
+            " anything on this machine. Drop --net.",
+            file=sys.stderr,
+        )
+        return 2
+    for name in egress_profiles or []:
+        spec = spec.with_egress(list(EGRESS_PROFILES[name](repo)))
+
     # In the order given, each file applied whole: later-wins is the model's
     # only precedence rule, so two files compose the same way two entries in
     # one file do -- which is what makes a shared tool spec and a per-project

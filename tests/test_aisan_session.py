@@ -210,3 +210,57 @@ def test_a_refused_bind_spec_stops_the_launch(tmp_path, command):
     )
     assert result.returncode == 2
     assert str(bad) in result.stderr and "not covered" in result.stderr
+
+
+def _cli(tmp_path, argv):
+    """A launcher run with its own HOME, as the explain tests do."""
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env["HOME"] = str(home)
+    return subprocess.run(
+        [sys.executable, "-m", "aisan.cli.main", *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_an_egress_profile_reaches_the_box(tmp_path, command):
+    repo = tmp_path / "repo"
+    (repo / "build" / "config" / "siso").mkdir(parents=True)
+    (repo / "build" / "config" / "siso" / ".sisoenv").write_text("SISO_PROJECT=x\n")
+
+    result = _cli(tmp_path, [command, "--egress", "v8-rbe", "--explain", str(repo)])
+
+    assert result.returncode == 0, result.stderr
+    assert "rbe" in result.stdout
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_an_egress_profile_refuses_the_shared_network(tmp_path, command):
+    # The backend has no authenticated host-loopback path, so on a shared
+    # namespace its relay port would be a credential capability for everything
+    # on the machine. BoxSpec already refuses that mix; this refuses it in the
+    # operator's terms, before anything is assembled.
+    repo = tmp_path / "repo"
+    (repo / "build" / "config" / "siso").mkdir(parents=True)
+    (repo / "build" / "config" / "siso" / ".sisoenv").write_text("SISO_PROJECT=x\n")
+
+    result = _cli(
+        tmp_path, [command, "--egress", "v8-rbe", "--net", "--explain", str(repo)]
+    )
+
+    assert result.returncode == 2
+    assert "--net" in result.stderr
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_an_unknown_egress_profile_is_refused_by_name(tmp_path, command):
+    result = _cli(tmp_path, [command, "--egress", "nope", "--explain", str(tmp_path)])
+
+    assert result.returncode == 2
+    assert "v8-rbe" in result.stderr

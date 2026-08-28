@@ -102,6 +102,45 @@ def sisoenv_path(worktree: Path) -> Path:
     return (worktree / "build" / "config" / "siso" / ".sisoenv").resolve()
 
 
+# The shared instance a V8 checkout builds against. Here rather than in the
+# backend for the same reason sisoenv_path is: it is a fact about this project's
+# deployment, and a consumer boxing something else brings its own.
+RBE_PROJECT = "rbe-chromium-untrusted"
+
+
+def sisoenv_paths(root: Path) -> list[Path]:
+    """The distinct .sisoenv files under `root`, resolved and deduplicated.
+
+    `root` is whatever tree the operator pointed the launcher at: one checkout,
+    or a gclient root holding the main tree and its worktrees. Depth one covers
+    both, because a worktree is a child of that root and nothing deeper is a
+    checkout.
+
+    Deduplicated because the file is shared: worktrees on one DEPS hash resolve
+    to the same path, and several resolve into the main checkout.
+    """
+    children = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
+    found = {p for p in map(sisoenv_path, (root, *children)) if p.exists()}
+    return sorted(found)
+
+
+def v8_rbe(root: Path) -> tuple[Backend, ...]:
+    """The RBE backend for a box rooted at a V8 tree, or nothing.
+
+    The `EGRESS_PROFILES` entry, and the whole of what the interactive launchers
+    know about remote builds: they resolve a name, this supplies the project and
+    the files. Imported inside the function because the backend pulls in the
+    proxy stack, and a preset import should not.
+
+    Empty when no .sisoenv is found. A tree that does not build with siso is a
+    box without the fast path, not a launch to refuse.
+    """
+    from ..egress.reapi import ReapiBackend
+
+    paths = sisoenv_paths(root)
+    return (ReapiBackend(project=RBE_PROJECT, sisoenv=paths),) if paths else ()
+
+
 def v8_job(
     worktree: Path,
     *,

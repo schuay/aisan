@@ -26,7 +26,9 @@ flag. `--binds` names a user bind spec (see `aisan.userbinds`); it is appended
 after the preset's binds, so user mounts shadow the template, and it is
 repeatable so a shared tool spec and a per-project one compose. `--explain`
 prints the resolved profile and exits -- the review path for a merge of several
-bind sources, rendered from the same Box the real path uses.
+bind sources, rendered from the same Box the real path uses. `--egress NAME` adds a named egress profile's backends (see
+`aisan.presets.EGRESS_PROFILES`), which needs the box's own network and so
+refuses alongside `--net`.
 
 Usage: aisan claude [repo] [flags] -- [claude args...]
 
@@ -160,6 +162,7 @@ async def _main(argv: list[str]) -> int:
         command=lambda _box: command,
         binary=claude_code_binary,
         binds=args.binds,
+        egress_profiles=args.egress,
         explain_only=args.explain,
         prepare=prepare,
         mcp=mcp,

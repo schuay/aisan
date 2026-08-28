@@ -99,6 +99,7 @@ async def _main(argv: list[str]) -> int:
         ),
         binary=codex_binary,
         binds=args.binds,
+        egress_profiles=args.egress,
         explain_only=args.explain,
         prepare=prepare,
         mcp=mcp,

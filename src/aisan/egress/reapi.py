@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -51,6 +51,12 @@ SISOENV_FILE = "sisoenv"
 _REFRESH_MARGIN_S = 1200
 
 PORT = 8712
+
+# Where luci-auth keeps the durable credential `mint.rbe_token` mints from.
+# Never read here -- named so the Box refuses a spec that binds it: a box that
+# can read this store can mint its own token, and this backend's whole claim is
+# that it cannot.
+LUCI_STORE = Path.home() / ".config" / "chrome_infra"
 
 # What `luci-auth token` tells an operator to run when it has nothing to mint
 # from. Interactive, which is why preflight exists: once bwrap is up the box
@@ -103,21 +109,43 @@ class ReapiBackend(Backend):
     name = "rbe"
     port = PORT
 
+    # Stays False, and the reason is the transport rather than an omission: under
+    # --net the relay's loopback IS the host's, so the port would be an
+    # unauthenticated credential capability for anything on the machine. siso
+    # runs -reapi_insecure and gRPC-Go will not attach credentials on an insecure
+    # connection, so the box has no standard way to prove which box it is.
+    #
+    # TODO(jgruber): give shared-net boxes an explicit opt-in that binds
+    # LUCI_STORE ro and lets siso authenticate itself. That hands the box a
+    # cloud-scoped luci token -- Gerrit-capable while it lives, see
+    # mint.rbe_token -- and is acceptable only because these boxes are local and
+    # semi-unattended. It also has to defeat the credential guard the
+    # `credentials` tuple below arms, deliberately: the grant should be a line
+    # somebody wrote, not a bind that quietly passes.
+    supports_shared_net = False
+
     def __init__(
         self,
         *,
         project: str,
-        sisoenv: Path,
+        sisoenv: Path | Iterable[Path],
         instance: str = "default_instance",
         mint=None,
     ) -> None:
         self._project = project
         self._instance = instance
-        # Where THIS box's checkout keeps the file we bind over. A constructor
+        # Where THIS box's checkouts keep the file we bind over. A constructor
         # argument because where a checkout keeps it is a property of the
         # checkout, not of RBE -- and taking it here rather than in box_binds
         # keeps that method's signature the one every backend has.
-        self._sisoenv_dst = sisoenv
+        #
+        # Several, because a box is not always rooted at one checkout: a gclient
+        # root holds the main tree and its worktrees, and worktrees on different
+        # DEPS hashes resolve to DIFFERENT shared .sisoenv files. Binding one of
+        # them leaves the rest reading the checkout's own bare instance name,
+        # which Google rejects as CONSUMER_INVALID.
+        self._sisoenv_dsts = (sisoenv,) if isinstance(sisoenv, Path) else tuple(sisoenv)
+        self.credentials = (LUCI_STORE,)
         self._token = RefreshingToken(mint or mint_rbe_token)
 
     def client_env(self) -> dict[str, str]:
@@ -159,14 +187,17 @@ class ReapiBackend(Backend):
         - /etc/hosts, so the box dials the real hostname and it lands on
           loopback. The Google frontend routes on :authority, so a literal
           127.0.0.1 is answered with a 404 and an HTML body.
-        - the checkout's .sisoenv. It lives in a SHARED deps cache (checkouts on
-          one DEPS hash resolve to the same file, and some resolve to the main
-          checkout), so editing it in place would corrupt concurrent boxes.
-          Overriding per box is the only safe form.
+        - the checkout's .sisoenv, once per destination. It lives in a SHARED
+          deps cache (checkouts on one DEPS hash resolve to the same file, and
+          some resolve to the main checkout), so editing it in place would
+          corrupt concurrent boxes. Overriding per box is the only safe form.
         """
         return [
             BindOver(self.hosts_path(runtime_dir), Path("/etc/hosts")),
-            BindOver(self.sisoenv_path(runtime_dir), self._sisoenv_dst),
+            *(
+                BindOver(self.sisoenv_path(runtime_dir), dst)
+                for dst in self._sisoenv_dsts
+            ),
         ]
 
     @property
