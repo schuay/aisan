@@ -114,7 +114,7 @@ class ReapiBackend(Backend):
     # capability for anything on the machine, and the insecure mode this module's
     # docstring describes leaves the box nothing to prove itself with.
     #
-    # A shared-net box takes the other route instead: the `rbe-with-net-unsafe`
+    # A shared-net box takes the other route instead: the `v8-rbe-with-net-unsafe`
     # egress profile mounts LUCI_STORE and lets siso authenticate as the
     # operator. Naming the store below is what keeps the two mutually exclusive
     # -- asking for both refuses on the credential guard rather than serving a

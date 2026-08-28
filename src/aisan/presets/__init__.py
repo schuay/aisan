@@ -44,7 +44,7 @@ EGRESS_PROFILES: dict[str, Callable[[Path], EgressProfile]] = {
     # The shared-network route, which trades the proxy's whole property away.
     # Spelled out in the name because the flag is the only place an operator
     # sees the choice.
-    "rbe-with-net-unsafe": v8_rbe_shared_net,
+    "v8-rbe-with-net-unsafe": v8_rbe_shared_net,
 }
 
 __all__ = [

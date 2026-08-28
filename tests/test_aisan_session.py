@@ -277,7 +277,14 @@ def test_the_shared_net_profile_is_the_one_that_survives_net(tmp_path, command):
 
     result = _cli(
         tmp_path,
-        [command, "--egress", "rbe-with-net-unsafe", "--net", "--explain", str(repo)],
+        [
+            command,
+            "--egress",
+            "v8-rbe-with-net-unsafe",
+            "--net",
+            "--explain",
+            str(repo),
+        ],
     )
 
     assert result.returncode == 0, result.stderr
@@ -303,7 +310,7 @@ def test_the_two_rbe_profiles_are_mutually_exclusive(tmp_path, command):
             "--egress",
             "v8-rbe",
             "--egress",
-            "rbe-with-net-unsafe",
+            "v8-rbe-with-net-unsafe",
             "--explain",
             str(repo),
         ],
