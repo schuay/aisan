@@ -161,6 +161,24 @@ def _anc_eq(child: str, ancestor: str) -> bool:
         return False
 
 
+def assembly_refusal(box: Box) -> Exception | None:
+    """The refusal box assembly raises for this spec, or None if it resolves.
+
+    `_sandbox()` refuses a spec whose binds would shadow a tmpfs or the rw root
+    or expose a backend credential; `wrapper()` refuses a bind whose mandatory
+    source is missing. Both are the finding `--explain` exists to surface: this
+    is where `explain` reads the refusal to render it, and where the CLI reads
+    it to exit nonzero, so a scripted `--explain && run` does not treat a
+    refused profile as a passed review. Both builders are pure, so probing them
+    here mints nothing and opens no socket."""
+    try:
+        box._sandbox()
+        box.wrapper()
+    except (ValueError, FileNotFoundError) as exc:
+        return exc
+    return None
+
+
 def explain(
     box: Box, *, inputs: tuple[tuple[str, str], ...] = (), argv: bool = True
 ) -> str:
@@ -180,22 +198,17 @@ def explain(
     def section(title: str) -> None:
         out.write(f"\n== {title} ==\n")
 
-    # Both calls, not just wrapper(): _sandbox() refuses a spec whose binds
-    # would expose a backend credential, and that refusal is exactly the
-    # finding an operator ran this to see -- same treatment as the assembly
-    # refusals below it.
-    try:
-        sandbox = box._sandbox()
-        wrapper = box.wrapper()
-    except (ValueError, FileNotFoundError) as exc:
-        # The sandbox refuses to emit an argv whose mounts would shadow a tmpfs
-        # or the rw root, and refuses a bind whose mandatory source is missing.
-        # A leak therefore surfaces as a raise, not as an argv to inspect.
-        # Report it as the finding -- this IS the diagnosis the mode exists to
-        # give, and a traceback would bury it.
+    # A leak or a missing mandatory source surfaces as a raise from the
+    # builders, not as an argv to inspect. Report it as the finding -- this IS
+    # the diagnosis the mode exists to give, and a traceback would bury it. The
+    # CLI reads the same predicate to exit nonzero.
+    refusal = assembly_refusal(box)
+    if refusal is not None:
         section("BOX ASSEMBLY REFUSED")
-        out.write(f"  {exc}\n")
+        out.write(f"  {refusal}\n")
         return out.getvalue()
+    sandbox = box._sandbox()
+    wrapper = box.wrapper()
     prof = parse_wrapper(wrapper, sandbox)
     isolated = box.spec.unshare_net
     shared_egress = bool(box.spec.egress) and not isolated

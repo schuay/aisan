@@ -20,7 +20,7 @@ from pathlib import Path
 from . import userbinds
 from .box import Box
 from .egress.base import PreflightError
-from .explain import explain
+from .explain import assembly_refusal, explain
 from .presets import EGRESS_PROFILES
 from .session_mcp import SessionMCP
 from .spec import BoxSpec
@@ -236,6 +236,11 @@ async def run_interactive(
 
     box = Box(spec, box_id=box_id(client, repo))
     if explain_only:
+        # The review path discloses what an MCP import dragged in the same way
+        # the run path does: the mounts show up in the report, but only this
+        # notice says an import is what caused them.
+        if mcp is not None and mcp.enabled:
+            print(mcp_notice(mcp), file=sys.stderr)
         with staged_directory(state), box.staged():
             print(
                 explain(
@@ -248,7 +253,12 @@ async def run_interactive(
                 ),
                 end="",
             )
-        return 0
+            # Inside `staged()`, where bind-over sources exist on disk: probing
+            # assembly after it closes would fail every box on a missing source.
+            # A refused profile is not a passed review -- `--explain && run` must
+            # not read exit 0 off a box that would refuse to assemble.
+            refused = assembly_refusal(box) is not None
+        return 2 if refused else 0
 
     if binary() is None:
         print(f"no `{executable}` on PATH: this would be an exec failure inside bwrap")

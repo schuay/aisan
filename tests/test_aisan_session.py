@@ -318,3 +318,6 @@ def test_the_two_rbe_profiles_are_mutually_exclusive(tmp_path, command):
 
     assert "REFUSED" in result.stdout + result.stderr
     assert "expose the rbe backend's credential" in result.stdout + result.stderr
+    # A refused profile is a failed review: --explain must exit nonzero so a
+    # scripted `--explain && run` does not read this as a pass.
+    assert result.returncode == 2, result.stdout + result.stderr
