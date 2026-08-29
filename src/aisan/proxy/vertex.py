@@ -36,7 +36,7 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 # Re-exported for compatibility; new shared-infrastructure imports should use
 # `aisan.proxy.http` directly.
@@ -276,29 +276,53 @@ def make_app(
         }
         session = request.app[_SESSION]
         url = f"{upstream}{request.path_qs}"
-        async with session.request(
-            request.method, url, data=body or None, headers=headers
-        ) as up:
-            out = web.StreamResponse(
-                status=up.status,
-                headers={
-                    "Content-Type": up.headers.get("Content-Type", "application/json")
-                },
+        try:
+            async with session.request(
+                request.method, url, data=body or None, headers=headers
+            ) as up:
+                out = web.StreamResponse(
+                    status=up.status,
+                    headers={
+                        "Content-Type": up.headers.get(
+                            "Content-Type", "application/json"
+                        )
+                    },
+                )
+                try:
+                    # `prepare` writes too, and is where an interrupt usually
+                    # lands: the box hangs up while the upstream is still
+                    # thinking, so the write that fails is the response's own
+                    # header line, not a body chunk. The guard must cover it,
+                    # because aiohttp raises ClientConnectionResetError for a
+                    # write to a closing transport -- a ClientError by
+                    # inheritance as well as a ConnectionResetError, so left to
+                    # the outer ClientError branch a cancelled turn would be
+                    # logged as a dead upstream and answered with a 502 written
+                    # to a socket nobody is reading.
+                    await out.prepare(request)
+                    async for chunk in up.content.iter_chunked(_CHUNK):
+                        await out.write(chunk)
+                    await out.write_eof()
+                except (ConnectionResetError, BrokenPipeError) as e:
+                    # The box hung up mid-response -- the agent exited, or its
+                    # turn was cancelled. Ordinary, and nothing is lost: the only
+                    # reader of these bytes is already gone. Left to propagate it
+                    # reaches aiohttp's generic handler, which logs a full
+                    # traceback at ERROR -- the noise the disabled access log
+                    # (see serve) exists to prevent, and it buries the refusal
+                    # warning that matters.
+                    log.debug("vertex proxy: downstream closed: %s", type(e).__name__)
+                return out
+        except ClientError as e:
+            # The upstream is unreachable -- a dead route to Vertex. One turn's
+            # failure with a legible reason, not a torn connection the client
+            # will retry into.
+            log.warning("vertex proxy: upstream %s unreachable: %s", upstream, e)
+            return _error(
+                502,
+                f"sandbox proxy cannot reach its upstream: {e}",
+                streaming=streaming,
             )
-            await out.prepare(request)
-            try:
-                async for chunk in up.content.iter_chunked(_CHUNK):
-                    await out.write(chunk)
-                await out.write_eof()
-            except (ConnectionResetError, BrokenPipeError) as e:
-                # The box hung up mid-response -- the agent exited, or its turn
-                # was cancelled. Ordinary, and nothing is lost: the only reader
-                # of these bytes is already gone. Left to propagate it reaches
-                # aiohttp's generic handler, which logs a full traceback at
-                # ERROR -- the noise the disabled access log (see serve) exists
-                # to prevent, and it buries the refusal warning that matters.
-                log.debug("vertex proxy: downstream closed: %s", type(e).__name__)
-            return out
 
     app = web.Application(client_max_size=MAX_BODY_BYTES + 1)
     app.router.add_route("*", "/{tail:.*}", handle)

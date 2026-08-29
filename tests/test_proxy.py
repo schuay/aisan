@@ -367,6 +367,49 @@ async def test_token_is_read_per_request_not_captured(tmp_path):
     assert seen == ["Bearer token-1", "Bearer token-2", "Bearer token-3"]
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_a_dead_upstream_is_502_not_a_torn_connection(tmp_path, streaming):
+    """A route to Vertex that is down is one turn's failure with a legible
+    reason, not a torn connection the SDK retries into. And the refusal keeps
+    the streaming shape: an array for streamGenerateContent, an object
+    otherwise, so the client parses it rather than raising on the wrong type."""
+    from aiohttp import ClientSession
+
+    async def upstream(request: web.Request) -> web.Response:
+        return web.json_response({"ok": True})
+
+    up_url, up_runner = await _upstream_server(upstream)
+    await up_runner.cleanup()  # the address is now dead, deliberately
+
+    import aisan.proxy.vertex as v
+
+    orig = v._upstream
+    v._upstream = lambda _loc: up_url
+    try:
+        app = make_app(allowlist=_allow(), token=lambda: _ready("t"), location=LOCATION)
+        sock = tmp_path / "vertex.sock"
+        runner = await serve_proxy(sock, app)
+        relay = await serve_relay(sock, 0)
+        port = relay.sockets[0].getsockname()[1]
+        try:
+            verb = "streamGenerateContent" if streaming else "generateContent"
+            url = (
+                f"http://127.0.0.1:{port}{BASE}/publishers/google/models/{MODEL}:{verb}"
+            )
+            async with ClientSession() as s, s.post(url, data=b"{}") as r:
+                assert r.status == 502
+                body = await r.json()
+        finally:
+            relay.close()
+            await relay.wait_closed()
+            await runner.cleanup()
+    finally:
+        v._upstream = orig
+
+    error = (body[0] if streaming else body)["error"]
+    assert "cannot reach its upstream" in error["message"]
+
+
 async def test_box_headers_are_never_forwarded(tmp_path):
     """Anything the box sends is data. It must not be able to set headers."""
     from aiohttp import ClientSession
