@@ -54,6 +54,7 @@ from aisan.session import (
     terminal_env,
 )
 from aisan.session_mcp import claude_host_mcp, mcp_ro_binds, mcp_search_path
+from aisan.statedir import read_sealed_text, write_sealed
 
 GIT_CONFIG = Path.home() / ".config" / "git"
 USER_MEMORY = Path.home() / ".claude" / "CLAUDE.md"
@@ -81,7 +82,12 @@ def seed_state(state: Path, repo: Path) -> None:
     No), and the bypassPermissions disclaimer.
     """
     path = state / ".claude.json"
-    config = json.loads(path.read_text()) if path.exists() else {}
+    # Read without following a symlink: the state dir is box-writable, so a
+    # planted `.claude.json -> /etc/passwd` would otherwise be read here (and the
+    # merged result written back through the link). A non-regular file reads as
+    # absent, rebuilding from scratch.
+    existing = read_sealed_text(path)
+    config = json.loads(existing) if existing else {}
     config["hasCompletedOnboarding"] = True  # the mandatory one, see above
     config["bypassPermissionsModeAccepted"] = True
     approved = config.setdefault("customApiKeyResponses", {}).setdefault("approved", [])
@@ -90,8 +96,7 @@ def seed_state(state: Path, repo: Path) -> None:
     config.setdefault("projects", {}).setdefault(str(repo), {})[
         "hasTrustDialogAccepted"
     ] = True
-    path.write_text(json.dumps(config, indent=2))
-    path.chmod(0o600)
+    write_sealed(path, json.dumps(config, indent=2))
 
 
 def seed_user_memory(state: Path, source: Path) -> None:

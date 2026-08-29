@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Literal
 
 from .launch import interpreter_roots
+from .statedir import write_sealed
 
 
 @dataclass(frozen=True)
@@ -51,8 +52,10 @@ class SessionMCP:
             text = _toml_document(self.document)
         else:
             text = json.dumps(self.document, indent=2) + "\n"
-        path.write_text(text)
-        path.chmod(0o600)
+        # Sealed rather than write_text+chmod: this lands in the box-writable
+        # state dir, so a symlink the agent planted at `path` would otherwise be
+        # followed and its target rewritten (and chmodded 0o600) by the operator.
+        write_sealed(path, text)
 
 
 def codex_host_mcp(path: Path | None = None) -> SessionMCP:

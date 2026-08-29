@@ -11,7 +11,6 @@ import contextlib
 import hashlib
 import os
 import secrets
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -25,6 +24,7 @@ from .explain import explain
 from .presets import EGRESS_PROFILES
 from .session_mcp import SessionMCP
 from .spec import BoxSpec
+from .statedir import prepare_state_dir, write_sealed
 
 _TERM_PASSTHROUGH = ("TERM", "COLORTERM", "LANG", "LC_ALL")
 
@@ -63,9 +63,13 @@ def mirror_user_memory(source: Path, dst: Path) -> None:
     can tell a stale mirror from instructions the agent wrote itself, and of
     the two ways to be wrong, deleting the operator's file is worse than
     leaving a per-repo cache directory holding one.
+
+    The write goes through `write_sealed`, not `copyfile`: `dst` sits in the
+    box-writable state dir, and a plain copy would follow a symlink the agent
+    planted there and overwrite its target as the operator.
     """
     if source.exists():
-        shutil.copyfile(source, dst)
+        write_sealed(dst, source.read_bytes())
 
 
 def box_id(client: str, repo: Path) -> str:
@@ -250,7 +254,7 @@ async def run_interactive(
         print(f"no `{executable}` on PATH: this would be an exec failure inside bwrap")
         return 2
 
-    state.mkdir(parents=True, exist_ok=True)
+    prepare_state_dir(state)
     if prepare is not None:
         prepare()
     try:
