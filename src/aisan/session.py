@@ -21,6 +21,7 @@ from . import userbinds
 from .box import Box
 from .egress.base import PreflightError
 from .explain import assembly_refusal, explain
+from .launch import exit_status
 from .presets import EGRESS_PROFILES
 from .session_mcp import SessionMCP, mcp_ro_binds
 from .spec import BoxSpec
@@ -326,7 +327,9 @@ async def run_interactive(
                 env={**os.environ, **box.env},
                 check=False,
             )
-            return done.returncode
+            # A box killed by a signal comes back as `-N`; report it the way a
+            # shell would, matching the unattended launcher's own status.
+            return exit_status(done.returncode)
     except PreflightError as e:
         print(f"refused: {e}", file=sys.stderr)
         return 3

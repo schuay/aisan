@@ -433,3 +433,51 @@ async def test_the_run_path_routes_an_assembly_refusal_to_return_2(
     )
     assert code == 2
     assert "refused" in capsys.readouterr().err
+
+
+async def test_the_run_path_normalizes_a_signal_death_to_shell_status(
+    tmp_path, monkeypatch
+):
+    # subprocess.run reports a signal-killed child as `-N`; the unattended
+    # launcher normalizes that to `128 + N`, and the interactive run path must
+    # report the same number rather than a raw negative status a caller reads
+    # as a huge unsigned exit code.
+    class _Box:
+        def __init__(self, spec, *, box_id):
+            self.spec = spec
+            self.env = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        def command(self, cmd):
+            return cmd
+
+    class _Spec:
+        unshare_net = True
+
+    monkeypatch.setattr("aisan.session.Box", _Box)
+    monkeypatch.setattr(
+        "aisan.session.subprocess.run",
+        lambda *a, **k: subprocess.CompletedProcess(args=a, returncode=-15),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    code = await run_interactive(
+        client="claude",
+        harness="claude-code",
+        executable="claude",
+        repo=repo,
+        state=tmp_path / "state",
+        spec=_Spec(),
+        command=lambda _box: ["claude"],
+        binary=lambda: repo / "claude",
+        binds=None,
+        egress_profiles=None,
+        explain_only=False,
+    )
+    assert code == 143

@@ -143,6 +143,17 @@ def launch_prefix(runtime_dir: Path, python: Path | None = None) -> list[str]:
     return [str(exe), "-m", f"{__package__}.launch", str(runtime_dir), "--"]
 
 
+def exit_status(code: int) -> int:
+    """A `wait` status as the number a shell would report.
+
+    A process killed by signal N has no exit code; `wait` and `subprocess.run`
+    hand it back as `-N`, while a shell reports `128 + N`. Normalising here means
+    a caller reading the status sees the same number with a launcher in the
+    middle as it would without one.
+    """
+    return code if code >= 0 else 128 - code
+
+
 async def _run(runtime_dir: Path, cmd: list[str]) -> int:
     """Inject shared state and exec, or serve isolated relays around `cmd`."""
     if (runtime_dir / CLIENT_ENV_NAME).exists():
@@ -172,10 +183,7 @@ async def _run(runtime_dir: Path, cmd: list[str]) -> int:
         finally:
             for sig in _FORWARD:
                 loop.remove_signal_handler(sig)
-        # A payload killed by a signal has no exit code; report it the way a
-        # shell does, so a caller reading the status sees the same number it
-        # would have seen without the launcher in the middle.
-        return code if code >= 0 else 128 - code
+        return exit_status(code)
     finally:
         for server in servers:
             server.close()
