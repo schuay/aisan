@@ -108,6 +108,46 @@ def test_a_path_in_two_mount_keys_is_refused(tmp_path, text, match):
         load(_spec_file(tmp_path, text))
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        'ro = ["/a/b"]\nrw = ["/a"]\n',  # ro nested under a later, broader rw
+        'overlay = ["/a/cache"]\nrw = ["/a"]\n',  # overlay defeated by rw
+        'overlay = ["/a/cache"]\nro = ["/a"]\n',  # overlay defeated by ro
+        'rw = ["/a"]\nro = ["/a/../a/b"]\n',  # the `..` route around equality
+    ],
+)
+def test_a_mount_nested_under_a_later_broader_one_is_refused(tmp_path, text):
+    """The keys emit overlay, then ro, then rw, and later wins -- so a narrow
+    ro or overlay under a broad rw is silently upgraded to writable (and an
+    overlay's copy-up is defeated, sending writes to the host tree). Exact
+    equality has its own refusal; this is the nesting the fixed emission order
+    introduced. `..` is normalised away so it cannot dodge the check."""
+    with pytest.raises(ValueError, match="remove the nesting"):
+        load(_spec_file(tmp_path, text))
+
+
+def test_same_mode_nesting_is_allowed(tmp_path):
+    """A path under another of the SAME key is not a mode change: the effective
+    mode is what the author wrote either way, so it is redundant, not a silent
+    upgrade, and refusing it would be stricter than the hazard warrants."""
+    f = _spec_file(tmp_path, 'rw = ["/a/b", "/a"]\n')
+    assert [b.path for b in load(f).binds] == [Path("/a/b"), Path("/a")]
+
+
+def test_the_includer_may_still_shadow_an_included_mount(tmp_path):
+    """The nesting refusal is scoped to one file's own keys: an outer rw over
+    an included ro at the same path is the documented later-wins, not a bug."""
+    _named_spec(tmp_path / "base.toml", 'ro = ["/a/b"]\n')
+    outer = _named_spec(
+        tmp_path / "outer.toml", 'include = ["base.toml"]\nrw = ["/a"]\n'
+    )
+    assert [(b.path, getattr(b, "mode", None)) for b in load(outer).binds] == [
+        (Path("/a/b"), RO),
+        (Path("/a"), RW),
+    ]
+
+
 def test_the_same_path_in_two_spellings_is_one_bind(tmp_path, monkeypatch):
     """Dedupe on the EXPANDED path, so `~/a` and its expansion do not reach
     bwrap twice -- and so the both-lists check above compares paths, not

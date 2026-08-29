@@ -95,6 +95,7 @@ a hand-composed spec, which `aisan-claude-specs.py` demonstrates.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass
 from itertools import combinations
@@ -200,6 +201,28 @@ def _load(
             raise ValueError(
                 f"{path}: {both[0]} appears in both {a} and {b} -- pick one"
             )
+
+    # Exact equality above is not enough: the keys emit in a fixed order
+    # (overlay, then ro, then rw) and later wins, so a broad `rw` naming an
+    # ANCESTOR of an earlier `ro` (or `overlay`) silently upgrades that narrower
+    # path to writable -- and for an overlay it defeats the copy-up, sending
+    # writes to the host tree. Refuse rather than reorder: there is no spelling
+    # of "ro under rw" this format should honour by guessing. Compared on the
+    # normalised form, which also closes the `..` route around the check above.
+    # Scoped to this file's own keys, not the includes: a `rw` here shadowing an
+    # included `ro` is the documented later-wins doing its job.
+    emitted = [
+        (key, p, Path(os.path.normpath(p))) for key in _MOUNT_KEYS for p in mounts[key]
+    ]
+    for index, (early_key, _early_p, early_norm) in enumerate(emitted):
+        for late_key, late_p, late_norm in emitted[index + 1 :]:
+            if late_key != early_key and early_norm.is_relative_to(late_norm):
+                raise ValueError(
+                    f"{path}: {late_key} entry {late_p} covers the earlier"
+                    f" {early_key} entry {_early_p} -- the later mount would"
+                    " override it (a nested ro or overlay under rw becomes"
+                    " writable); remove the nesting"
+                )
 
     # Includes first, so this file's own keys shadow them -- the same
     # later-wins the launcher applies between two --binds files. A path this
