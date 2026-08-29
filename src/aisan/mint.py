@@ -29,6 +29,11 @@ Fetch = Callable[[], Awaitable[tuple[str, datetime]]]
 
 _CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
 
+# A mint is on the request's critical path, so a stuck luci-auth is a hung
+# request. luci-auth returns in well under a second when it has a live login;
+# anything past this is it wanting something a headless refresh cannot give.
+_TOKEN_TIMEOUT_S = 30
+
 
 def _read_adc_impersonate_token(target: str) -> tuple[str, datetime]:
     # Blocking; run via to_thread below. The source principal needs Token
@@ -80,16 +85,31 @@ async def rbe_token(lifetime_s: int = 1800) -> str:
         "token",
         "-scopes-cloud",
         f"-lifetime={lifetime_s}s",
+        # No stdin: when the login has lapsed luci-auth wants an interactive
+        # reauth, and an inherited descriptor is the box's own TTY -- it would
+        # block the request forever, on every refresh after the first, defeating
+        # the point of minting host-side before the box exists. DEVNULL gives it
+        # an immediate EOF so it fails instead of prompting; the timeout below
+        # bounds the case where it hangs for some other reason.
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    out, err = await proc.communicate()
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), _TOKEN_TIMEOUT_S)
+    except TimeoutError as e:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(
+            f"luci-auth token timed out after {_TOKEN_TIMEOUT_S}s"
+            " (interactive reauth needed?)"
+        ) from e
     if proc.returncode:
         raise RuntimeError(
             f"luci-auth token failed (exit {proc.returncode}): "
             f"{err.decode(errors='replace').strip()[:300]}"
         )
-    return out.decode().strip()
+    return out.decode(errors="replace").strip()
 
 
 __all__ = ["Fetch", "rbe_token", "vertex_fetch"]
