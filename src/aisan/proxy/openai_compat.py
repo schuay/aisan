@@ -121,11 +121,14 @@ class PathAllowlist:
 # mode wearing an allowlist's clothes.
 CLIENT_TOOL_TYPES = frozenset({"function"})
 
-# Top-level keys that make the upstream act. This protocol has none that a
-# model call needs -- the server-side capabilities declare themselves as tool
-# types, which the set above already gates -- but the field stays so that one
-# discovered next year is a tag in data, not a new branch in code.
-REFUSED_KEYS: tuple[str, ...] = ()
+# Top-level keys that make the upstream act on the box's behalf, refused
+# because a model call needs none of them. Not every server-side capability
+# declares itself as a tool type: `web_search_options` turns on hosted web
+# search with no `tools` entry (and carries a free-text `user_location`), so the
+# tool gate above never sees it. That is a route off a box `unshare_net` means
+# to have none, which is why the denylist is not empty; one discovered next year
+# is a tag added here, not a new branch in code.
+REFUSED_KEYS: tuple[str, ...] = ("web_search_options",)
 
 
 @dataclass(frozen=True)

@@ -127,6 +127,19 @@ def test_body_policy_refuses_tools_that_execute_upstream(kind, why):
     assert kind in reason  # the refusal names what it refused
 
 
+def test_body_policy_refuses_web_search_options():
+    """A server-acting capability that is NOT a tool: `web_search_options` turns
+    on hosted web search with no `tools` entry, so the tool-type gate never sees
+    it -- a route off a box `unshare_net` means to have none. It is named in the
+    top-level denylist, and the refusal names the key."""
+    body = json.dumps(
+        {"web_search_options": {"user_location": {"country": "US"}}, "messages": []}
+    ).encode()
+    reason = BodyPolicy().refuse(body)
+    assert reason is not None
+    assert "web_search_options" in reason
+
+
 def test_body_policy_refuses_an_absent_type():
     """The measured difference from anthropic's policy. There, absent was
     measured to resolve to the client-side variant; here `type` is a required
