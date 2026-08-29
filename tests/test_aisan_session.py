@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from aisan.session import box_id, staged_directory, state_dir
+from aisan.session import box_id, run_interactive, staged_directory, state_dir
 
 
 def test_session_commands_are_packaged():
@@ -321,3 +322,114 @@ def test_the_two_rbe_profiles_are_mutually_exclusive(tmp_path, command):
     # A refused profile is a failed review: --explain must exit nonzero so a
     # scripted `--explain && run` does not read this as a pass.
     assert result.returncode == 2, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_a_missing_binds_file_is_refused_not_a_traceback(tmp_path, command):
+    # `userbinds.load` lets FileNotFoundError propagate for the launcher to name;
+    # a typo'd --binds path must reach the operator as the return-2 convention,
+    # not a stack trace with exit 1.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = _cli(
+        tmp_path, [command, "--explain", "--binds", "/no/such.toml", str(repo)]
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "binds" in result.stderr and "/no/such.toml" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def _write_host_mcp(home: Path, command: str, name: str = "ghost") -> None:
+    """A host MCP config for each client, naming one server by its `command`."""
+    home.mkdir(exist_ok=True)
+    (home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {name: {"type": "stdio", "command": command}}})
+    )
+    codex = home / ".codex"
+    codex.mkdir(exist_ok=True)
+    (codex / "config.toml").write_text(f'[mcp_servers.{name}]\ncommand = "{command}"\n')
+    opencode = home / ".config" / "opencode"
+    opencode.mkdir(parents=True, exist_ok=True)
+    (opencode / "opencode.json").write_text(
+        json.dumps({"mcp": {name: {"type": "local", "command": [command]}}})
+    )
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_an_uninstalled_mcp_server_is_refused_not_a_traceback(tmp_path, command):
+    # A host MCP config nobody re-reads at launch, naming one server whose command
+    # is not installed, must not brick every invocation (including --explain) with
+    # a traceback: it is a refusal, so exit 2 and name the missing command.
+    _write_host_mcp(tmp_path / "home", "aisan-definitely-absent-mcp")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = _cli(tmp_path, [command, "--explain", str(repo)])
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "aisan-definitely-absent-mcp" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_a_missing_client_binary_is_reported_on_stderr(tmp_path):
+    # The run path's "no `claude` on PATH" refusal is a diagnostic, not the
+    # profile the operator asked to see: it belongs on stderr like every sibling,
+    # so a caller piping stdout does not mistake it for output.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    empty = tmp_path / "empty-path"
+    empty.mkdir()
+    drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env["HOME"] = str(home)
+    env["PATH"] = str(empty)
+    result = subprocess.run(
+        [sys.executable, "-m", "aisan.cli.main", "claude", str(repo)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "no `claude` on PATH" in result.stderr
+    assert "no `claude` on PATH" not in result.stdout
+
+
+async def test_the_run_path_routes_an_assembly_refusal_to_return_2(
+    tmp_path, monkeypatch, capsys
+):
+    # After preflight, assembly can still refuse (a bind-over whose source is
+    # gone, or wrapper() finding the egress binds did not survive resolution).
+    # Those arrive as exceptions, not a child return code, so the run path must
+    # route them rather than let one traceback out with exit 1.
+    class _RefusingBox:
+        def __init__(self, spec, *, box_id):
+            self.spec = spec
+
+        async def __aenter__(self):
+            raise FileNotFoundError("bind-over source missing: /gone")
+
+        async def __aexit__(self, *exc):
+            return None
+
+    monkeypatch.setattr("aisan.session.Box", _RefusingBox)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    code = await run_interactive(
+        client="claude",
+        harness="claude-code",
+        executable="claude",
+        repo=repo,
+        state=tmp_path / "state",
+        spec=object(),
+        command=lambda _box: ["claude"],
+        binary=lambda: repo / "claude",
+        binds=None,
+        egress_profiles=None,
+        explain_only=False,
+    )
+    assert code == 2
+    assert "refused" in capsys.readouterr().err

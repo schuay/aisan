@@ -56,12 +56,13 @@ from aisan.presets.opencode import opencode, opencode_binary
 from aisan.sandbox import BindOver, BindSpec
 from aisan.session import (
     interactive_parser,
+    mcp_launcher_binds,
     parse_interactive_args,
     run_interactive,
     state_dir,
     terminal_env,
 )
-from aisan.session_mcp import mcp_ro_binds, mcp_search_path, opencode_host_mcp
+from aisan.session_mcp import mcp_search_path, opencode_host_mcp
 
 # HOME is a tmpfs in the box, so anything under it the payload needs must be
 # named. Git's identity lives here; without it a commit inside the box dies
@@ -142,7 +143,7 @@ async def _main(argv: list[str]) -> int:
         repo,
         state=state,
         egress=(backend,),
-        extra_ro=(GIT_CONFIG, *mcp_ro_binds(mcp)),
+        extra_ro=(GIT_CONFIG, *mcp_launcher_binds(mcp)),
         extra_env=(
             # /usr is bound ro unconditionally, but the preset's PATH is only
             # /usr/bin -- anything elsewhere has to be named.

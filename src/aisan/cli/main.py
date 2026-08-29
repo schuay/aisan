@@ -9,6 +9,7 @@ import sys
 from collections.abc import Callable
 
 from aisan import explain
+from aisan.session import LaunchRefused
 
 from . import claude, codex, opencode
 
@@ -47,7 +48,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"aisan: unknown command: {command}", file=sys.stderr)
         print("Run `aisan --help` for available commands.", file=sys.stderr)
         return 2
-    return handler(args[1:])
+    try:
+        return handler(args[1:])
+    except LaunchRefused as e:
+        print(e, file=sys.stderr)
+        return e.code
 
 
 if __name__ == "__main__":

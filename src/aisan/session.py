@@ -22,11 +22,44 @@ from .box import Box
 from .egress.base import PreflightError
 from .explain import assembly_refusal, explain
 from .presets import EGRESS_PROFILES
-from .session_mcp import SessionMCP
+from .session_mcp import SessionMCP, mcp_ro_binds
 from .spec import BoxSpec
 from .statedir import prepare_state_dir, write_sealed
 
 _TERM_PASSTHROUGH = ("TERM", "COLORTERM", "LANG", "LC_ALL")
+
+
+class LaunchRefused(Exception):
+    """A launcher-construction refusal carrying the exit code to report it with.
+
+    Raised from the spec-building work a launcher does before `run_interactive`,
+    where a bad host config would otherwise traceback out of `_main` with exit 1
+    instead of the return-2/return-3 vocabulary every other refusal speaks. The
+    dispatcher catches it so the three launchers need not each repeat the catch.
+    """
+
+    def __init__(self, message: str, code: int = 2) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def mcp_launcher_binds(mcp: SessionMCP | None) -> tuple[Path, ...]:
+    """The MCP launcher ro-binds for a preset's `extra_ro`, refusal routed.
+
+    `mcp_ro_binds` raises `FileNotFoundError` when a declared server's command is
+    not installed -- by design, so it fails before the box owns the terminal
+    rather than as a per-server failure buried inside it. But a host MCP config
+    nobody re-reads at launch naming one uninstalled server is a refusal, not a
+    bug in aisan: it should reach the operator as a nonzero exit and the server's
+    name, the same as any other unmet precondition, not as a stack trace that
+    also takes down `--explain`.
+    """
+    if mcp is None:
+        return ()
+    try:
+        return mcp_ro_binds(mcp)
+    except FileNotFoundError as e:
+        raise LaunchRefused(f"refused: {e}") from e
 
 
 def repo_key(repo: Path) -> str:
@@ -232,6 +265,12 @@ async def run_interactive(
         except ValueError as e:
             print(f"binds: {e}", file=sys.stderr)
             return 2
+        except OSError as e:
+            # A missing or unreadable spec file is the operator's path being
+            # wrong (`userbinds.load` lets it propagate for exactly this caller
+            # to name); route it like a malformed one rather than tracebacking.
+            print(f"binds: cannot read {spec_file}: {e}", file=sys.stderr)
+            return 2
         spec = spec.with_binds(user.binds).with_path_prefix(user.path)
 
     box = Box(spec, box_id=box_id(client, repo))
@@ -261,7 +300,10 @@ async def run_interactive(
         return 2 if refused else 0
 
     if binary() is None:
-        print(f"no `{executable}` on PATH: this would be an exec failure inside bwrap")
+        print(
+            f"no `{executable}` on PATH: this would be an exec failure inside bwrap",
+            file=sys.stderr,
+        )
         return 2
 
     prepare_state_dir(state)
@@ -288,6 +330,14 @@ async def run_interactive(
     except PreflightError as e:
         print(f"refused: {e}", file=sys.stderr)
         return 3
+    except (ValueError, FileNotFoundError) as e:
+        # Assembly can still refuse after preflight: staging a bind-over whose
+        # source is gone, or `wrapper()` finding the egress binds did not survive
+        # resolution. Only the child's status comes back as a return code; these
+        # come back as exceptions, so route them rather than let one traceback
+        # out with exit 1 next to the refusal convention its siblings speak.
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
 
 
 @contextmanager

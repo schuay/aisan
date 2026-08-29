@@ -25,13 +25,14 @@ from aisan.egress.openai_responses import (
 from aisan.presets.codex import codex, codex_argv, codex_binary
 from aisan.session import (
     interactive_parser,
+    mcp_launcher_binds,
     mirror_user_memory,
     parse_interactive_args,
     run_interactive,
     state_dir,
     terminal_env,
 )
-from aisan.session_mcp import codex_host_mcp, mcp_ro_binds, mcp_search_path
+from aisan.session_mcp import codex_host_mcp, mcp_search_path
 
 GIT_CONFIG = Path.home() / ".config" / "git"
 USER_MEMORY = Path.home() / ".codex" / "AGENTS.md"
@@ -73,7 +74,7 @@ async def _main(argv: list[str]) -> int:
         repo,
         state=state,
         egress=(backend,),
-        extra_ro=(GIT_CONFIG, *mcp_ro_binds(mcp)),
+        extra_ro=(GIT_CONFIG, *mcp_launcher_binds(mcp)),
         extra_env=(("PATH", mcp_search_path()), *terminal_env()),
         unshare_net=not args.net,
     )

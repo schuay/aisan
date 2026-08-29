@@ -47,13 +47,14 @@ from aisan.egress.anthropic import DEFAULT_UPSTREAM, PLACEHOLDER_KEY, AnthropicB
 from aisan.presets.claude_code import claude_code, claude_code_binary
 from aisan.session import (
     interactive_parser,
+    mcp_launcher_binds,
     mirror_user_memory,
     parse_interactive_args,
     run_interactive,
     state_dir,
     terminal_env,
 )
-from aisan.session_mcp import claude_host_mcp, mcp_ro_binds, mcp_search_path
+from aisan.session_mcp import claude_host_mcp, mcp_search_path
 from aisan.statedir import read_sealed_text, write_sealed
 
 GIT_CONFIG = Path.home() / ".config" / "git"
@@ -156,7 +157,7 @@ async def _main(argv: list[str]) -> int:
         repo,
         state=state,
         egress=(backend,),
-        extra_ro=(GIT_CONFIG, *mcp_ro_binds(mcp)),
+        extra_ro=(GIT_CONFIG, *mcp_launcher_binds(mcp)),
         extra_env=(
             # /usr is bound ro unconditionally, but the preset's PATH is only
             # /usr/bin -- anything elsewhere has to be named.
