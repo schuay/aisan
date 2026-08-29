@@ -5,12 +5,12 @@
 
 The sibling of the Claude session launcher, and most of that launcher's
 reasoning carries across unchanged: the boundary is the perimeter, not
-the repo (an interactive session on a tree the operator chose, so the whole
-worktree is the session's to write and `gitbinds` pinning is deliberately
-absent); the host half of egress is an aiohttp server on this process's event
-loop, so the payload waits in a thread or every model call hangs; and TERM
-travels with the caller because a TUI in a cleared environment renders as a
-dumb terminal.
+the repo (an interactive session on a tree the operator chose, so the worktree
+is the session's to write, with the same `gitbinds.git_binds` policy the Claude
+launcher applies to a linked worktree's shared `.git`); the host half of egress
+is an aiohttp server on this process's event loop, so the payload waits in a
+thread or every model call hangs; and TERM travels with the caller because a TUI
+in a cleared environment renders as a dumb terminal.
 
 What does NOT carry across: the first-run seeding. Claude Code's onboarding
 begins with a connectivity check that ignores the proxy and exits on failure,

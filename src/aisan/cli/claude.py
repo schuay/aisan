@@ -10,12 +10,16 @@ path, and each one is noted where it is decided.
 
 **The boundary here is the perimeter, not the repo.** An interactive session is
 one the operator chose, on a tree the operator chose, sitting in front of it --
-so the box's job is to keep the agent out of the rest of the machine, and
-everything inside the worktree (`.git` included) is the session's to write. That
-is a different model from the unattended job profile: `v8_job` pins `.git`'s
-hooks and configs ro through `gitbinds.git_binds`, because there a poisoned hook
-runs on the host with nobody watching. Here it is not a boundary violation, it
-is the agent using the repo it was pointed at.
+so the box's job is to keep the agent out of the rest of the machine, and the
+worktree it was pointed at is the session's to write. On a plain checkout that
+includes `.git`: it sits inside the rw root, and `gitbinds.git_binds` returns
+nothing for it. A LINKED worktree gets that policy in full, the same as the
+unattended `v8_job` profile does: its `.git` is a store shared with the host and
+the sibling worktrees, so the files that steer host-side git (hooks, configs,
+object pointers) are pinned ro and the siblings are sealed away. Otherwise a
+planted hook runs the next time host git touches the shared repo, and an in-box
+`git gc` or `git worktree prune` collects a sibling worktree out of the store
+they share.
 
 The CLI: launcher flags are parsed STRICTLY (no abbreviation -- `--bind` must
 not resolve to `--binds` in a tool whose flags gate mounts), and everything
