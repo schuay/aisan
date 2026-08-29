@@ -121,7 +121,12 @@ async def test_refusal_is_a_grpc_status_not_an_http_error():
     assert end is True
 
 
-async def _h2_request(sock: Path, path: str, authority: str = rbe.UPSTREAM_HOST):
+async def _h2_request(
+    sock: Path,
+    path: str,
+    authority: str = rbe.UPSTREAM_HOST,
+    host: str | None = None,
+):
     """Speak real HTTP/2 to the proxy and return (headers, trailers).
 
     A hand-rolled client rather than a gRPC one: the payload is opaque to the
@@ -131,6 +136,10 @@ async def _h2_request(sock: Path, path: str, authority: str = rbe.UPSTREAM_HOST)
     Over the UNIX socket because that is the only transport the proxy has: the
     box has its own netns, so a host loopback port would be unreachable from it.
     What is under test here is the session, which is identical either way.
+
+    `host` sends an explicit Host field alongside :authority. h2 refuses to send
+    a block whose two disagree, so a caller exercising the rewrite passes the
+    same value it puts in `authority`.
     """
     reader, writer = await asyncio.open_unix_connection(str(sock))
     conn = h2.connection.H2Connection(h2.config.H2Configuration(client_side=True))
@@ -143,6 +152,7 @@ async def _h2_request(sock: Path, path: str, authority: str = rbe.UPSTREAM_HOST)
             (b":path", path.encode()),
             (b":scheme", b"http"),
             (b":authority", authority.encode()),
+            *([(b"host", host.encode())] if host is not None else []),
             (b"content-type", b"application/grpc"),
             (b"te", b"trailers"),
         ],
@@ -608,6 +618,108 @@ async def test_a_permitted_method_is_forwarded_with_the_credential(
     # ":8712" to Google would be the same class of bug as the 127.0.0.1 authority
     # the /etc/hosts bind exists to prevent.
     assert fwd_authority == rbe.UPSTREAM_HOST
+
+
+async def test_a_host_header_is_rewritten_alongside_the_authority(
+    monkeypatch, tmp_path
+):
+    """h2 refuses a header block whose Host and :authority disagree, and the box
+    may send a Host field of its own. The proxy strips the box's loopback port
+    from :authority; leaving Host untouched made the two disagree on the
+    UPSTREAM send, and the resulting ProtocolError escaped the session's broad
+    except and tore the whole connection down with no gRPC status -- the
+    retry-storm-then-local-fallback this module exists to avoid, on demand from
+    any in-box process. Host must be rewritten to the same bare value.
+
+    The upstream connection here is a REAL client-side h2 (unlike the recording
+    stub the forward test uses), because the mismatch is caught in `send_headers`
+    and a non-validating fake would let the bug through green."""
+    from aisan.proxy import rbe
+
+    seen: list[list[tuple[bytes, bytes]]] = []
+
+    class _ValidatingConn:
+        def __init__(self):
+            self._h2 = h2.connection.H2Connection(
+                h2.config.H2Configuration(client_side=True)
+            )
+            self._h2.initiate_connection()
+
+        def get_next_available_stream_id(self):
+            return self._h2.get_next_available_stream_id()
+
+        def send_headers(self, sid, headers, end_stream=False):
+            # A real h2 send: a Host that disagrees with :authority raises here,
+            # exactly as the upstream would. Recorded only once accepted.
+            self._h2.send_headers(sid, headers, end_stream=end_stream)
+            seen.append(list(headers))
+
+        def send_data(self, *a, **k):
+            pass
+
+        def end_stream(self, *a, **k):
+            pass
+
+        def reset_stream(self, *a, **k):
+            pass
+
+        def receive_data(self, data):
+            return []
+
+        def data_to_send(self):
+            return b""
+
+        def initiate_connection(self):
+            pass
+
+        def acknowledge_received_data(self, *a, **k):
+            pass
+
+    async def fake_connect(self):
+        loop = asyncio.get_running_loop()
+        never = loop.create_future()
+
+        class _R:
+            async def read(self, n):
+                await never
+
+        class _W:
+            def write(self, d):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+            async def wait_closed(self):
+                pass
+
+        return _R(), _W(), _ValidatingConn()
+
+    monkeypatch.setattr(rbe.Session, "_connect_upstream", fake_connect)
+    sock = tmp_path / "rbe.sock"
+    server = await serve_rbe_unix(sock, _token)
+    allowed = f"{EXEC}/Execute"
+    # The box dials the bound name on the relay's loopback port and sends a
+    # matching Host, which is what the downstream h2 accepts on receipt; the
+    # port is stripped only when :authority is normalized for the upstream.
+    dialled = f"{rbe.UPSTREAM_HOST}:8712"
+    try:
+        with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
+            await asyncio.wait_for(
+                _h2_request(sock, allowed, authority=dialled, host=dialled),
+                timeout=3,
+            )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert seen, "the request must reach upstream, not tear the session down"
+    forwarded = dict(seen[0])
+    assert forwarded[b":authority"] == rbe.UPSTREAM_HOST.encode()
+    assert forwarded[b"host"] == rbe.UPSTREAM_HOST.encode()
 
 
 async def test_a_client_disconnect_ends_the_session(monkeypatch, tmp_path):

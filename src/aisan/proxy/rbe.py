@@ -454,8 +454,21 @@ class Session:
             # Replaced IN PLACE, not filtered and re-appended: pseudo-headers must
             # precede regular fields, and appending one after them is a protocol
             # error h2 rejects outright.
+            #
+            # `host` is rewritten to the same value, not left alone: h2 refuses to
+            # send a block whose `host` and `:authority` disagree, and the box may
+            # send a `host` header of its choosing. Rewriting only :authority left
+            # the box-supplied host in place, so a single crafted request tripped
+            # that check; the ProtocolError escaped into `_pump_down`'s broad
+            # except and tore the whole connection down with no gRPC status -- the
+            # retry-storm-then-local-fallback this module exists to avoid, at will.
             out = [
-                (k, UPSTREAM_HOST.encode() if k.lower() == b":authority" else v)
+                (
+                    k,
+                    UPSTREAM_HOST.encode()
+                    if k.lower() in (b":authority", b"host")
+                    else v,
+                )
                 for k, v in ev.headers
                 if k.lower() != b"authorization"
             ]
