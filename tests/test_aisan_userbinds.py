@@ -43,7 +43,7 @@ def test_ro_binds_are_optional_and_rw_binds_are_mandatory(tmp_path):
     for. No per-path key: the file stays obviously weaker than the Python it
     accompanies."""
     f = _spec_file(tmp_path, 'ro = ["/refs/a"]\nrw = ["/scratch/b"]\n')
-    assert load(f).binds == [
+    assert load(f, egress=()).binds == [
         Bind(Path("/refs/a"), RO, optional=True),
         Bind(Path("/scratch/b"), RW),
     ]
@@ -52,7 +52,7 @@ def test_ro_binds_are_optional_and_rw_binds_are_mandatory(tmp_path):
 def test_an_empty_file_names_nothing(tmp_path):
     """A no-op file is a valid no-op -- refusing it would be demanding
     content the format has no other way to state."""
-    assert load(_spec_file(tmp_path, "")) == UserSpec([], ())
+    assert load(_spec_file(tmp_path, ""), egress=()) == UserSpec([], ())
 
 
 def test_tilde_expands_and_relative_resolves_against_the_file(tmp_path, monkeypatch):
@@ -63,7 +63,7 @@ def test_tilde_expands_and_relative_resolves_against_the_file(tmp_path, monkeypa
     (home / "refs").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     f = _spec_file(tmp_path, 'ro = ["~/refs", "neighbour"]\n')
-    assert load(f).binds == [
+    assert load(f, egress=()).binds == [
         Bind(home / "refs", RO, optional=True),
         Bind(tmp_path / "neighbour", RO, optional=True),
     ]
@@ -74,7 +74,7 @@ def test_unknown_keys_are_refused_not_ignored(tmp_path):
     ignored key in a confinement config is the wrong direction to err in."""
     f = _spec_file(tmp_path, 'ro = ["/a"]\nwr = ["/b"]\n')
     with pytest.raises(ValueError, match=r"unknown key.*'wr'"):
-        load(f)
+        load(f, egress=())
 
 
 @pytest.mark.parametrize(
@@ -88,7 +88,7 @@ def test_unknown_keys_are_refused_not_ignored(tmp_path):
 )
 def test_malformed_entries_are_refused(tmp_path, value, why):
     with pytest.raises(ValueError, match="must be an array"):
-        load(_spec_file(tmp_path, value))
+        load(_spec_file(tmp_path, value), egress=())
 
 
 @pytest.mark.parametrize(
@@ -105,7 +105,7 @@ def test_a_path_in_two_mount_keys_is_refused(tmp_path, text, match):
     just ro/rw: an overlay is the one binding a tool cache tolerates, so a
     file naming it ro as well has stated two incompatible intentions."""
     with pytest.raises(ValueError, match=f"appears in {match}"):
-        load(_spec_file(tmp_path, text))
+        load(_spec_file(tmp_path, text), egress=())
 
 
 @pytest.mark.parametrize(
@@ -124,7 +124,7 @@ def test_a_mount_nested_under_a_later_broader_one_is_refused(tmp_path, text):
     equality has its own refusal; this is the nesting the fixed emission order
     introduced. `..` is normalised away so it cannot dodge the check."""
     with pytest.raises(ValueError, match="remove the nesting"):
-        load(_spec_file(tmp_path, text))
+        load(_spec_file(tmp_path, text), egress=())
 
 
 def test_same_mode_nesting_is_allowed(tmp_path):
@@ -132,7 +132,7 @@ def test_same_mode_nesting_is_allowed(tmp_path):
     mode is what the author wrote either way, so it is redundant, not a silent
     upgrade, and refusing it would be stricter than the hazard warrants."""
     f = _spec_file(tmp_path, 'rw = ["/a/b", "/a"]\n')
-    assert [b.path for b in load(f).binds] == [Path("/a/b"), Path("/a")]
+    assert [b.path for b in load(f, egress=()).binds] == [Path("/a/b"), Path("/a")]
 
 
 def test_the_includer_may_still_shadow_an_included_mount(tmp_path):
@@ -142,7 +142,9 @@ def test_the_includer_may_still_shadow_an_included_mount(tmp_path):
     outer = _named_spec(
         tmp_path / "outer.toml", 'include = ["base.toml"]\nrw = ["/a"]\n'
     )
-    assert [(b.path, getattr(b, "mode", None)) for b in load(outer).binds] == [
+    assert [
+        (b.path, getattr(b, "mode", None)) for b in load(outer, egress=()).binds
+    ] == [
         (Path("/a/b"), RO),
         (Path("/a"), RW),
     ]
@@ -156,7 +158,7 @@ def test_the_same_path_in_two_spellings_is_one_bind(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     f = _spec_file(tmp_path, 'ro = ["~/a", "%s"]\n' % (home / "a"))
-    assert load(f).binds == [Bind(home / "a", RO, optional=True)]
+    assert load(f, egress=()).binds == [Bind(home / "a", RO, optional=True)]
 
 
 def test_order_is_overlays_then_ro_then_rw(tmp_path):
@@ -165,7 +167,7 @@ def test_order_is_overlays_then_ro_then_rw(tmp_path):
     then what the box may read, then what it may write: the order v8_job
     writes by hand, since a user file has no way to say where a bind goes."""
     f = _spec_file(tmp_path, 'ro = ["/a", "/b"]\nrw = ["/c"]\noverlay = ["/d"]\n')
-    binds = load(f).binds
+    binds = load(f, egress=()).binds
     assert [b.path for b in binds] == [Path("/d"), Path("/a"), Path("/b"), Path("/c")]
     assert isinstance(binds[0], Overlay)
 
@@ -231,6 +233,16 @@ def test_a_backend_without_a_file_cannot_be_exposed(tmp_path):
     assert load(f, egress=(_Minted(),)).binds  # even ~ is fine: nothing to expose
 
 
+def test_egress_is_required_so_the_guard_is_never_off_by_default(tmp_path):
+    """The guard's only input has no default. A default of `()` would be a
+    guard silently switched off for any caller that forgot it, which is the one
+    failure it exists to prevent, so omitting egress is a TypeError rather than
+    a load whose credential check saw no backends and passed everything."""
+    f = _spec_file(tmp_path, 'ro = ["/a"]\n')
+    with pytest.raises(TypeError):
+        load(f)  # type: ignore[call-arg]
+
+
 # --- overlay and path ---------------------------------------------------------
 
 
@@ -241,14 +253,14 @@ def test_an_overlay_is_mandatory_and_keeps_its_own_bind_type(tmp_path):
     a skipped overlay is a hang, which is the worst way to learn about a bad
     bind."""
     f = _spec_file(tmp_path, 'overlay = ["/cache/store"]\n')
-    assert load(f).binds == [Overlay(Path("/cache/store"))]
+    assert load(f, egress=()).binds == [Overlay(Path("/cache/store"))]
 
 
 def test_path_entries_are_returned_separately_from_the_binds(tmp_path):
     """`path` grants no mount, so it does not become one. It travels beside
     the binds because it reaches the spec through the other combinator."""
     f = _spec_file(tmp_path, 'ro = ["/tools"]\npath = ["/tools"]\n')
-    spec = load(f)
+    spec = load(f, egress=())
     assert spec.binds == [Bind(Path("/tools"), RO, optional=True)]
     assert spec.path == (Path("/tools"),)
 
@@ -261,7 +273,7 @@ def test_a_path_entry_may_be_covered_by_any_mount_key(tmp_path, mount):
     all three mount modes provide. A descendant counts: binding a tree grants
     its bin dir too."""
     f = _spec_file(tmp_path, f'{mount}\npath = ["/tools/bin"]\n')
-    assert load(f).path == (Path("/tools/bin"),)
+    assert load(f, egress=()).path == (Path("/tools/bin"),)
 
 
 def test_a_path_entry_no_mount_covers_is_refused(tmp_path):
@@ -271,7 +283,7 @@ def test_a_path_entry_no_mount_covers_is_refused(tmp_path):
     does not have, which resolves nothing and reads like a working config."""
     f = _spec_file(tmp_path, 'ro = ["/tools"]\npath = ["/elsewhere"]\n')
     with pytest.raises(ValueError, match="not covered by any ro, rw or overlay"):
-        load(f)
+        load(f, egress=())
 
 
 def test_a_sibling_prefix_does_not_cover_a_path_entry(tmp_path):
@@ -279,7 +291,7 @@ def test_a_sibling_prefix_does_not_cover_a_path_entry(tmp_path):
     /tools, and comparing spellings would say it was."""
     f = _spec_file(tmp_path, 'ro = ["/tools"]\npath = ["/toolsx"]\n')
     with pytest.raises(ValueError, match="not covered"):
-        load(f)
+        load(f, egress=())
 
 
 def _named_spec(path: Path, body: str) -> Path:
@@ -302,7 +314,7 @@ def test_include_expands_in_place_and_the_includer_shadows(tmp_path):
         'include = ["base/tools.toml"]\nrw = ["~/tools"]\n',
     )
 
-    spec = load(outer)
+    spec = load(outer, egress=())
 
     # Included first, so the rw the outer file names lands later and wins.
     assert [(b.path, getattr(b, "mode", None)) for b in spec.binds] == [
@@ -318,7 +330,7 @@ def test_an_include_resolves_against_the_including_file(tmp_path):
     _named_spec(tmp_path / "d" / "inner.toml", 'ro = ["~/inner"]\n')
     outer = _named_spec(tmp_path / "d" / "outer.toml", 'include = ["inner.toml"]\n')
 
-    assert [b.path for b in load(outer).binds] == [Path.home() / "inner"]
+    assert [b.path for b in load(outer, egress=()).binds] == [Path.home() / "inner"]
 
 
 def test_a_diamond_mounts_once(tmp_path):
@@ -326,7 +338,7 @@ def test_a_diamond_mounts_once(tmp_path):
     _named_spec(tmp_path / "mid.toml", 'include = ["leaf.toml"]\n')
     top = _named_spec(tmp_path / "top.toml", 'include = ["leaf.toml", "mid.toml"]\n')
 
-    assert [b.path for b in load(top).binds] == [Path.home() / "leaf"]
+    assert [b.path for b in load(top, egress=()).binds] == [Path.home() / "leaf"]
 
 
 def test_an_include_cycle_is_refused_by_name(tmp_path):
@@ -334,21 +346,21 @@ def test_an_include_cycle_is_refused_by_name(tmp_path):
     _named_spec(tmp_path / "b.toml", 'include = ["a.toml"]\n')
 
     with pytest.raises(ValueError, match="include cycle"):
-        load(a)
+        load(a, egress=())
 
 
 def test_a_file_including_itself_is_a_cycle_not_a_repeat(tmp_path):
     a = _named_spec(tmp_path / "self.toml", 'include = ["self.toml"]\n')
 
     with pytest.raises(ValueError, match="include cycle"):
-        load(a)
+        load(a, egress=())
 
 
 def test_a_missing_include_names_the_file_that_asked_for_it(tmp_path):
     outer = _named_spec(tmp_path / "outer.toml", 'include = ["gone.toml"]\n')
 
     with pytest.raises(ValueError, match=r"outer\.toml: include .*gone\.toml"):
-        load(outer)
+        load(outer, egress=())
 
 
 def test_a_path_entry_may_rest_on_an_included_mount(tmp_path):
@@ -360,7 +372,7 @@ def test_a_path_entry_may_rest_on_an_included_mount(tmp_path):
         'include = ["tools.toml"]\npath = ["~/tools/bin"]\n',
     )
 
-    spec = load(outer)
+    spec = load(outer, egress=())
 
     assert spec.path == (Path.home() / "tools" / "bin",)
 
@@ -383,4 +395,4 @@ def test_a_malformed_include_names_the_inner_file(tmp_path):
     outer = _named_spec(tmp_path / "outer.toml", 'include = ["inner.toml"]\n')
 
     with pytest.raises(ValueError, match=r"inner\.toml: unknown key"):
-        load(outer)
+        load(outer, egress=())

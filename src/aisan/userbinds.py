@@ -130,7 +130,7 @@ class UserSpec:
     path: tuple[Path, ...]
 
 
-def load(path: Path, *, egress: tuple[Backend, ...] = ()) -> UserSpec:
+def load(path: Path, *, egress: tuple[Backend, ...]) -> UserSpec:
     """The mounts and PATH entries a user file names, validated and guarded.
 
     Raises ValueError naming the file and the offending key for every
@@ -138,6 +138,12 @@ def load(path: Path, *, egress: tuple[Backend, ...] = ()) -> UserSpec:
     silently ignored line in a file somebody believes is in effect.
     FileNotFoundError propagates: a missing spec file is the caller's path
     being wrong, not this file's contents.
+
+    `egress` has no default on purpose. It is the credential guard's only input,
+    and a default of `()` would be a guard silently switched off for any caller
+    that forgot it -- the one failure the guard exists to prevent. A caller with
+    no backends passes `()` and says so; a caller with backends cannot omit them
+    by accident.
     """
     return _load(path, egress, [], set())
 
