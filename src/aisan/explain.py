@@ -197,7 +197,8 @@ def explain(
         out.write(f"  {exc}\n")
         return out.getvalue()
     prof = parse_wrapper(wrapper, sandbox)
-    shared_egress = bool(box.spec.egress) and not box.spec.unshare_net
+    isolated = box.spec.unshare_net
+    shared_egress = bool(box.spec.egress) and not isolated
     effective_env = dict(prof.env)
     if shared_egress:
         for backend in box.spec.egress:
@@ -207,8 +208,14 @@ def explain(
     section("inputs")
     for key, value in inputs:
         out.write(f"  {key:<9} {value}\n")
-    if shared_egress:
-        out.write("  network   shared host namespace\n")
+    # Rendered from unshare_net directly, unconditionally: the network mode is
+    # the box's most consequential boundary, and gating this line on egress once
+    # let a shared-host-network box with no backends print nothing here while the
+    # egress section claimed "no route off the machine".
+    if isolated:
+        out.write("  network   own namespace (no route off the machine)\n")
+    else:
+        out.write("  network   shared host namespace (full host network)\n")
     out.write(f"  box_id    {box.box_id}\n")
     out.write(f"  HOME(env) {home}\n")
     out.write(f"  chdir     {prof.chdir}\n")
@@ -224,8 +231,10 @@ def explain(
                 out.write(f"  {backend.name:<8} 127.0.0.1:{backend.port} -> {sock}\n")
             else:
                 out.write(f"  {backend.name:<8} 127.0.0.1:(assigned at launch)\n")
-    else:
+    elif isolated:
         out.write("  (none; the box has no route off the machine)\n")
+    else:
+        out.write("  (none; egress off -- the box shares the host network)\n")
 
     section("tmpfs mounts (mounted before binds; intended writable scratch)")
     if prof.tmpfs:

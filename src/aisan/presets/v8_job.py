@@ -178,7 +178,7 @@ def v8_job(
     extra_ro: tuple[Path, ...] = (),
     extra_path: tuple[str, ...] = (),
     depot_tools: Path | None = None,
-    unshare_net: bool = False,
+    unshare_net: bool = True,
     cgroup_slice: str = "",
     tmp_size_mb: int = 4096,
     home_size_mb: int = 1024,

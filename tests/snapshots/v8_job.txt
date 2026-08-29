@@ -1,6 +1,7 @@
 
 == inputs ==
   preset    v8_job
+  network   own namespace (no route off the machine)
   box_id    snapshot
   HOME(env) <HOME>
   chdir     <ROOT>

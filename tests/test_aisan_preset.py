@@ -484,8 +484,15 @@ async def test_an_in_box_gc_cannot_destroy_a_sibling_worktrees_objects(tmp_path)
     would be, and with `--prune=now` because the danger is the command an agent
     types rather than the one git runs on its own.
     """
+    import dataclasses
+
     wt, sib, sha = _linked_worktree(tmp_path)
     spec = claude_code(wt, state=tmp_path / "state", unshare_net=True)
+    # cgroup off: a transient systemd scope is not available in every test env,
+    # and what is under test is the .git guard, not the resource limits.
+    spec = dataclasses.replace(
+        spec, limits=dataclasses.replace(spec.limits, use_cgroup=False)
+    )
     (tmp_path / "state").mkdir()
     box = Box(spec, box_id=f"gc-{tmp_path.name}")
     with box.staged():
