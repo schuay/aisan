@@ -80,6 +80,11 @@ def seed_state(state: Path, repo: Path) -> None:
     seeding them only saves answering them the first time: the folder-trust
     prompt, "Detected a custom API key" (the placeholder trips it, defaulting to
     No), and the bypassPermissions disclaimer.
+
+    The file lives in the box-writable state dir, so its contents are attacker-
+    reachable between sessions and this must never propagate a crash: a
+    non-object, non-JSON, or wrong-typed nested value rebuilds the offending
+    piece rather than raising and wedging every later launch of this repo.
     """
     path = state / ".claude.json"
     # Read without following a symlink: the state dir is box-writable, so a
@@ -87,16 +92,35 @@ def seed_state(state: Path, repo: Path) -> None:
     # merged result written back through the link). A non-regular file reads as
     # absent, rebuilding from scratch.
     existing = read_sealed_text(path)
-    config = json.loads(existing) if existing else {}
+    try:
+        parsed = json.loads(existing) if existing else {}
+    except json.JSONDecodeError:
+        parsed = {}
+    config = parsed if isinstance(parsed, dict) else {}
     config["hasCompletedOnboarding"] = True  # the mandatory one, see above
     config["bypassPermissionsModeAccepted"] = True
-    approved = config.setdefault("customApiKeyResponses", {}).setdefault("approved", [])
+    responses = _object_at(config, "customApiKeyResponses")
+    approved = responses.get("approved")
+    if not isinstance(approved, list):
+        approved = responses["approved"] = []
     if PLACEHOLDER_KEY[-20:] not in approved:  # the CLI stores the last 20 chars
         approved.append(PLACEHOLDER_KEY[-20:])
-    config.setdefault("projects", {}).setdefault(str(repo), {})[
-        "hasTrustDialogAccepted"
-    ] = True
+    _object_at(_object_at(config, "projects"), str(repo))["hasTrustDialogAccepted"] = (
+        True
+    )
     write_sealed(path, json.dumps(config, indent=2))
+
+
+def _object_at(config: dict, key: str) -> dict:
+    """`config[key]` as a dict, replacing a wrong-typed or missing value.
+
+    The state file is box-writable, so any nested value may have been swapped
+    for a list, a string, or deleted since it was last seeded; the seed only
+    needs its own keys well-formed, so a coercion is the tolerant repair."""
+    value = config.get(key)
+    if not isinstance(value, dict):
+        value = config[key] = {}
+    return value
 
 
 def seed_user_memory(state: Path, source: Path) -> None:

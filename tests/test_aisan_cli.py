@@ -147,6 +147,59 @@ def test_a_host_without_user_memory_leaves_the_state_dir_alone(
     assert (state / filename).read_text() == "agent memory\n"
 
 
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "not json at all",
+        '{"projects": "a string"}',
+        '{"customApiKeyResponses": [1, 2]}',
+        "[1, 2, 3]",
+        '{"projects": {"/repo": "not an object"}}',
+    ],
+)
+def test_seed_state_rebuilds_malformed_state_instead_of_crashing(tmp_path, malformed):
+    """The .claude.json lives in the box-writable state dir, so its contents are
+    attacker-reachable between sessions. A non-JSON, non-object or wrong-typed
+    nested value used to crash seed_state and wedge every later `aisan claude`
+    on this repo until the operator deleted the cache. It must be repaired."""
+    import json
+
+    from aisan.cli.claude import seed_state
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / ".claude.json").write_text(malformed)
+
+    seed_state(state, Path("/repo"))
+
+    config = json.loads((state / ".claude.json").read_text())
+    assert config["hasCompletedOnboarding"] is True
+    assert config["bypassPermissionsModeAccepted"] is True
+    assert isinstance(config["customApiKeyResponses"]["approved"], list)
+    assert config["projects"]["/repo"]["hasTrustDialogAccepted"] is True
+
+
+def test_seed_state_preserves_unrelated_valid_state(tmp_path):
+    """A tolerant rebuild only repairs what is malformed: valid, unrelated keys
+    the CLI wrote survive the reseed."""
+    import json
+
+    from aisan.cli.claude import seed_state
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / ".claude.json").write_text(
+        json.dumps({"userID": "keep-me", "projects": {"/other": {"seen": True}}})
+    )
+
+    seed_state(state, Path("/repo"))
+
+    config = json.loads((state / ".claude.json").read_text())
+    assert config["userID"] == "keep-me"
+    assert config["projects"]["/other"] == {"seen": True}
+    assert config["projects"]["/repo"]["hasTrustDialogAccepted"] is True
+
+
 def test_the_seeded_sources_are_the_hosts_own_user_memory():
     """The constants the launchers seed FROM, named once so a rename of either
     host file does not silently turn seeding into a no-op."""
