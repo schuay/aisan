@@ -550,6 +550,24 @@ def test_body_policy_refuses_duplicate_keys_at_any_depth():
         assert "unambiguous" in reason
 
 
+def test_body_policy_refuses_a_lenient_json_constant():
+    """`NaN` and the infinities read one way here and another upstream.
+
+    Python's parser accepts them as floats; a strict parser rejects them. So a
+    body carrying one is the same capability disagreement as a repeated key: the
+    reading this side inspects is not necessarily the one the upstream acts on.
+    Refused, and in particular a refused key does not become permitted by
+    padding the body with a `NaN` the old parser would have quietly accepted.
+    """
+    p = BodyPolicy()
+    for body in (b'{"pad": NaN}', b'{"x": Infinity}', b'{"y": -Infinity}'):
+        reason = p.refuse(body)
+        assert reason is not None, body
+        assert "unambiguous" in reason
+    behind_nan = b'{"container": [{"name": "s"}], "pad": NaN}'
+    assert p.refuse(behind_nan) is not None
+
+
 def test_body_policy_still_has_no_opinion_on_a_body_it_cannot_read():
     """The leniency above it is deliberate and stays.
 

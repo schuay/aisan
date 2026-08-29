@@ -52,7 +52,6 @@ behavior.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -63,7 +62,7 @@ from .http import (
     MAX_BODY_BYTES,
     RateLimit,
     bearer_token,
-    json_unique_pairs,
+    load_json_unambiguous,
     serve,
     token_matches,
 )
@@ -206,23 +205,16 @@ class BodyPolicy:
 
 
 def parse_json_object(body: bytes) -> dict[str, object]:
-    """Parse one unambiguous JSON object for a body policy to inspect."""
-    try:
-        payload = json.loads(
-            body,
-            object_pairs_hook=json_unique_pairs,
-            parse_constant=_invalid_constant,
-        )
-    except (UnicodeDecodeError, ValueError) as e:
-        raise ValueError(str(e)) from e
+    """Parse one unambiguous JSON object for a body policy to inspect.
+
+    The strictness -- repeated keys and lenient constants both refused -- lives
+    in the shared `load_json_unambiguous`, so this policy and the anthropic and
+    vertex policies read a body the same way.
+    """
+    payload = load_json_unambiguous(body)
     if not isinstance(payload, dict):
         raise TypeError("request body must be a JSON object")
     return payload
-
-
-def _invalid_constant(value: str) -> object:
-    """Reject NaN and infinities, which are JavaScript extensions, not JSON."""
-    raise ValueError(f"invalid JSON constant {value}")
 
 
 def _error(status: int, kind: str, message: str) -> web.Response:

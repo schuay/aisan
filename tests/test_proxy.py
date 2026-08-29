@@ -818,6 +818,9 @@ def test_body_policy_refuses_shapes_it_cannot_classify():
         b'{"tools": "not a list"}',
         b'{"tools": ["not an object"]}',
         b'{"tools": [{"functionDeclarations": []}], "tools": [{"urlContext": {}}]}',
+        # NaN and the infinities are lenient extensions the shared parser now
+        # rejects, so the three policies read a body the same way.
+        b'{"tools": [], "pad": NaN}',
     ]
     for body in bodies:
         assert BodyPolicy().refuse(body) is not None, body

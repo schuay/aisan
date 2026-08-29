@@ -27,13 +27,16 @@ MAX_BODY_BYTES = 32 << 20
 
 
 class AmbiguousBody(ValueError):
-    """A body two conforming JSON parsers may read differently.
+    """A body a strict and a lenient JSON parser may read differently.
 
     Distinct from "this is not JSON", and the distinction is what a body policy
-    acts on. A document with a repeated key is accepted by both parsers, but
-    which value survives is unspecified -- so the declaration this side inspects
-    need not be the one the upstream acts on, and a policy that approved the
-    reading it happened to get would be approving a capability it never saw.
+    acts on. Two shapes qualify. A document with a repeated key is accepted by
+    both parsers, but which value survives is unspecified. A bare `NaN` or
+    `Infinity` is a JavaScript extension this parser accepts as a float while a
+    strict parser rejects it outright. Either way the declaration this side
+    inspects need not be the one the upstream acts on, and a policy that
+    approved the reading it happened to get would be approving a capability it
+    never saw.
     """
 
 
@@ -52,16 +55,31 @@ def json_unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return out
 
 
-def load_json_unambiguous(body: bytes) -> object:
-    """`json.loads` with the repeated-key seam closed.
+def _reject_constant(value: str) -> object:
+    """Refuse the JSON constants only a lenient parser accepts.
 
-    Raises `AmbiguousBody` for a document that parses two ways and a plain
-    ValueError for one that does not parse at all -- two different findings,
-    which is why they are two different exceptions. What each proxy does with
-    them is its own policy: see the body policies in `anthropic` (no opinion on
-    a body it cannot read) and `openai_compat` (refuses both).
+    `NaN`, `Infinity`, and `-Infinity` are JavaScript extensions Python reads as
+    floats; a strict parser rejects them. A body carrying one is exactly a body
+    this side and a strict upstream would not agree on, so it is ambiguous, not
+    merely malformed.
     """
-    return json.loads(body, object_pairs_hook=json_unique_pairs)
+    raise AmbiguousBody(f"non-JSON constant {value}")
+
+
+def load_json_unambiguous(body: bytes) -> object:
+    """`json.loads` with the seams two JSON parsers disagree on closed.
+
+    Raises `AmbiguousBody` for a document a strict and a lenient parser read
+    differently -- a key repeated at any depth, or a bare `NaN`/`Infinity` this
+    parser accepts as a float -- and a plain ValueError for one that does not
+    parse at all. Two different findings, which is why they are two different
+    exceptions. What each proxy does with them is its own policy: see the body
+    policies in `anthropic` (no opinion on a body it cannot read, a refusal for
+    one that reads two ways) and `openai_compat` (refuses both).
+    """
+    return json.loads(
+        body, object_pairs_hook=json_unique_pairs, parse_constant=_reject_constant
+    )
 
 
 @dataclass
