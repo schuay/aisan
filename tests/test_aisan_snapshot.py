@@ -60,6 +60,7 @@ def _checkout(tmp_path: Path) -> Path:
     (wt / "third_party" / "icu").symlink_to(main / "third_party" / "icu")
     (wt / ".git").write_text(f"gitdir: {main}/.git/worktrees/wt\n")
     (main / ".git" / "worktrees" / "wt" / "commondir").write_text("../..\n")
+    (main / ".git" / "worktrees" / "wt" / "gitdir").write_text(f"{wt}/.git\n")
     return wt
 
 

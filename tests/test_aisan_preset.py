@@ -45,9 +45,12 @@ def _fake_checkout(tmp_path) -> tuple[Path, Path]:
     (wt / "third_party" / "ninja").symlink_to(main / "third_party" / "ninja")
     (wt / "src" / "local").symlink_to(wt / "out")  # inside: not a dep
     (wt / ".git").write_text(f"gitdir: {main}/.git/worktrees/wt\n")
-    # Every real private worktree dir carries one; it is a pinned pointer, so
-    # the fixture must have it for the profile to assemble.
+    # Every real private worktree dir carries these: commondir is a pinned
+    # pointer, and gitdir is git's back-pointer to the worktree's own .git file
+    # (git_binds checks it names this worktree). The fixture must have both for
+    # the profile to assemble.
     (main / ".git" / "worktrees" / "wt" / "commondir").write_text("../..\n")
+    (main / ".git" / "worktrees" / "wt" / "gitdir").write_text(f"{wt}/.git\n")
     return main, wt
 
 
@@ -178,6 +181,29 @@ def test_git_binds_refuses_a_gitdir_pointer_outside_the_worktrees_layout(tmp_pat
     (wt / ".git").write_text(f"gitdir: {evil}\n")
     with pytest.raises(ValueError, match="worktrees"):
         git_binds(wt)
+
+
+def test_git_binds_refuses_a_pointer_into_an_unrelated_repo(tmp_path):
+    # The pointer has the right SHAPE -- <main>/.git/worktrees/<name> -- but
+    # names a repo this worktree does not own. Taken at face value it binds the
+    # victim's object store rw and profile assembly writes config/hooks/objects
+    # into it. git's gitdir back-pointer in the victim's private dir points at
+    # the victim's own worktree, not ours, so the layout-shape check is not
+    # enough and the back-pointer check must refuse.
+    victim = tmp_path / "victim"
+    (victim / ".git" / "worktrees" / "z").mkdir(parents=True)
+    # A realistic victim: its private dir has a genuine back-pointer, to ITS own
+    # worktree, so the refusal cannot rely on the file merely being absent.
+    (victim / ".git" / "worktrees" / "z" / "gitdir").write_text(
+        f"{tmp_path}/victim_wt/.git\n"
+    )
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {victim}/.git/worktrees/z\n")
+    with pytest.raises(ValueError, match="does not own"):
+        git_binds(wt)
+    # And nothing was written into the victim while refusing.
+    assert sorted(p.name for p in (victim / ".git").iterdir()) == ["worktrees"]
 
 
 def test_git_binds_plain_repo_is_noop(tmp_path):

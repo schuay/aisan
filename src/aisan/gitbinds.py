@@ -175,6 +175,23 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
             f"{gitfile} does not point into a <main>/.git/worktrees/<name> "
             f"layout (got {private}); refusing to build a profile from it"
         )
+    # The layout check above only proves the pointer has the RIGHT SHAPE, not
+    # that it names THIS worktree's own repo: `gitdir: /other/repo/.git/worktrees/z`
+    # passes it and would bind an unrelated repo's object store rw (and profile
+    # assembly below would write into it). git keeps a back-pointer for exactly
+    # this -- <private>/gitdir holds the absolute path of the worktree's own .git
+    # file -- so a genuine private dir points back at us and a poisoned pointer
+    # into a foreign repo points back at that repo's worktree, not ours. Resolve
+    # both sides so a benign path-spelling difference is not read as an attack.
+    backpointer = private / "gitdir"
+    if (
+        not backpointer.is_file()
+        or Path(backpointer.read_text().strip()).resolve() != gitfile.resolve()
+    ):
+        raise ValueError(
+            f"{gitfile} points at {private}, whose gitdir back-pointer does not "
+            f"name {gitfile}; refusing to bind a repo this worktree does not own"
+        )
     alternates = main_git / "objects" / "info" / "alternates"
     # A pin needs an existing source (a missing one fails the profile rather
     # than silently dropping a guard), and some are routinely absent:

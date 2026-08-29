@@ -56,6 +56,7 @@ def _checkout(tmp_path: Path) -> Path:
     )
     (wt / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'wt'}\n")
     (main / ".git" / "worktrees" / "wt" / "commondir").write_text("../..\n")
+    (main / ".git" / "worktrees" / "wt" / "gitdir").write_text(f"{wt}/.git\n")
     return wt
 
 
