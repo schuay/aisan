@@ -126,8 +126,9 @@ CLIENT_TOOL_TYPES = frozenset({"function"})
 # declares itself as a tool type: `web_search_options` turns on hosted web
 # search with no `tools` entry (and carries a free-text `user_location`), so the
 # tool gate above never sees it. That is a route off a box `unshare_net` means
-# to have none, which is why the denylist is not empty; one discovered next year
-# is a tag added here, not a new branch in code.
+# to have none. The general guard is the measured-key allowlist below; this
+# denylist stays in front of it so a KNOWN server-acting field is refused by
+# name, and cannot ride back in through a future allowlist addition.
 REFUSED_KEYS: tuple[str, ...] = ("web_search_options",)
 
 # Top-level keys measured on the wire from opencode 1.18.23 across a full tool
