@@ -601,3 +601,33 @@ def test_a_submodule_gitdir_config_and_hooks_are_pinned(tmp_path):
     pinned = {b.path for b in git_binds(wt) if getattr(b, "mode", None) == RO}
     assert sub / "config" in pinned
     assert sub / "hooks" in pinned
+
+
+def test_external_symlink_targets_confined_to_the_main_checkout(tmp_path, caplog):
+    # H4: the worktree is the box's rw root, so a symlink the agent plants there
+    # points wherever it likes. A dep link points into the MAIN checkout (that
+    # is the only shape v8-utils creates); anything else -- ~/.ssh, / -- is
+    # dropped with a warning rather than bound RO into an egress-less box that
+    # credential_exposure never inspects.
+    import logging
+
+    from aisan.gitbinds import external_symlink_targets
+
+    main, wt = _fake_checkout(tmp_path)
+    # a legitimate dep link into the main checkout is kept
+    (main / "buildtools").mkdir()
+    (wt / "buildtools").symlink_to(main / "buildtools")
+    # planted links outside the main checkout are dropped
+    secret = tmp_path / "victim" / ".ssh"
+    secret.mkdir(parents=True)
+    (wt / "deps").symlink_to(secret)
+    (wt / "slash").symlink_to("/")
+
+    with caplog.at_level(logging.WARNING, logger="aisan.gitbinds"):
+        targets = external_symlink_targets(wt)
+
+    assert main / "buildtools" in targets
+    assert secret not in targets
+    assert Path("/") not in targets
+    warned = " ".join(r.getMessage() for r in caplog.records)
+    assert "deps" in warned and "outside the main checkout" in warned

@@ -62,10 +62,27 @@ def external_symlink_targets(
     the main checkout -- hands over a writable tree the box was never meant to
     reach. Bind what they point at, read-only, and the tree resolves.
 
+    Confined to the worktree's MAIN checkout. A V8 worktree's dep symlinks all
+    point into it -- v8-utils writes `<wt>/<dep> -> <main>/<dep>` for each
+    gclient dep, and nothing legitimate points anywhere else (verified across a
+    real checkout). So the main checkout is the allowlist, derived from the
+    same `.git` gitdir pointer `git_binds` validates. A target OUTSIDE it is not
+    a dep link: the worktree is the box's rw root, which the agent writes and
+    which persists between turns, so `<wt>/x -> ~/.ssh` or `-> /` would
+    otherwise hand the box a host path it was never meant to see (and
+    `credential_exposure` does not fire on the egress-less v8_job box). Such a
+    target is DROPPED with a warning rather than bound.
+
+    When `root` is not a linked worktree there is no main checkout to bind into,
+    so every outside-the-root target is dropped -- a plain checkout keeps its
+    deps in place rather than symlinked out, so this is empty in practice.
+
     Optional in the sense a preset may skip it entirely: a checkout with no
     external links returns an empty list and costs one directory walk.
     """
     root = root.resolve()  # compare resolved against resolved
+    layout = _git_layout(root)
+    allowed = layout[2].parent.resolve() if layout is not None else None
     targets: set[Path] = set()
 
     def scan(d: Path, depth: int) -> None:
@@ -74,8 +91,18 @@ def external_symlink_targets(
                 continue
             if p.is_symlink():
                 t = p.resolve()
-                if t.exists() and not t.is_relative_to(root):
+                if not t.exists() or t.is_relative_to(root):
+                    continue
+                if allowed is not None and t.is_relative_to(allowed):
                     targets.add(t)
+                else:
+                    log.warning(
+                        "external_symlink_targets: dropping %s -> %s: outside the"
+                        " main checkout %s",
+                        p,
+                        t,
+                        allowed,
+                    )
             elif depth > 1 and p.is_dir():
                 scan(p, depth - 1)
 
