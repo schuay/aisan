@@ -39,7 +39,8 @@ class Mount:
     """One mount spec read back out of the wrapper argv. `path` is the mount
     destination; for binds src==dst at the real absolute path."""
 
-    kind: str  # system | ro | ro-pin | rw-root | rw | tmpfs | overlay | seal-ro
+    kind: str  # system | proc | dev | symlink | ro | ro-pin | ro-shadow | ro-sub
+    #           | rw-root | rw | tmpfs | overlay | seal-ro
     path: str
     idx: int  # token index of the mount spec (for ordering)
     size: str | None = None  # tmpfs only
@@ -69,26 +70,42 @@ def _policy_dests(sb: Sandbox) -> set[Path]:
     return dests
 
 
-def _pins(sb: Sandbox) -> set[Path]:
-    """Destinations the profile mounts ro ON TOP OF something it already mounted
-    rw -- the pinned .git config and friends.
+def _pins_and_shadows(sb: Sandbox) -> tuple[set[Path], set[Path]]:
+    """The two ways an ro bind is not what "ro" alone says, read off the ORDER.
 
-    Read off the resolved bind list rather than off a field name, because in this
-    model that IS what a pin is: an RO bind written after an RW one that covers
-    it. Naming them distinctly matters for the same reason it always did (a
-    reviewer scanning a dump should see the security-relevant binds, not a wall
-    of "ro"), but the answer now comes from the ordering the box actually gets,
-    so it cannot disagree with it.
+    Both are security-relevant and both are invisible in a flat "ro" label, so a
+    reviewer scanning a dump has to see them named:
+
+    - a PIN is an ro bind written after an rw one that covers it -- the .git
+      config guards. The box has it read-only, protecting a writable region.
+    - a SHADOW is the reverse: an ro bind that a LATER writable mount (rw, tmpfs
+      or overlay) covers, so the box actually has it WRITABLE. Labelling that
+      "ro" is the misleading rendering the audit flagged -- the reviewer reads
+      protection where there is none.
+
+    Mutually exclusive for one destination (the covering rw is either before it
+    or after it), and both come from the resolved order rather than a field, so
+    neither can disagree with the box the argv builds.
     """
+    mounts = sb.resolve()
+    resolved = [(m, Path(m.dst).resolve()) for m in mounts]
     pinned: set[Path] = set()
+    shadowed: set[Path] = set()
     writable: list[Path] = []
-    for m in sb.resolve():
-        dst = Path(m.dst).resolve()
+    for i, (m, dst) in enumerate(resolved):
         if m.op == "rw":
             writable.append(dst)
-        elif m.op == "ro" and any(dst.is_relative_to(w) for w in writable):
-            pinned.add(dst)
-    return pinned
+        elif m.op == "ro":
+            if any(dst.is_relative_to(w) for w in writable):
+                pinned.add(dst)
+            elif any(
+                later.covers
+                and later.op in ("rw", "tmpfs", "overlay")
+                and dst.is_relative_to(ld)
+                for later, ld in resolved[i + 1 :]
+            ):
+                shadowed.add(dst)
+    return pinned, shadowed
 
 
 def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
@@ -103,7 +120,7 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
     mounts: list[Mount] = []
     env: dict[str, str] = {}
     chdir = ""
-    pinned = _pins(sb)
+    pinned, shadowed = _pins_and_shadows(sb)
     policy = _policy_dests(sb)
     i = 0
     n = len(argv)
@@ -125,13 +142,39 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
             mounts.append(Mount("seal-ro", argv[i + 1], i))
             i += 2
         elif a == "--ro-bind" and i + 2 < n:
-            dst = Path(argv[i + 2])
-            try:
-                d = dst.resolve()
-                kind = "ro-pin" if d in pinned else "ro" if d in policy else "system"
-            except OSError:
-                kind = "ro"
+            src, dst = argv[i + 1], Path(argv[i + 2])
+            if src != argv[i + 2]:
+                # A BindOver: src is substituted at dst, so this is NOT "the
+                # host's dst is mounted" -- the box reads a different file there
+                # (ReapiBackend's /etc/hosts redirect, a per-box .sisoenv).
+                kind = "ro-sub"
+            else:
+                try:
+                    d = dst.resolve()
+                    kind = (
+                        "ro-pin"
+                        if d in pinned
+                        else "ro-shadow"
+                        if d in shadowed
+                        else "ro"
+                        if d in policy
+                        else "system"
+                    )
+                except OSError:
+                    kind = "ro"
             mounts.append(Mount(kind, argv[i + 2], i))
+            i += 3
+        elif a == "--proc" and i + 1 < n:
+            mounts.append(Mount("proc", argv[i + 1], i))
+            i += 2
+        elif a == "--dev" and i + 1 < n:
+            mounts.append(Mount("dev", argv[i + 1], i))
+            i += 2
+        elif a == "--symlink" and i + 2 < n:
+            # `--symlink TARGET LINKPATH`: the merged-usr links (/bin -> usr/bin)
+            # that stand in for a bound /. Named by the link path, since that is
+            # what exists in the box.
+            mounts.append(Mount("symlink", argv[i + 2], i))
             i += 3
         elif a == "--bind" and i + 2 < n:
             dst = argv[i + 2]
@@ -261,7 +304,7 @@ def explain(
     for m in sorted(prof.mounts, key=lambda x: x.idx):
         if m.kind == "tmpfs":
             continue
-        out.write(f"  [{m.idx:>3}] {m.kind:<8} {m.path}\n")
+        out.write(f"  [{m.idx:>3}] {m.kind:<9} {m.path}\n")
 
     # A seal is two ops far apart in the argv (an empty tmpfs where the directory
     # was, then a ro remount after the holes through it are mounted), so neither

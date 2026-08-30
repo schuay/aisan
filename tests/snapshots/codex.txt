@@ -15,24 +15,30 @@
   [..] <MAIN>/.git/worktrees  (no size)
 
 == binds in argv order (later shadows earlier on overlap) ==
-  [..] system   /usr
-  [..] system   /etc
-  [..] system   /run/systemd/journal/stdout
-  [..] rw-root  <ROOT>
-  [..] rw       <MAIN>/.git
-  [..] ro-pin   <ROOT>/.git
-  [..] ro-pin   <MAIN>/.git/config
-  [..] ro-pin   <MAIN>/.git/config.worktree
-  [..] ro-pin   <MAIN>/.git/objects/info/alternates
-  [..] ro-pin   <MAIN>/.git/hooks
-  [..] rw       <MAIN>/.git/worktrees/wt
-  [..] ro-pin   <MAIN>/.git/worktrees/wt/commondir
-  [..] ro-pin   <MAIN>/.git/worktrees/wt/config.worktree
-  [..] ro-pin   <MAIN>/.git/objects/pack
-  [..] rw       <STATE>
+  [..] system    /usr
+  [..] symlink   /bin
+  [..] symlink   /lib
+  [..] symlink   /lib64
+  [..] symlink   /sbin
+  [..] system    /etc
+  [..] proc      /proc
+  [..] dev       /dev
+  [..] system    /run/systemd/journal/stdout
+  [..] rw-root   <ROOT>
+  [..] rw        <MAIN>/.git
+  [..] ro-pin    <ROOT>/.git
+  [..] ro-pin    <MAIN>/.git/config
+  [..] ro-pin    <MAIN>/.git/config.worktree
+  [..] ro-pin    <MAIN>/.git/objects/info/alternates
+  [..] ro-pin    <MAIN>/.git/hooks
+  [..] rw        <MAIN>/.git/worktrees/wt
+  [..] ro-pin    <MAIN>/.git/worktrees/wt/commondir
+  [..] ro-pin    <MAIN>/.git/worktrees/wt/config.worktree
+  [..] ro-pin    <MAIN>/.git/objects/pack
+  [..] rw        <STATE>
   <AISAN RUNTIME>
-  [..] ro       <TMP>/aisan-proxy-16a0eeb0791b6c92
-  [..] seal-ro  <MAIN>/.git/worktrees
+  [..] ro        <TMP>/aisan-proxy-16a0eeb0791b6c92
+  [..] seal-ro   <MAIN>/.git/worktrees
 
 == sealed directories (empty in the box; nothing creatable) ==
   <MAIN>/.git/worktrees

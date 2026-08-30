@@ -16,7 +16,7 @@ label cannot disagree with what the box gets.
 from pathlib import Path
 
 from aisan.explain import normalise, parse_wrapper
-from aisan.sandbox import RO, RW, Bind, Sandbox, Seal
+from aisan.sandbox import RO, RW, Bind, BindOver, Sandbox, Seal
 
 
 def _idx(prof, path: Path) -> int:
@@ -120,12 +120,12 @@ def test_classifies_a_pin_by_the_ordering_not_by_a_field(tmp_path):
     assert kinds["usr"] == "system"  # from the fixed surface, not the policy
 
 
-def test_a_pin_written_before_its_rw_parent_is_not_labelled_a_pin(tmp_path):
-    # The negative that makes the label mean something. Same two binds, other
-    # order: the rw parent wins, so the file is NOT read-only in the box and
-    # calling it a pin would be a dump that lies about the one line a reviewer
-    # is scanning for. Under the field model this state was unreachable, so
-    # nothing said what the label was actually derived from.
+def test_a_ro_bind_a_later_rw_defeats_is_labelled_shadowed(tmp_path):
+    # The negative that makes the pin label mean something, and the honesty fix
+    # for it. Same two binds as the pin test, other order: the rw parent is
+    # written AFTER, so it wins and the file is WRITABLE in the box. Labelling
+    # that "ro" tells a reviewer the file is protected when the box can rewrite
+    # it -- the H7-class rendering. "ro-shadow" says what is actually true.
     root = tmp_path / "wt"
     root.mkdir()
     gitdir = tmp_path / "gitdir"
@@ -138,7 +138,47 @@ def test_a_pin_written_before_its_rw_parent_is_not_labelled_a_pin(tmp_path):
         use_cgroup=False,
     )
     kinds = {Path(m.path).name: m.kind for m in parse_wrapper(sb.wrapper(), sb).mounts}
-    assert kinds["config"] == "ro"
+    assert kinds["config"] == "ro-shadow"
+
+
+def test_a_bind_over_is_labelled_a_substitution_not_a_plain_ro(tmp_path):
+    # A BindOver mounts src AT dst -- the box reads a DIFFERENT file than the
+    # host's own dst (ReapiBackend's /etc/hosts redirect, a per-box .sisoenv).
+    # Rendered as a plain "ro" of dst it reads as "the host's dst is mounted",
+    # the opposite of what happens. src != dst in the argv is the tell.
+    root = tmp_path / "wt"
+    root.mkdir()
+    src_file = tmp_path / "box-hosts"
+    src_file.write_text("127.0.0.1 example\n")
+    dst = tmp_path / "etc-hosts"
+    dst.write_text("real\n")
+    sb = Sandbox(
+        root=root,
+        binds=(BindOver(src_file, dst),),
+        use_cgroup=False,
+    )
+    kinds = {Path(m.path): m.kind for m in parse_wrapper(sb.wrapper(), sb).mounts}
+    assert kinds[dst] == "ro-sub"
+
+
+def test_the_fixed_system_surface_is_surfaced_not_dropped(tmp_path):
+    # /proc, /dev and the merged-usr symlinks are part of what the box can
+    # touch, but the inspector recognised only --ro-bind/--bind and skipped
+    # them, so the report never said the box had a /proc or a /dev. They are
+    # named now, each by its own kind.
+    root = tmp_path / "wt"
+    root.mkdir()
+    sb = Sandbox(root=root, binds=(), use_cgroup=False)
+    mounts = parse_wrapper(sb.wrapper(), sb).mounts
+    by_kind = {m.kind for m in mounts}
+    assert "proc" in by_kind
+    assert "dev" in by_kind
+    assert "symlink" in by_kind
+    # The link paths, not the merged-usr targets: /bin is what exists in the box.
+    symlinks = {m.path for m in mounts if m.kind == "symlink"}
+    assert "/bin" in symlinks and "/lib" in symlinks
+    procs = {m.path for m in mounts if m.kind == "proc"}
+    assert "/proc" in procs
 
 
 def test_a_seal_is_reported_as_its_own_kind(tmp_path):
