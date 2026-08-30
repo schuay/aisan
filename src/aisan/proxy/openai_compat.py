@@ -64,6 +64,8 @@ from .http import (
     RateLimit,
     bearer_token,
     load_json_unambiguous,
+    relayed_response_headers,
+    request_path,
     serve,
     token_matches,
 )
@@ -337,12 +339,13 @@ def make_app(
             return _error(401, "authentication_error", "invalid aisan proxy token")
         # Through `policy_permits`, so an allowlist that RAISES denies rather
         # than tearing the connection down as a retryable transport error.
+        path = request_path(request)
         if not policy_permits(
-            lambda: path_allow.permits(request.method, request.path),
-            subject=f"{request.method} {request.path}",
+            lambda: path_allow.permits(request.method, path),
+            subject=f"{request.method} {path}",
         ):
             warn.warning(
-                log, "openai-compat proxy: refused %s %s", request.method, request.path
+                log, "openai-compat proxy: refused %s %s", request.method, path
             )
             return _error(
                 403, "invalid_request_error", "path not permitted by the sandbox proxy"
@@ -381,8 +384,15 @@ def make_app(
 
         # Our own headers only: nothing the box sent is forwarded. See the
         # module docstring for why that invariant is strong here and what it
-        # takes for a provider to change it.
-        upstream_headers = headers(body) if headers is not None else {}
+        # takes for a provider to change it. Through the fail-closed wrapper
+        # because `headers` re-parses the body (Responses reconstructs protocol
+        # headers from it): a raise there must refuse, not traceback out of a
+        # request the body policy already passed.
+        try:
+            upstream_headers = headers(body) if headers is not None else {}
+        except Exception as e:
+            log.error("openai-compat proxy: header reconstruction failed: %s", e)
+            return _error(500, "api_error", "sandbox proxy could not build the request")
         upstream_headers.update(authorization_headers)
         upstream_headers.update(
             {
@@ -397,12 +407,7 @@ def make_app(
                 request.method, url, data=body or None, headers=upstream_headers
             ) as up:
                 resp = web.StreamResponse(
-                    status=up.status,
-                    headers={
-                        "Content-Type": up.headers.get(
-                            "Content-Type", "application/json"
-                        )
-                    },
+                    status=up.status, headers=relayed_response_headers(up.headers)
                 )
                 try:
                     # `prepare` writes too, and is where an interrupt usually

@@ -27,6 +27,7 @@ import logging
 
 import pytest
 from aiohttp import ClientSession, UnixConnector, web
+from yarl import URL as YURL
 
 from aisan.proxy.anthropic import (
     BodyPolicy,
@@ -145,6 +146,93 @@ async def test_shared_proxy_requires_one_exact_x_api_key(tmp_path, headers):
         assert response.status == 401
         body = await response.json()
     assert body["error"]["type"] == "authentication_error"
+
+
+async def test_a_percent_encoded_path_is_refused(tmp_path):
+    """W7: the allowlist gates the RAW path now, the same bytes the forward
+    sends. `/v1%2Fmessages` decodes to the permitted `/v1/messages`, but the
+    upstream would receive the raw encoded form and route it elsewhere -- so it
+    must be refused, not permitted-then-forwarded-differently."""
+    reached = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        reached.append(request.path)
+        return web.json_response({"ok": True})
+
+    up, up_runner = await _upstream_server(upstream)
+    try:
+        # encoded=True keeps the client from normalising %2F away before it
+        # reaches the proxy.
+        async with (
+            _Proxy(tmp_path, token=_token, upstream=up) as s,
+            s.post(YURL(f"{URL}/v1%2Fmessages", encoded=True)) as r,
+        ):
+            assert r.status == 403
+    finally:
+        await up_runner.cleanup()
+    assert reached == []
+
+
+async def test_repeated_anthropic_beta_headers_all_survive(tmp_path):
+    """W3: `anthropic-beta` is a list the client may send as several headers,
+    each selecting API behaviour the request then expects. A dict-keyed forward
+    kept only the last; every one must reach the upstream."""
+    got: list[str] = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        got.extend(request.headers.getall("anthropic-beta", []))
+        return web.json_response({"ok": True})
+
+    up, up_runner = await _upstream_server(upstream)
+    try:
+        async with (
+            _Proxy(tmp_path, token=_token, upstream=up) as s,
+            s.post(
+                f"{URL}/v1/messages",
+                data=b"{}",
+                headers=[
+                    ("anthropic-version", "2023-06-01"),
+                    ("anthropic-beta", "claude-code-20250219"),
+                    ("anthropic-beta", "interleaved-thinking-2025-05-14"),
+                ],
+            ) as r,
+        ):
+            assert r.status == 200
+    finally:
+        await up_runner.cleanup()
+    assert got == ["claude-code-20250219", "interleaved-thinking-2025-05-14"]
+
+
+async def test_diagnostic_response_headers_are_relayed(tmp_path):
+    """L4: a 429/529 without retry-after or the ratelimit headers makes the
+    client retry blind. Those and a request id are relayed; the upstream's own
+    transport headers are not."""
+
+    async def upstream(request: web.Request) -> web.Response:
+        return web.json_response(
+            {"type": "error"},
+            status=429,
+            headers={
+                "retry-after": "12",
+                "anthropic-ratelimit-requests-remaining": "0",
+                "x-request-id": "req_abc",
+                "x-should-not-relay": "secret-infra-detail",
+            },
+        )
+
+    up, up_runner = await _upstream_server(upstream)
+    try:
+        async with (
+            _Proxy(tmp_path, token=_token, upstream=up) as s,
+            s.post(f"{URL}/v1/messages", data=b"{}") as r,
+        ):
+            assert r.status == 429
+            assert r.headers["retry-after"] == "12"
+            assert r.headers["anthropic-ratelimit-requests-remaining"] == "0"
+            assert r.headers["x-request-id"] == "req_abc"
+            assert "x-should-not-relay" not in r.headers
+    finally:
+        await up_runner.cleanup()
 
 
 async def test_the_boxs_key_is_dropped_and_the_real_bearer_attached(tmp_path):

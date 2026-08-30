@@ -46,6 +46,8 @@ from .http import (
     LogGate,
     RateLimit,
     load_json_unambiguous,
+    relayed_response_headers,
+    request_path,
     run_forever,
     serve,
 )
@@ -240,16 +242,19 @@ def make_app(
     upstream = _upstream(location)
 
     async def handle(request: web.Request) -> web.StreamResponse:
-        streaming = "streamGenerateContent" in request.path
+        path = request_path(request)
+        # The method is the segment after the last `:`; a substring test would
+        # also fire on `...streamGenerateContentEvil`. Only used to shape the
+        # error envelope (streaming errors are array-wrapped), but a check whose
+        # comment says "streaming" should mean the streaming method.
+        streaming = path.endswith(":streamGenerateContent")
         # Through `policy_permits`, so an allowlist that RAISES denies rather
         # than tearing the connection down as a retryable transport error.
         if not policy_permits(
-            lambda: allowlist.permits(request.method, request.path),
-            subject=f"{request.method} {request.path}",
+            lambda: allowlist.permits(request.method, path),
+            subject=f"{request.method} {path}",
         ):
-            warn.warning(
-                log, "vertex proxy: refused %s %s", request.method, request.path
-            )
+            warn.warning(log, "vertex proxy: refused %s %s", request.method, path)
             return _error(
                 403, "path not permitted by the sandbox proxy", streaming=streaming
             )
@@ -285,12 +290,7 @@ def make_app(
                 request.method, url, data=body or None, headers=headers
             ) as up:
                 out = web.StreamResponse(
-                    status=up.status,
-                    headers={
-                        "Content-Type": up.headers.get(
-                            "Content-Type", "application/json"
-                        )
-                    },
+                    status=up.status, headers=relayed_response_headers(up.headers)
                 )
                 try:
                     # `prepare` writes too, and is where an interrupt usually

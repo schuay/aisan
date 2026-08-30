@@ -96,6 +96,8 @@ from .http import (
     LogGate,
     RateLimit,
     load_json_unambiguous,
+    relayed_response_headers,
+    request_path,
     serve,
     token_matches,
 )
@@ -417,13 +419,12 @@ def make_app(
             return _error(401, "authentication_error", "invalid aisan proxy token")
         # Through `policy_permits`, so an allowlist that RAISES denies rather
         # than tearing the connection down as a retryable transport error.
+        path = request_path(request)
         if not policy_permits(
-            lambda: path_allow.permits(request.method, request.path),
-            subject=f"{request.method} {request.path}",
+            lambda: path_allow.permits(request.method, path),
+            subject=f"{request.method} {path}",
         ):
-            warn.warning(
-                log, "anthropic proxy: refused %s %s", request.method, request.path
-            )
+            warn.warning(log, "anthropic proxy: refused %s %s", request.method, path)
             return _error(
                 403, "permission_error", "path not permitted by the sandbox proxy"
             )
@@ -459,15 +460,19 @@ def make_app(
                 503, "authentication_error", f"sandbox proxy has no credential: {e}"
             )
 
-        out = {
-            "authorization": f"Bearer {bearer}",
-            "content-type": "application/json",
-        }
+        # A list of pairs, not a dict: `anthropic-beta` is a list the client may
+        # send as several headers, and a dict keyed by name would keep only the
+        # last -- dropping betas the request depends on. aiohttp forwards an
+        # iterable of pairs verbatim, so every one survives.
+        out: list[tuple[str, str]] = [
+            ("authorization", f"Bearer {bearer}"),
+            ("content-type", "application/json"),
+        ]
         for name, value in request.headers.items():
             if policy_permits(
                 lambda name=name: header_allow.permits(name), subject=f"header {name}"
             ):
-                out[name.lower()] = value
+                out.append((name, value))
 
         session = request.app[_SESSION]
         url = f"{base}{request.path_qs}"
@@ -476,12 +481,7 @@ def make_app(
                 request.method, url, data=body or None, headers=out
             ) as up:
                 resp = web.StreamResponse(
-                    status=up.status,
-                    headers={
-                        "Content-Type": up.headers.get(
-                            "Content-Type", "application/json"
-                        )
-                    },
+                    status=up.status, headers=relayed_response_headers(up.headers)
                 )
                 try:
                     # `prepare` writes too, and is where an interrupt usually

@@ -83,6 +83,47 @@ def load_json_unambiguous(body: bytes) -> object:
     )
 
 
+# Response headers worth relaying back to the box. Without them a 429/529 makes
+# the client retry blind: `retry-after` is the backoff, the ratelimit families
+# say how much budget is left, and a request id is what a bug report quotes.
+# content-type is relayed by the caller (it carries a default); this is the
+# diagnostic set, matched exactly or by the rate-limit prefix each provider
+# spells its own way (anthropic-ratelimit-*, x-ratelimit-*, ratelimit-*).
+_RELAYED_RESPONSE_HEADERS = frozenset({"retry-after", "x-request-id", "request-id"})
+_RELAYED_RESPONSE_PREFIXES = ("anthropic-ratelimit-", "x-ratelimit-", "ratelimit-")
+
+
+def relayed_response_headers(
+    up_headers, *, content_type_default: str = "application/json"
+) -> dict[str, str]:
+    """Content-Type plus the diagnostic headers a client needs to back off well.
+
+    Everything else the upstream sent is dropped: the proxy owns the connection
+    to the box, so hop-by-hop framing and the upstream's own transport headers
+    describe a connection the box is not on."""
+    out = {"Content-Type": up_headers.get("Content-Type", content_type_default)}
+    for name in up_headers:
+        low = name.lower()
+        if low in _RELAYED_RESPONSE_HEADERS or low.startswith(
+            _RELAYED_RESPONSE_PREFIXES
+        ):
+            out[name] = up_headers[name]
+    return out
+
+
+def request_path(request) -> str:
+    """The request path as it will be FORWARDED -- the raw, still-encoded form,
+    minus the query.
+
+    The path allowlists must gate this, not `request.path`: aiohttp decodes
+    `request.path` (a `%2F` becomes `/`), so `/v1%2Fmessages` decodes to the
+    permitted `/v1/messages` while the forward sends the raw `/v1%2Fmessages`
+    the upstream routes differently. Checking the same bytes the forward sends
+    closes that gap -- a legitimate client sends no encoding, so nothing real is
+    refused."""
+    return request.rel_url.raw_path
+
+
 @dataclass
 class RateLimit:
     """Token bucket, so a runaway client burns its allowance, not the quota.
