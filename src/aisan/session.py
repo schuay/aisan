@@ -201,25 +201,24 @@ def terminal_env() -> tuple[tuple[str, str], ...]:
     )
 
 
-async def run_interactive(
-    *,
-    client: str,
-    harness: str,
-    executable: str,
-    repo: Path,
-    state: Path,
+def apply_egress_and_binds(
     spec: BoxSpec,
-    command: Callable[[Box], list[str]],
-    binary: Callable[[], Path | None],
-    binds: list[Path] | None,
+    repo: Path,
+    *,
     egress_profiles: list[str] | None,
-    explain_only: bool,
-    prepare: Callable[[], None] | None = None,
-    mcp: SessionMCP | None = None,
-) -> int:
-    """Apply egress profiles and user binds, explain or run, keep the status."""
-    # Before the user files, because `userbinds.load` refuses a bind that would
-    # expose a backend's credential and can only refuse the backends it is given.
+    binds: list[Path] | None,
+) -> BoxSpec:
+    """Apply `--egress` profiles and `--binds` files to `spec`, the shared way an
+    interactive launcher and `aisan explain` both need them.
+
+    A review that omitted these would describe a box no operator runs -- egress
+    and user binds are the largest thing a caller adds on top of a preset. Prints
+    notices to stderr (a profile that found nothing, a profile's own notice) and
+    raises `LaunchRefused` carrying the exit code on a hard error, so the CLI
+    that called it prints the reason and exits with that code rather than
+    tracebacking. The order is the model's: egress first (its backends gate the
+    credential guard the user binds run through), then each bind file whole.
+    """
     # Named once each: the flag is repeatable so several profiles compose, and
     # naming one twice is a typo rather than a request for two of it -- which
     # BoxSpec would refuse anyway, on a port collision nobody typed.
@@ -242,18 +241,15 @@ async def run_interactive(
         # that is only mounts has no port to expose.
         stranded = [b.name for b in profile.backends if not b.supports_shared_net]
         if stranded and not spec.unshare_net:
-            print(
+            raise LaunchRefused(
                 f"--egress {name} needs the box's own network: {', '.join(stranded)}"
                 " would otherwise answer on the host's loopback, unauthenticated."
-                " Drop --net.",
-                file=sys.stderr,
+                " Drop --net."
             )
-            return 2
         try:
             spec = spec.with_egress(list(profile.backends))
         except ValueError as e:
-            print(f"--egress {name}: {e}", file=sys.stderr)
-            return 2
+            raise LaunchRefused(f"--egress {name}: {e}") from e
         spec = spec.with_binds(list(profile.binds))
         if profile.notice:
             print(profile.notice, file=sys.stderr)
@@ -266,15 +262,40 @@ async def run_interactive(
         try:
             user = userbinds.load(spec_file, egress=spec.egress)
         except ValueError as e:
-            print(f"binds: {e}", file=sys.stderr)
-            return 2
+            raise LaunchRefused(f"binds: {e}") from e
         except OSError as e:
             # A missing or unreadable spec file is the operator's path being
             # wrong (`userbinds.load` lets it propagate for exactly this caller
             # to name); route it like a malformed one rather than tracebacking.
-            print(f"binds: cannot read {spec_file}: {e}", file=sys.stderr)
-            return 2
+            raise LaunchRefused(f"binds: cannot read {spec_file}: {e}") from e
         spec = spec.with_binds(user.binds).with_path_prefix(user.path)
+    return spec
+
+
+async def run_interactive(
+    *,
+    client: str,
+    harness: str,
+    executable: str,
+    repo: Path,
+    state: Path,
+    spec: BoxSpec,
+    command: Callable[[Box], list[str]],
+    binary: Callable[[], Path | None],
+    binds: list[Path] | None,
+    egress_profiles: list[str] | None,
+    explain_only: bool,
+    prepare: Callable[[], None] | None = None,
+    mcp: SessionMCP | None = None,
+) -> int:
+    """Apply egress profiles and user binds, explain or run, keep the status."""
+    try:
+        spec = apply_egress_and_binds(
+            spec, repo, egress_profiles=egress_profiles, binds=binds
+        )
+    except LaunchRefused as e:
+        print(e, file=sys.stderr)
+        return e.code
 
     box = Box(spec, box_id=box_id(client, repo))
     if explain_only:

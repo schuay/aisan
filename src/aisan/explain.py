@@ -500,7 +500,8 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
     import sys
 
-    from .presets import PRESETS
+    from .presets import EGRESS_PROFILES, PRESETS
+    from .session import LaunchRefused, apply_egress_and_binds
 
     p = argparse.ArgumentParser(prog="aisan explain")
     p.add_argument("preset", choices=sorted(PRESETS))
@@ -512,16 +513,48 @@ def main(argv: list[str] | None = None) -> int:
         help="describe only; never start a backend (the default and only mode"
         " today, kept explicit so a future --run cannot be the default)",
     )
+    # The same two knobs a launcher takes, so a review sees the box an operator
+    # actually runs: a preset alone omits the largest thing a caller adds.
+    p.add_argument(
+        "--egress",
+        action="append",
+        choices=sorted(EGRESS_PROFILES),
+        metavar="NAME",
+        help="add an egress profile's backends and binds (repeatable)",
+    )
+    p.add_argument(
+        "--binds",
+        action="append",
+        type=Path,
+        metavar="FILE",
+        help="apply a user bind spec file, later-wins (repeatable)",
+    )
     p.add_argument("--no-argv", action="store_true", help="omit the argv section")
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
 
-    spec = PRESETS[args.preset](args.root)
+    root = args.root.resolve()
+    spec = PRESETS[args.preset](root)
+    try:
+        spec = apply_egress_and_binds(
+            spec, root, egress_profiles=args.egress, binds=args.binds
+        )
+    except LaunchRefused as e:
+        print(e, file=sys.stderr)
+        return e.code
     box = Box(spec, box_id=args.box_id)
     with box.staged():
         print(
             explain(
                 box,
-                inputs=(("preset", args.preset), ("root", str(args.root))),
+                inputs=(
+                    ("preset", args.preset),
+                    ("root", str(root)),
+                    ("egress", ", ".join(args.egress) if args.egress else "(none)"),
+                    (
+                        "binds",
+                        ", ".join(map(str, args.binds)) if args.binds else "(none)",
+                    ),
+                ),
                 argv=not args.no_argv,
                 color=sys.stdout.isatty(),
             ),

@@ -347,3 +347,57 @@ def test_explaining_a_worktree_does_not_mutate_the_host_git(tmp_path):
         assert all(g.exists() for g in guards)
     # ...and are gone again afterward: a dry run left no trace.
     assert not any(g.exists() for g in guards), "explain left files in the host .git"
+
+
+def _linked_worktree(tmp_path):
+    main = tmp_path / "main"
+    wt = tmp_path / "wt"
+    (main / ".git" / "worktrees" / "wt").mkdir(parents=True)
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {main}/.git/worktrees/wt\n")
+    (main / ".git" / "worktrees" / "wt" / "commondir").write_text("../..\n")
+    (main / ".git" / "worktrees" / "wt" / "gitdir").write_text(f"{wt}/.git\n")
+    return wt
+
+
+def test_explain_cli_applies_egress_and_user_binds(tmp_path, capsys):
+    # A review of a preset ALONE omits the largest thing a caller adds: the
+    # egress route and the user bind files. `aisan explain` takes both now, the
+    # same knobs the launchers do, and renders their effect.
+    from aisan.explain import main as explain_main
+
+    wt = _linked_worktree(tmp_path)
+    sisoenv = wt / "build" / "config" / "siso" / ".sisoenv"
+    sisoenv.parent.mkdir(parents=True)
+    sisoenv.write_text("SISO_PROJECT=rbe-chromium-untrusted\n")
+    tool = tmp_path / "tooldir"
+    tool.mkdir()
+    binds = tmp_path / "tools.toml"
+    binds.write_text(f'ro = ["{tool}"]\n')
+
+    rc = explain_main(
+        ["v8_job", str(wt), "--egress", "v8-rbe", "--binds", str(binds), "--no-argv"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    # The egress backend is rendered on its loopback port...
+    assert "rbe" in out and "127.0.0.1:8712" in out
+    # ...its .sisoenv redirect reads as a substitution, not a plain ro...
+    assert "ro-sub" in out
+    # ...the user bind landed...
+    assert str(tool) in out
+    # ...and the inputs name both, so the review states its own configuration.
+    assert "v8-rbe" in out
+    assert "tools.toml" in out
+
+
+def test_explain_cli_routes_a_bad_egress_or_binds_to_a_clean_refusal(tmp_path, capsys):
+    # The shared applier raises LaunchRefused, which the CLI turns into a nonzero
+    # exit and a named reason rather than a traceback -- the same convention the
+    # launchers speak.
+    from aisan.explain import main as explain_main
+
+    wt = _linked_worktree(tmp_path)
+    rc = explain_main(["v8_job", str(wt), "--binds", str(tmp_path / "absent.toml")])
+    assert rc == 2
+    assert "cannot read" in capsys.readouterr().err
