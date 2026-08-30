@@ -32,9 +32,11 @@ That is a normal interactive Claude Code session (`aisan codex` and
   namespace; remote MCP declarations and their authentication state stay on
   the host.
 
+The same three commands, run on the host and then from inside the box:
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/schuay/aisan/main/docs/demo.gif" width="660"
-       alt="Claude Code in an aisan box with permissions bypassed: reading the credential file, listing ~/.ssh, and an outbound HTTPS request all fail, and the full test suite still passes">
+       alt="On the host, reading the credential file, listing ~/.ssh, and fetching https://example.com all succeed. Inside an aisan box with permissions bypassed, the agent runs the same three and each one fails: no credential file, no key directory, no DNS.">
 </p>
 
 ## Nothing on faith: `--explain`
