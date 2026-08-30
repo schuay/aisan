@@ -38,6 +38,14 @@ Every launcher takes `--explain`: it prints the resolved profile and the
 exact Bubblewrap argv from the same `Box` object used to launch, then exits.
 Trimmed:
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/schuay/aisan/main/docs/explain.svg" width="660"
+       alt="aisan claude /path/to/repo --explain: resolved binds, egress backends, and environment">
+</p>
+
+<details>
+<summary>Text version</summary>
+
 ```
 $ aisan claude /path/to/repo --explain
 
@@ -67,6 +75,7 @@ $ aisan claude /path/to/repo --explain
   PATH=/usr/bin
   ...
 ```
+</details>
 
 ## User bind specs
 

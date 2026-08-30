@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="616" viewBox="0 0 660 616" font-family="ui-monospace,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace" font-size="13">
+<rect width="660" height="616" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<path d="M0 40 H660" stroke="#30363d" stroke-width="1"/>
+<rect width="660" height="40" rx="10" fill="#21262d"/>
+<rect y="28" width="660" height="12" fill="#21262d"/>
+<circle cx="22" cy="20" r="6" fill="#ff5f56"/>
+<circle cx="42" cy="20" r="6" fill="#ffbd2e"/>
+<circle cx="62" cy="20" r="6" fill="#27c93f"/>
+<text x="330" y="24" text-anchor="middle" fill="#8b949e" font-size="12">aisan</text>
+<text x="24" y="70" xml:space="preserve"><tspan fill="#3fb950">$ </tspan><tspan fill="#e6edf3">aisan claude /path/to/repo </tspan><tspan fill="#d2a8ff">--explain</tspan></text>
+<text x="24" y="110" xml:space="preserve"><tspan fill="#58a6ff">== inputs ==</tspan></text>
+<text x="24" y="130" xml:space="preserve"><tspan fill="#8b949e">  harness   </tspan><tspan fill="#e6edf3">claude-code</tspan></text>
+<text x="24" y="150" xml:space="preserve"><tspan fill="#8b949e">  repo      </tspan><tspan fill="#e6edf3">/path/to/repo</tspan></text>
+<text x="24" y="170" xml:space="preserve"><tspan fill="#8b949e">  network   </tspan><tspan fill="#e6edf3">own namespace </tspan><tspan fill="#3fb950">(no route off the machine)</tspan></text>
+<text x="24" y="210" xml:space="preserve"><tspan fill="#58a6ff">== egress backends (host half on a socket, in-box on loopback) ==</tspan></text>
+<text x="24" y="230" xml:space="preserve"><tspan fill="#d2a8ff">  anthropic </tspan><tspan fill="#e6edf3">127.0.0.1:8713</tspan><tspan fill="#8b949e"> -&gt; </tspan><tspan fill="#8b949e">/tmp/aisan-proxy-59d1d1bc/anthropic.sock</tspan></text>
+<text x="24" y="270" xml:space="preserve"><tspan fill="#58a6ff">== tmpfs mounts (mounted before binds; intended writable scratch) ==</tspan></text>
+<text x="24" y="290" xml:space="preserve"><tspan fill="#8b949e">  [ 39] </tspan><tspan fill="#e6edf3">/tmp</tspan><tspan fill="#8b949e">  (2147483648)</tspan></text>
+<text x="24" y="310" xml:space="preserve"><tspan fill="#8b949e">  [ 43] </tspan><tspan fill="#e6edf3">/home/user</tspan><tspan fill="#8b949e">  (1073741824  &lt;- $HOME)</tspan></text>
+<text x="24" y="350" xml:space="preserve"><tspan fill="#58a6ff">== binds in argv order (later shadows earlier on overlap) ==</tspan></text>
+<text x="24" y="370" xml:space="preserve"><tspan fill="#8b949e">  system    </tspan><tspan fill="#8b949e">/usr /bin /lib /lib64 /sbin /etc /proc /dev</tspan></text>
+<text x="24" y="390" xml:space="preserve"><tspan fill="#8b949e">  [ 45] </tspan><tspan fill="#f85149">rw-root   </tspan><tspan fill="#e6edf3">/path/to/repo</tspan></text>
+<text x="24" y="410" xml:space="preserve"><tspan fill="#8b949e">  [ 63] </tspan><tspan fill="#f0883e">rw        </tspan><tspan fill="#e6edf3">/home/user/.cache/aisan-claude/aisan-4475d1c31168</tspan></text>
+<text x="24" y="430" xml:space="preserve"><tspan fill="#8b949e">  [ 66] </tspan><tspan fill="#3fb950">ro        </tspan><tspan fill="#e6edf3">/home/user/.config/git/config</tspan></text>
+<text x="24" y="450" xml:space="preserve"><tspan fill="#8b949e">  [ 69] </tspan><tspan fill="#3fb950">ro        </tspan><tspan fill="#e6edf3">/tmp/aisan-proxy-59d1d1bc</tspan></text>
+<text x="24" y="490" xml:space="preserve"><tspan fill="#58a6ff">== environment (the box's complete environment; --clearenv first) ==</tspan></text>
+<text x="24" y="510" xml:space="preserve"><tspan fill="#79c0ff">  CLAUDE_CONFIG_DIR</tspan><tspan fill="#e6edf3">=/path/to/repo/.aisan-claude-state</tspan></text>
+<text x="24" y="530" xml:space="preserve"><tspan fill="#79c0ff">  GIT_PAGER</tspan><tspan fill="#e6edf3">=cat</tspan></text>
+<text x="24" y="550" xml:space="preserve"><tspan fill="#79c0ff">  HOME</tspan><tspan fill="#e6edf3">=/home/user</tspan></text>
+<text x="24" y="570" xml:space="preserve"><tspan fill="#79c0ff">  PATH</tspan><tspan fill="#e6edf3">=/usr/bin</tspan></text>
+<text x="24" y="590" xml:space="preserve"><tspan fill="#8b949e">  ...</tspan></text>
+</svg>
