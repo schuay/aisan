@@ -13,6 +13,7 @@ The credential never enters the box: it is minted here, host-side, by
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -48,10 +49,21 @@ class _Token:
         self._fetch = fetch
         self._token = ""
         self._expiry = datetime.fromtimestamp(0, UTC)
+        # One fetch under contention (see reapi.RefreshingToken): the lock
+        # serialises the refresh, the double-check lets a waiter reuse it.
+        self._lock = asyncio.Lock()
+
+    def _fresh(self, now: datetime) -> bool:
+        return bool(self._token) and (self._expiry - now).total_seconds() >= (
+            _REFRESH_MARGIN_S
+        )
 
     async def __call__(self) -> str:
-        now = datetime.now(UTC)
-        if not self._token or (self._expiry - now).total_seconds() < _REFRESH_MARGIN_S:
+        if self._fresh(datetime.now(UTC)):
+            return self._token
+        async with self._lock:
+            if self._fresh(datetime.now(UTC)):
+                return self._token
             self._token, self._expiry = await self._fetch()
         return self._token
 

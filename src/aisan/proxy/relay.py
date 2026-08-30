@@ -24,6 +24,13 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# A generous ceiling on concurrent spliced connections. Each one opens a
+# host-side UNIX connection to the proxy, so an in-box loop could otherwise
+# exhaust host file descriptors -- http.py rate-limits REQUESTS, not the
+# connections underneath them. Far above what siso (a handful) or a model
+# client (one) opens, so nothing legitimate is refused.
+_MAX_CONNECTIONS = 256
+
 
 async def _splice(
     src: asyncio.StreamReader, dst: asyncio.StreamWriter, direction: str
@@ -65,26 +72,41 @@ async def serve(socket_path: Path, port: int, *, host: str = "127.0.0.1"):
     startup than mid-turn.
     """
 
+    gate = asyncio.Semaphore(_MAX_CONNECTIONS)
+
     async def handle(
         client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter
     ) -> None:
-        try:
-            up_r, up_w = await asyncio.open_unix_connection(str(socket_path))
-        except OSError:
+        if gate.locked():
+            # At the ceiling: refuse this one rather than pile on. A box that
+            # opens connections without draining them is the only way here.
             client_w.close()
             with contextlib.suppress(OSError):
                 await client_w.wait_closed()
             return
-        try:
-            await asyncio.gather(
-                _splice(client_r, up_w, "box -> host proxy"),
-                _splice(up_r, client_w, "host proxy -> box"),
-            )
-        finally:
-            for w in (up_w, client_w):
-                w.close()
-                with contextlib.suppress(OSError, asyncio.CancelledError):
-                    await w.wait_closed()
+        async with gate:
+            try:
+                up_r, up_w = await asyncio.open_unix_connection(str(socket_path))
+            except OSError:
+                client_w.close()
+                with contextlib.suppress(OSError):
+                    await client_w.wait_closed()
+                return
+            try:
+                # return_exceptions: a non-Connection error in one splice must
+                # not leave its sibling running on a transport this `finally` is
+                # about to close -- an orphaned task whose exception is never
+                # retrieved. Both are awaited to completion, then both close.
+                await asyncio.gather(
+                    _splice(client_r, up_w, "box -> host proxy"),
+                    _splice(up_r, client_w, "host proxy -> box"),
+                    return_exceptions=True,
+                )
+            finally:
+                for w in (up_w, client_w):
+                    w.close()
+                    with contextlib.suppress(OSError, asyncio.CancelledError):
+                        await w.wait_closed()
 
     return await asyncio.start_server(handle, host, port)
 
@@ -105,14 +127,18 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entry: python -m aisan.proxy.relay <socket_path> <port> -- <cmd...>"""
     import sys
 
+    usage = "usage: python -m aisan.proxy.relay <socket_path> <port> -- <cmd...>"
     args = sys.argv[1:] if argv is None else argv
-    if "--" not in args:
-        sys.exit("usage: python -m aisan.proxy.relay <socket_path> <port> -- <cmd...>")
-    sep = args.index("--")
+    # sep >= 2 so args[0] (socket) and args[1] (port) are real, not the `--` or
+    # past the end: `relay -- cmd` used to index the separator as the socket and
+    # int() the command as the port, tracebacking instead of printing usage.
+    sep = args.index("--") if "--" in args else -1
+    if sep < 2:
+        sys.exit(usage)
     sock, port = Path(args[0]), int(args[1])
     cmd = args[sep + 1 :]
     if not cmd:
-        sys.exit("usage: python -m aisan.proxy.relay <socket_path> <port> -- <cmd...>")
+        sys.exit(usage)
     code = asyncio.run(run_command(sock, port, cmd))
     sys.exit(code)
 

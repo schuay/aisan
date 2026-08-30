@@ -264,3 +264,24 @@ def test_the_shared_net_profile_needs_a_store_to_mount(monkeypatch, tmp_path):
     monkeypatch.setattr("aisan.egress.reapi.LUCI_STORE", tmp_path / "absent")
 
     assert not v8_rbe_shared_net(tmp_path)
+
+
+async def test_concurrent_first_requests_mint_the_token_only_once():
+    """W5: a build opens a burst of connections at once; without a lock each
+    sees the empty cache and mints in parallel (N luci-auth subprocesses for one
+    token). The lock + double-check collapse the burst to one mint."""
+    import asyncio
+
+    from aisan.egress.reapi import RefreshingToken
+
+    calls = {"n": 0}
+
+    async def mint() -> str:
+        calls["n"] += 1
+        await asyncio.sleep(0.02)  # hold the lock long enough for the burst to pile up
+        return "tok"
+
+    tok = RefreshingToken(mint)
+    results = await asyncio.gather(*[tok() for _ in range(20)])
+    assert results == ["tok"] * 20
+    assert calls["n"] == 1

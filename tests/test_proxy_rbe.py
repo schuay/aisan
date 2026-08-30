@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from pathlib import Path
 
 import h2.config
@@ -1287,3 +1288,54 @@ async def test_a_drained_closed_stream_repays_the_source():
 
     assert 1 not in pending
     assert (5, 7) in repaid and (6, 7) in repaid
+
+
+async def test_a_non_utf8_path_is_refused_not_a_torn_connection():
+    """L3: a :path with 0x80-0xff bytes is legal at the h2 layer. Decoding it
+    strict used to raise out of the handler, through the broad except, tearing
+    the connection down with no gRPC status -- which siso reads as a flaky
+    transport and retries. It is refused cleanly now (a replaced path cannot be
+    an ASCII REAPI method)."""
+    s = Session(_token, RBE_ALLOWED_METHODS)
+    refusals: list[tuple] = []
+
+    class _Down:
+        def send_headers(self, sid, headers, end_stream=False):
+            refusals.append((sid, dict(headers)))
+
+    ev = h2.events.RequestReceived(
+        stream_id=1,
+        headers=[
+            (b":method", b"POST"),
+            (b":path", b"/build.bazel.\xff\xfe/X"),
+            (b":scheme", b"http"),
+            (b":authority", rbe.UPSTREAM_HOST.encode()),
+        ],
+    )
+    # Must not raise, and must answer a gRPC PERMISSION_DENIED trailer.
+    await s._on_down_event(ev, _Down(), object())
+    assert refusals, "the request was dropped instead of refused"
+    trailer = refusals[0][1]
+    assert trailer[b"grpc-status"] == b"7"
+
+
+def test_a_sustained_mint_outage_logs_once_per_window_not_once_ever(
+    caplog, monkeypatch
+):
+    """W4: the reset used to run on every failure, so `now - _mint_failed_at`
+    stayed under the window forever and a sustained outage logged once ever.
+    Measuring from the last LOG restores once-per-window."""
+    s = Session(_token, RBE_ALLOWED_METHODS)
+    real = time.monotonic()
+    clock = {"t": real}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+    with caplog.at_level(logging.WARNING, logger="aisan.proxy.rbe"):
+        for _ in range(50):  # a burst inside one window
+            s._note_mint_failure(RuntimeError("no creds"))
+            clock["t"] += 1  # a second between requests
+        first = len([r for r in caplog.records if "no credential" in r.getMessage()])
+        clock["t"] += rbe._MINT_FAILURE_LOG_S + 1  # past the window
+        s._note_mint_failure(RuntimeError("no creds"))
+    total = len([r for r in caplog.records if "no credential" in r.getMessage()])
+    assert first == 1, f"logged {first} times inside one window"
+    assert total == 2, "the window did not reopen"

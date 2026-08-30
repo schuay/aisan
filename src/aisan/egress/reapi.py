@@ -27,6 +27,7 @@ the build reaches RBE without ever holding a luci token of its own.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Iterable
@@ -36,7 +37,7 @@ from pathlib import Path
 
 from ..mint import rbe_token as mint_rbe_token
 from ..proxy import serve_rbe_unix
-from ..proxy.rbe import UPSTREAM_HOST
+from ..proxy.rbe import UPSTREAM_HOST, hosts_file
 from ..sandbox import BindOver, BindSpec
 from .base import Backend, PreflightError
 
@@ -84,6 +85,11 @@ class RefreshingToken:
         self._mint = mint
         self._token = ""
         self._expiry = datetime.fromtimestamp(0, UTC)
+        # One mint under contention: without it, the burst of first requests a
+        # build opens each sees an empty cache and mints in parallel (N luci-auth
+        # subprocesses for one token). The lock serialises the refresh; the
+        # double-check inside lets a waiter use what the winner just cached.
+        self._lock = asyncio.Lock()
         # The last mint failure, or None. Never cleared by a later success: what
         # the caller asks is "did a credential problem happen during this build",
         # and a build that started refused and recovered halfway still explains a
@@ -92,8 +98,12 @@ class RefreshingToken:
         self.refused: Exception | None = None
 
     async def __call__(self) -> str:
-        now = datetime.now(UTC)
-        if not self._token or (self._expiry - now).total_seconds() < _REFRESH_MARGIN_S:
+        if self._fresh(datetime.now(UTC)):
+            return self._token
+        async with self._lock:
+            now = datetime.now(UTC)
+            if self._fresh(now):  # a waiter may have minted while we blocked
+                return self._token
             try:
                 self._token = await self._mint()
             except Exception as e:
@@ -101,6 +111,11 @@ class RefreshingToken:
                 raise
             self._expiry = now + timedelta(seconds=1800)
         return self._token
+
+    def _fresh(self, now: datetime) -> bool:
+        return bool(self._token) and (self._expiry - now).total_seconds() >= (
+            _REFRESH_MARGIN_S
+        )
 
 
 class ReapiBackend(Backend):
@@ -167,13 +182,10 @@ class ReapiBackend(Backend):
 
     def prepare(self, runtime_dir: Path) -> None:
         """Write the two files `box_binds` names as bind-over sources."""
-        etc = Path("/etc/hosts")
-        existing = etc.read_text() if etc.exists() else ""
-        # Prepended, not replacing: the box still needs the host's own resolution
-        # for everything else it legitimately looks up.
-        self.hosts_path(runtime_dir).write_text(
-            f"127.0.0.1 {UPSTREAM_HOST}\n{existing}"
-        )
+        # One implementation of this security-relevant file: `hosts_file`
+        # prepends `127.0.0.1 UPSTREAM_HOST` to the host's /etc/hosts and writes
+        # it at runtime_dir/hosts, which is exactly `hosts_path(runtime_dir)`.
+        hosts_file(runtime_dir)
         # Fully qualified: with a bare instance name Google cannot attribute the
         # request to a project and answers CONSUMER_INVALID.
         self.sisoenv_path(runtime_dir).write_text(

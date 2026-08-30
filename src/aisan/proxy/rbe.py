@@ -407,12 +407,16 @@ class Session:
         What an operator needs is one legible "no RBE credential, builds are
         local"; the rest is noise that hides the next real failure.
         """
+        # The reset is INSIDE the window check: updating it on every failure
+        # (a build issues them every few ms) kept `now - _mint_failed_at` under
+        # the window forever, so a sustained outage logged once ever instead of
+        # once per window. Measuring from the last LOG restores "once per window".
         now = time.monotonic()
         if now - self._mint_failed_at > _MINT_FAILURE_LOG_S:
             log.warning(
                 "rbe proxy: no credential; refusing REAPI (builds go local): %s", exc
             )
-        self._mint_failed_at = now
+            self._mint_failed_at = now
 
     async def _pump_down(self, reader, writer, down, up_w, up_conn) -> None:
         """Box -> Google. Enforces the allowlist and injects the credential.
@@ -449,7 +453,12 @@ class Session:
     async def _on_down_event(self, ev, down, up_conn) -> None:
         if isinstance(ev, h2.events.RequestReceived):
             headers = dict(ev.headers)
-            path = headers.get(b":path", b"").decode()
+            # errors="replace": a non-UTF-8 :path (0x80-0xff is legal in an h2
+            # header value) used to raise out of here, through _pump_down's broad
+            # except, tearing the connection down with no gRPC status. A replaced
+            # path cannot equal an ASCII REAPI method, so it is refused cleanly --
+            # the decision is safe on the replaced string.
+            path = headers.get(b":path", b"").decode(errors="replace")
             # Through `policy_permits`, so an `allow` that is not the plain
             # frozenset this ships with -- a consumer's own matcher, a set-like
             # object with a __contains__ that raises -- denies rather than
@@ -481,7 +490,7 @@ class Session:
             # still accepting the latter two. Harmless either way (the value only
             # gates this decision; the upstream target is the constant below), but
             # a check whose comment says "digits" should mean ASCII digits.
-            authority = headers.get(b":authority", b"").decode()
+            authority = headers.get(b":authority", b"").decode(errors="replace")
             host, sep, port = authority.partition(":")
             if host != UPSTREAM_HOST or (
                 sep and not (port.isascii() and port.isdigit())
