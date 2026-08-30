@@ -152,12 +152,16 @@ class BodyPolicy:
     """Which capabilities the body may declare.
 
     The path allowlist gates the ENVELOPE of a model call, and on this upstream
-    the body is not inert: the tools it declares make GOOGLE's servers fetch,
-    search or execute on the box's behalf. `unshare_net` stops the box dialling
-    out; it does not stop the box asking Vertex to dial out for it, and the URL
-    IS the payload -- a fetch of `https://x.example/<bytes>` has exfiltrated them
-    whatever comes back. Same posture as the Anthropic and OpenAI-compatible
-    policies, one protocol over.
+    the body is not inert: the tools it declares -- and the `contents` parts it
+    carries -- make GOOGLE's servers fetch, search or execute on the box's
+    behalf. `unshare_net` stops the box dialling out; it does not stop the box
+    asking Vertex to dial out for it, and the URL IS the payload -- a fetch of
+    `https://x.example/<bytes>` has exfiltrated them whatever comes back. Same
+    posture as the Anthropic and OpenAI-compatible policies, one protocol over.
+
+    Two surfaces, then: the tool fields (only functionDeclarations runs in the
+    box), and the message contents (a `fileData.fileUri` part is the same fetch
+    vector, one level down); inline text and base64 carry no URL and pass.
 
     Both routes the path allowlist reaches are gated, not just inference:
     `cachedContents` takes the same `tools` array (measured against the real
