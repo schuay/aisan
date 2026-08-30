@@ -38,6 +38,7 @@
   CLAUDE_CODE_MAX_RETRIES=0
   CLAUDE_CONFIG_DIR=<ROOT>/.aisan-claude-state
   DEBIAN_FRONTEND=noninteractive
+  DISABLE_AUTOUPDATER=1
   GIT_CONFIG_COUNT=3
   GIT_CONFIG_KEY_0=gc.auto
   GIT_CONFIG_KEY_1=gc.pruneExpire
@@ -190,6 +191,9 @@
   --setenv
   CLAUDE_CODE_MAX_RETRIES
   0
+  --setenv
+  DISABLE_AUTOUPDATER
+  1
   --chdir
   <ROOT>
   <payload>

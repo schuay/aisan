@@ -86,6 +86,16 @@ from ..spec import DEFANG_ENV, BoxSpec, Limits
 # looks exactly like an unattended box that is working.
 _RETRY_ENV = (("CLAUDE_CODE_MAX_RETRIES", "0"),)
 
+# Turn off the CLI's own updater. Under `unshare_net` the npm reach cannot
+# succeed, so the startup attempt only buys a delay and a red line in the status
+# bar -- measured: "Auto-updating..." then "Auto-update failed - Try claude
+# doctor", gone with this set and nothing else changed.
+#
+# Not a security control either: the box has no route to the registry with or
+# without it. It is here so a failure the operator cannot act on stops being
+# reported as one.
+_UPDATER_ENV = (("DISABLE_AUTOUPDATER", "1"),)
+
 
 def claude_code_binary() -> Path | None:
     """The `claude` entry point on this host, or None.
@@ -184,6 +194,7 @@ def claude_code(
             # from, so it is not "just" state -- see the module docstring.
             ("CLAUDE_CONFIG_DIR", str(state)),
             *_RETRY_ENV,
+            *_UPDATER_ENV,
             *extra_env,
         ),
         egress=egress,
