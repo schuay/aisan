@@ -74,9 +74,9 @@ def load_json_unambiguous(body: bytes) -> object:
     differently -- a key repeated at any depth, or a bare `NaN`/`Infinity` this
     parser accepts as a float -- and a plain ValueError for one that does not
     parse at all. Two different findings, which is why they are two different
-    exceptions. What each proxy does with them is its own policy: see the body
-    policies in `anthropic` (no opinion on a body it cannot read, a refusal for
-    one that reads two ways) and `openai_compat` (refuses both).
+    exceptions. What each proxy does with them is its own policy -- today every
+    body policy refuses both, `anthropic` excepting only an empty body for the
+    hello routes.
     """
     return json.loads(
         body, object_pairs_hook=json_unique_pairs, parse_constant=_reject_constant
