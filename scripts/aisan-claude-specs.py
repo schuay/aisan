@@ -47,13 +47,12 @@ from aisan.egress.anthropic import DEFAULT_UPSTREAM, AnthropicBackend
 from aisan.gitbinds import external_symlink_targets, git_binds
 from aisan.presets.claude_code import claude_code
 from aisan.sandbox import RO, RW, Bind, BindSpec
+from aisan.session import git_config_binds
 from aisan.spec import BoxSpec
 
-UPSTREAM = os.environ.get("AISAN_UPSTREAM", DEFAULT_UPSTREAM)
-
-# Same as the session launcher's: HOME is a tmpfs in the box, so git's identity
-# has to be named or a commit inside dies with "Please tell me who you are".
-GIT_CONFIG = Path.home() / ".config" / "git"
+UPSTREAM = os.environ.get(
+    "AISAN_CLAUDE_UPSTREAM", os.environ.get("AISAN_UPSTREAM", DEFAULT_UPSTREAM)
+)
 
 
 def _state_for(name: str) -> Path:
@@ -88,16 +87,18 @@ def single_repo(repo: Path) -> BoxSpec:
     the multi-repo variants below read as a diff against it rather than from
     scratch.
     """
+    # git_config_binds: only the config FILE, not all of ~/.config/git (which
+    # holds git-credential-store's credentials). HOME is a tmpfs in the box, so
+    # git's identity has to be named or a commit inside dies "tell me who you are".
     return claude_code(
         repo,
         state=_state_for(repo.name),
         egress=(AnthropicBackend(upstream=UPSTREAM),),
-        extra_ro=(GIT_CONFIG,),
         extra_env=(
             ("PATH", "/usr/bin:/usr/local/bin"),
             ("CLAUDE_CODE_MAX_RETRIES", "3"),
         ),
-    )
+    ).with_binds(git_config_binds())
 
 
 def multi_repo(primary: Path, *others: Path) -> BoxSpec:

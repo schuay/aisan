@@ -55,6 +55,7 @@ from aisan.egress.openai_compat import OpenAICompatBackend
 from aisan.presets.opencode import opencode, opencode_binary
 from aisan.sandbox import BindOver, BindSpec
 from aisan.session import (
+    git_config_binds,
     interactive_parser,
     mcp_launcher_binds,
     parse_interactive_args,
@@ -68,7 +69,6 @@ from aisan.session_mcp import mcp_search_path, opencode_host_mcp
 # named. Git's identity lives here; without it a commit inside the box dies
 # with "Please tell me who you are". ro: the agent reads config, it does not
 # edit it.
-GIT_CONFIG = Path.home() / ".config" / "git"
 
 # Where the HOST's opencode reads its global instructions from. XDG-aware for
 # the same reason the preset's catalog path is: this is wherever the host's own
@@ -143,7 +143,7 @@ async def _main(argv: list[str]) -> int:
         repo,
         state=state,
         egress=(backend,),
-        extra_ro=(GIT_CONFIG, *mcp_launcher_binds(mcp)),
+        extra_ro=mcp_launcher_binds(mcp),
         extra_env=(
             # /usr is bound ro unconditionally, but the preset's PATH is only
             # /usr/bin -- anything elsewhere has to be named.
@@ -153,6 +153,8 @@ async def _main(argv: list[str]) -> int:
         ),
         unshare_net=not args.net,
     )
+    # Only the git config FILE, XDG-aware; see session.git_config_binds.
+    spec = spec.with_binds(git_config_binds())
     # After the preset's binds, before any user spec: the operator's own
     # instructions are part of the template, and a user spec still shadows.
     spec = spec.with_binds(user_memory_bind(USER_MEMORY))

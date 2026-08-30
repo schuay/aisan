@@ -23,6 +23,7 @@ from .egress.base import PreflightError
 from .explain import assembly_refusal, explain
 from .launch import exit_status
 from .presets import EGRESS_PROFILES
+from .sandbox import RO, Bind, BindOver, BindSpec
 from .session_mcp import SessionMCP, mcp_ro_binds
 from .spec import BoxSpec
 from .statedir import prepare_state_dir, write_sealed
@@ -63,6 +64,33 @@ def mcp_launcher_binds(mcp: SessionMCP | None) -> tuple[Path, ...]:
         return mcp_ro_binds(mcp)
     except (FileNotFoundError, ValueError) as e:
         raise LaunchRefused(f"refused: {e}") from e
+
+
+def git_config_binds() -> list[BindSpec]:
+    """Bind ONLY the user's global git config FILE, not all of ~/.config/git.
+
+    The launchers bind this so an in-box commit is attributed (user.name/email).
+    The whole directory also holds git-credential-store's `credentials` (plaintext
+    `https://user:token@host`) and a config may carry `[http] extraHeader` or a
+    `[credential] helper` -- secrets the box, which has a model egress route, can
+    read and send out. Just the file closes the separate credentials store; a
+    secret an operator puts INSIDE config is the residual they chose.
+
+    XDG-aware on the SOURCE side only: the box reads `~/.config/git/config` (its
+    cleared env sets no XDG_CONFIG_HOME), while the host keeps the file wherever
+    its XDG_CONFIG_HOME points -- so the source is looked up XDG-aware and mounted
+    over the path the box reads. Empty when the host has no config: an in-box
+    commit then fails "tell me who you are", the honest state rather than a
+    silently mounted credential dir.
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    host = (Path(xdg) if xdg else Path.home() / ".config") / "git" / "config"
+    if not host.is_file():
+        return []
+    box_dst = Path.home() / ".config" / "git" / "config"
+    if host.resolve() == box_dst.resolve():
+        return [Bind(host, RO)]
+    return [BindOver(host, box_dst)]
 
 
 def repo_key(repo: Path) -> str:

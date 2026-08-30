@@ -24,6 +24,7 @@ from aisan.egress.openai_responses import (
 )
 from aisan.presets.codex import codex, codex_argv, codex_binary
 from aisan.session import (
+    git_config_binds,
     interactive_parser,
     mcp_launcher_binds,
     mirror_user_memory,
@@ -34,7 +35,6 @@ from aisan.session import (
 )
 from aisan.session_mcp import codex_host_mcp, mcp_search_path
 
-GIT_CONFIG = Path.home() / ".config" / "git"
 USER_MEMORY = Path.home() / ".codex" / "AGENTS.md"
 
 
@@ -74,10 +74,12 @@ async def _main(argv: list[str]) -> int:
         repo,
         state=state,
         egress=(backend,),
-        extra_ro=(GIT_CONFIG, *mcp_launcher_binds(mcp)),
+        extra_ro=mcp_launcher_binds(mcp),
         extra_env=(("PATH", mcp_search_path(local_bin=mcp.enabled)), *terminal_env()),
         unshare_net=not args.net,
     )
+    # Only the git config FILE, XDG-aware; see session.git_config_binds.
+    spec = spec.with_binds(git_config_binds())
     payload_args = tuple(payload)
     if mcp.enabled:
         payload_args = ("--profile", "aisan-host-mcp", *payload_args)

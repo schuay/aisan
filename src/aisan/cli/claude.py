@@ -52,6 +52,7 @@ from pathlib import Path
 from aisan.egress.anthropic import DEFAULT_UPSTREAM, PLACEHOLDER_KEY, AnthropicBackend
 from aisan.presets.claude_code import claude_code, claude_code_binary
 from aisan.session import (
+    git_config_binds,
     interactive_parser,
     mcp_launcher_binds,
     mirror_user_memory,
@@ -63,7 +64,6 @@ from aisan.session import (
 from aisan.session_mcp import claude_host_mcp, mcp_search_path
 from aisan.statedir import read_sealed_text, write_sealed
 
-GIT_CONFIG = Path.home() / ".config" / "git"
 USER_MEMORY = Path.home() / ".claude" / "CLAUDE.md"
 
 
@@ -167,7 +167,7 @@ async def _main(argv: list[str]) -> int:
         repo,
         state=state,
         egress=(backend,),
-        extra_ro=(GIT_CONFIG, *mcp_launcher_binds(mcp)),
+        extra_ro=mcp_launcher_binds(mcp),
         extra_env=(
             # /usr is bound ro unconditionally, but the preset's PATH is only
             # /usr/bin -- anything elsewhere has to be named.
@@ -181,6 +181,8 @@ async def _main(argv: list[str]) -> int:
         ),
         unshare_net=not args.net,
     )
+    # Only the git config FILE, XDG-aware; see session.git_config_binds.
+    spec = spec.with_binds(git_config_binds())
     command = ["claude"]
     if mcp.enabled:
         command += ["--mcp-config", str(mcp_config)]

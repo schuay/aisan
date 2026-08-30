@@ -13,7 +13,14 @@ from pathlib import Path
 
 import pytest
 
-from aisan.session import box_id, run_interactive, staged_directory, state_dir
+from aisan.sandbox import RO, Bind, BindOver
+from aisan.session import (
+    box_id,
+    git_config_binds,
+    run_interactive,
+    staged_directory,
+    state_dir,
+)
 
 
 def test_session_commands_are_packaged():
@@ -481,3 +488,48 @@ async def test_the_run_path_normalizes_a_signal_death_to_shell_status(
         explain_only=False,
     )
     assert code == 143
+
+
+def test_git_config_binds_only_the_file_never_the_credential_store(
+    tmp_path, monkeypatch
+):
+    # H6: the launchers bound the whole ~/.config/git for user.name/email, which
+    # also handed the box git-credential-store's `credentials` (plaintext
+    # user:token) and any config extraHeader. git_config_binds names ONLY the
+    # config file, so the sibling credentials store is never mounted.
+    home = tmp_path / "home"
+    (home / ".config" / "git").mkdir(parents=True)
+    (home / ".config" / "git" / "config").write_text("[user]\n  name = Jane\n")
+    (home / ".config" / "git" / "credentials").write_text("https://jane:TOKEN@x\n")
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    binds = git_config_binds()
+    # Exactly the config file, ro; nothing that names the directory or the store.
+    assert binds == [Bind(home / ".config" / "git" / "config", RO)]
+    named = {getattr(b, "path", None) or getattr(b, "src", None) for b in binds}
+    assert home / ".config" / "git" / "credentials" not in named
+    assert home / ".config" / "git" not in named
+
+
+def test_git_config_binds_is_xdg_aware_on_the_source(tmp_path, monkeypatch):
+    # H6: the host may keep the file under $XDG_CONFIG_HOME, but the box reads
+    # ~/.config/git/config (its cleared env sets no XDG). A BindOver substitutes
+    # the host's real file at the path the box reads.
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    (xdg / "git").mkdir(parents=True)
+    (xdg / "git" / "config").write_text("[user]\n  name = Jane\n")
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+
+    binds = git_config_binds()
+    assert binds == [
+        BindOver(xdg / "git" / "config", home / ".config" / "git" / "config")
+    ]
+
+
+def test_git_config_binds_empty_without_a_config(tmp_path, monkeypatch):
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: tmp_path / "empty"))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    assert git_config_binds() == []
