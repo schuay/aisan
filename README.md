@@ -32,6 +32,11 @@ That is a normal interactive Claude Code session (`aisan codex` and
   namespace; remote MCP declarations and their authentication state stay on
   the host.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/schuay/aisan/main/docs/demo.gif" width="660"
+       alt="Claude Code in an aisan box with permissions bypassed: reading the credential file, listing ~/.ssh, and an outbound HTTPS request all fail, and the full test suite still passes">
+</p>
+
 ## Nothing on faith: `--explain`
 
 Every launcher takes `--explain`: it prints the resolved profile and the
