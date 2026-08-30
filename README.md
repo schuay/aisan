@@ -139,7 +139,8 @@ audit bound, not a comparison with another project's total source size.
 ## Requirements
 
 - Linux, Python 3.12 or newer, and `bubblewrap` (`bwrap`). User namespaces must
-  be available to the invoking user.
+  be available to the invoking user; some distributions restrict unprivileged
+  user namespaces by default.
 - `systemd-run --user` is optional. Cgroup limits are skipped when the command
   is absent. On a host without a usable user manager, disable them explicitly
   with `Limits(use_cgroup=False)`.
@@ -208,18 +209,10 @@ a reported fix.
 ## Relationship to sandbox-runtime
 
 [Anthropic's sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime)
-(srt) is the broader choice for a general confined coding agent and supports
-Linux, macOS, and Windows. aisan is Linux-only and concentrates on explicit
-mount composition plus credential-aware transports, including plaintext HTTP/2
-REAPI traffic and sealing an existing directory around a writable hole.
-
-Reviewing srt informed three decisions here: policy exceptions fail closed,
-refusals state an actionable policy reason, and launch commands remain argv so
-payload bytes never pass through a host shell. These are general security and
-interface rules, independently implemented in aisan; no srt source code was
-copied or adapted. The last detailed comparison used srt revision `121c6ac`
-(v0.0.71) on 2026-08-10, so current srt behavior should be checked before relying
-on any feature difference.
+is the broader cross-platform tool for a general confined coding agent; aisan
+is Linux-only and concentrates on whole-harness confinement, explicit mount
+composition, and credential-aware transports such as the plaintext HTTP/2
+REAPI proxy.
 
 ## Status
 
