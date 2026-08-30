@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 import socket
 import time
@@ -108,6 +109,38 @@ class RateLimit:
             return False
         self._tokens -= 1.0
         return True
+
+
+class LogGate:
+    """Bounds refusal WARNINGs so an in-box loop cannot flood the log.
+
+    The request limiter cannot do this job: the path refusal is decided (and
+    logged) before it runs, and even behind it a steady 120 requests a minute
+    is a log nobody can read. The gate lets a burst through, then counts what
+    it suppressed and reports the count when it reopens -- the boundary keeps
+    refusing either way, only the logging is bounded.
+
+    Refusal warnings only. `policy`'s fail-closed exceptions stay unlimited by
+    design (a raising policy is a bug in the boundary, and there is no volume
+    at which it should get quieter), and so do upstream-outage warnings, which
+    the box does not control.
+    """
+
+    def __init__(self, per_minute: int = 12) -> None:
+        self._limit = RateLimit(per_minute=per_minute)
+        self._suppressed = 0
+
+    def warning(self, logger: logging.Logger, msg: str, *args: object) -> None:
+        if not self._limit.allow():
+            self._suppressed += 1
+            return
+        if self._suppressed:
+            logger.warning(
+                "(%d refusal warnings suppressed by the log rate limit)",
+                self._suppressed,
+            )
+            self._suppressed = 0
+        logger.warning(msg, *args)
 
 
 async def serve(socket_path: Path, app: web.Application) -> web.AppRunner:

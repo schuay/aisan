@@ -56,6 +56,7 @@ import h2.connection
 import h2.events
 import h2.exceptions
 
+from .http import LogGate
 from .policy import permits as policy_permits
 
 log = logging.getLogger(__name__)
@@ -159,6 +160,9 @@ class Session:
         # this is a handful of lines per outage rather than thousands, without
         # module state that a test would have to reset between cases.
         self._mint_failed_at = float("-inf")
+        # Same reasoning for refusal warnings, which a box loop on a denied
+        # method would otherwise emit once per request, unbounded.
+        self._warn = LogGate()
 
     async def run(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -383,7 +387,7 @@ class Session:
             # unwinding the session, which siso reads as a flaky transport and
             # retries. Same reason the mint failure below is a refusal.
             if not policy_permits(lambda: path in self._allow, subject=path):
-                log.warning("rbe proxy: refused %s", path)
+                self._warn.warning(log, "rbe proxy: refused %s", path)
                 self._refuse(down, ev.stream_id, f"method not permitted: {path}")
                 return
             # The allowlist gates :path, but the frontend routes on :authority,
@@ -413,7 +417,7 @@ class Session:
             if host != UPSTREAM_HOST or (
                 sep and not (port.isascii() and port.isdigit())
             ):
-                log.warning("rbe proxy: refused authority %r", authority)
+                self._warn.warning(log, "rbe proxy: refused authority %r", authority)
                 self._refuse(
                     down, ev.stream_id, f"authority not permitted: {authority}"
                 )

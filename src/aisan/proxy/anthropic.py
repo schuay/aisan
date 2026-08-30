@@ -93,6 +93,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from .http import (
     MAX_BODY_BYTES,
     AmbiguousBody,
+    LogGate,
     RateLimit,
     load_json_unambiguous,
     serve,
@@ -405,6 +406,7 @@ def make_app(
     header_allow = headers or HeaderAllowlist()
     body_policy = body or BodyPolicy()
     limiter = rate or RateLimit()
+    warn = LogGate()
     base = upstream.rstrip("/")
 
     async def handle(request: web.Request) -> web.StreamResponse:
@@ -419,7 +421,9 @@ def make_app(
             lambda: path_allow.permits(request.method, request.path),
             subject=f"{request.method} {request.path}",
         ):
-            log.warning("anthropic proxy: refused %s %s", request.method, request.path)
+            warn.warning(
+                log, "anthropic proxy: refused %s %s", request.method, request.path
+            )
             return _error(
                 403, "permission_error", "path not permitted by the sandbox proxy"
             )
@@ -439,7 +443,7 @@ def make_app(
             lambda: body_policy.refuse(body), subject=f"body of {request.path}"
         )
         if reason is not None:
-            log.warning("anthropic proxy: refused body: %s", reason)
+            warn.warning(log, "anthropic proxy: refused body: %s", reason)
             return _error(403, "permission_error", reason)
 
         try:

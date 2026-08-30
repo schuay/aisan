@@ -60,6 +60,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from .http import (
     MAX_BODY_BYTES,
+    LogGate,
     RateLimit,
     bearer_token,
     load_json_unambiguous,
@@ -327,6 +328,7 @@ def make_app(
     path_allow = paths or PathAllowlist()
     body_policy = body or BodyPolicy()
     limiter = rate or RateLimit()
+    warn = LogGate()
     base = upstream.rstrip("/")
 
     async def handle(request: web.Request) -> web.StreamResponse:
@@ -338,8 +340,8 @@ def make_app(
             lambda: path_allow.permits(request.method, request.path),
             subject=f"{request.method} {request.path}",
         ):
-            log.warning(
-                "openai-compat proxy: refused %s %s", request.method, request.path
+            warn.warning(
+                log, "openai-compat proxy: refused %s %s", request.method, request.path
             )
             return _error(
                 403, "invalid_request_error", "path not permitted by the sandbox proxy"
@@ -360,7 +362,7 @@ def make_app(
             lambda: body_policy.refuse(body), subject=f"body of {request.path}"
         )
         if reason is not None:
-            log.warning("openai-compat proxy: refused body: %s", reason)
+            warn.warning(log, "openai-compat proxy: refused body: %s", reason)
             return _error(403, "invalid_request_error", reason)
 
         try:

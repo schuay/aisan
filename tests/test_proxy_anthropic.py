@@ -865,3 +865,27 @@ async def test_an_interrupted_turn_is_not_an_upstream_outage(tmp_path, caplog):
     )
     # The disconnect is attributed to the leg that broke.
     assert any("downstream closed" in rec.getMessage() for rec in caplog.records)
+
+
+async def test_refusal_warnings_are_rate_limited(tmp_path, caplog):
+    """The amplification loop: the path refusal is logged before the request
+    limiter runs, so a box loop on a denied path emitted one WARNING per
+    request forever, burying the refusal that mattered. The gate bounds the
+    logging; every request is still refused."""
+
+    async def upstream(request: web.Request) -> web.Response:
+        return web.json_response({"ok": True})
+
+    up, up_runner = await _upstream_server(upstream)
+    try:
+        with caplog.at_level(logging.WARNING, logger="aisan.proxy.anthropic"):
+            async with _Proxy(tmp_path, token=_token, upstream=up) as s:
+                for _ in range(40):
+                    async with s.get(f"{URL}/v1/organizations/me") as r:
+                        assert r.status == 403
+    finally:
+        await up_runner.cleanup()
+
+    warnings = [r for r in caplog.records if "refused" in r.getMessage()]
+    assert warnings, "the refusal must still be logged at all"
+    assert len(warnings) <= 13, f"{len(warnings)} warnings for 40 refusals"

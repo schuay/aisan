@@ -38,6 +38,27 @@ def _allow() -> Allowlist:
     return Allowlist(project=PROJECT, location=LOCATION, models=(MODEL,))
 
 
+def test_the_log_gate_bounds_a_refusal_flood(caplog, monkeypatch):
+    """The refusal keeps happening; only the logging is bounded. When the gate
+    reopens, the first line through it accounts for what the flood suppressed,
+    so the operator sees the volume without reading it."""
+    from aisan.proxy.http import LogGate
+
+    gate = LogGate(per_minute=5)
+    logger = logging.getLogger("aisan-test-log-gate")
+    with caplog.at_level(logging.WARNING, logger="aisan-test-log-gate"):
+        for i in range(100):
+            gate.warning(logger, "refused %d", i)
+        real = time.monotonic()
+        monkeypatch.setattr(time, "monotonic", lambda: real + 30.0)
+        gate.warning(logger, "refused later")
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages[:5] == [f"refused {i}" for i in range(5)]
+    assert any("95 refusal warnings suppressed" in m for m in messages)
+    assert messages[-1] == "refused later"
+
+
 def test_allowlist_permits_exactly_the_two_shapes():
     a = _allow()
     assert a.permits("POST", f"{BASE}/publishers/google/models/{MODEL}:generateContent")

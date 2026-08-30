@@ -43,6 +43,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from .http import (
     MAX_BODY_BYTES,
     AmbiguousBody,
+    LogGate,
     RateLimit,
     load_json_unambiguous,
     run_forever,
@@ -235,6 +236,7 @@ def make_app(
 ) -> web.Application:
     limiter = rate or RateLimit()
     body_policy = body or BodyPolicy()
+    warn = LogGate()
     upstream = _upstream(location)
 
     async def handle(request: web.Request) -> web.StreamResponse:
@@ -245,7 +247,9 @@ def make_app(
             lambda: allowlist.permits(request.method, request.path),
             subject=f"{request.method} {request.path}",
         ):
-            log.warning("vertex proxy: refused %s %s", request.method, request.path)
+            warn.warning(
+                log, "vertex proxy: refused %s %s", request.method, request.path
+            )
             return _error(
                 403, "path not permitted by the sandbox proxy", streaming=streaming
             )
@@ -266,7 +270,7 @@ def make_app(
             lambda: body_policy.refuse(body), subject=f"body of {request.path}"
         )
         if reason is not None:
-            log.warning("vertex proxy: refused body: %s", reason)
+            warn.warning(log, "vertex proxy: refused body: %s", reason)
             return _error(403, reason, streaming=streaming)
 
         # Our own headers only: nothing the box sent is forwarded.
