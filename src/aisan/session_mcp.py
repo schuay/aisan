@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from .egress import known_credential_paths
+from .egress.base import credential_containment
 from .launch import interpreter_roots
 from .statedir import write_sealed
 
@@ -154,11 +156,45 @@ def mcp_ro_binds(
     binds = [Path.home() / ".local" / "bin"]
     for command in config.commands:
         binds.extend(_launcher_binds(command, path))
-    return tuple(dict.fromkeys(binds))
+    out = tuple(dict.fromkeys(binds))
+    # Structural, over every KNOWN backend credential rather than this box's
+    # egress: the store another client keeps is exposure all the same, and the
+    # box's own backends would never name it.
+    hit = credential_containment(out, known_credential_paths())
+    if hit is not None:
+        raise ValueError(
+            f"MCP launcher bind {hit[0]} would expose the credential store"
+            f" {hit[1]}, and is refused"
+        )
+    return out
+
+
+# Trees that hold MANY tools' state side by side. Never a tool root: binding
+# one mounts every neighbour's files -- opencode's auth.json lives under
+# ~/.local/share -- and a launcher that needs one of these bound is a launcher
+# this module cannot bind narrowly.
+def _shared_roots(home: Path) -> frozenset[Path]:
+    return frozenset(
+        {
+            home,
+            home / ".local",
+            home / ".local" / "share",
+            home / ".local" / "state",
+            home / ".config",
+            home / ".cache",
+        }
+    )
 
 
 def _launcher_binds(command: str, search_path: str) -> list[Path]:
-    """Resolve a home-installed launcher and the interpreter behind its venv."""
+    """Resolve a home-installed launcher and the interpreter behind its venv.
+
+    The tool root is PROVEN, never guessed from path depth: `<root>/bin/<exe>`
+    is trusted only when `<root>` shows a venv's shape (`pyvenv.cfg`, or the
+    `bin/python` a uv tool root carries). The grandparent of a bare
+    `~/.local/bin` script is `~/.local`, and the old guess bound that whole
+    tree -- every other tool's state, credential stores included.
+    """
     executable = shutil.which(command, path=search_path)
     if executable is None:
         raise FileNotFoundError(
@@ -169,9 +205,21 @@ def _launcher_binds(command: str, search_path: str) -> list[Path]:
     if not real.is_relative_to(home):
         return []
 
-    root = real.parents[1] if len(real.parents) > 1 else real
-    if root == home:
-        root = real
+    if len(real.parents) < 2 or real.parents[1] == home:
+        # A bare script directly under a top-level home dir (~/bin/x): the
+        # file itself, nothing around it.
+        return [real]
+    root = real.parents[1]
+    if (
+        root in _shared_roots(home)
+        or real.parent.name != "bin"
+        or not ((root / "pyvenv.cfg").is_file() or (root / "bin" / "python").exists())
+    ):
+        raise ValueError(
+            f"MCP command {command!r} resolves to {real}, which is not inside a"
+            " self-contained tool root; install it into its own venv (e.g."
+            " `uv tool install`) so only that tree is bound into the box"
+        )
     binds = [root]
     python = root / "bin" / "python"
     if python.is_symlink():

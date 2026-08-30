@@ -88,9 +88,15 @@ def _xdg(var: str, default: Path) -> Path:
     return Path(value) if value else default
 
 
-DEFAULT_CREDENTIALS = (
-    _xdg("XDG_DATA_HOME", Path.home() / ".local" / "share") / "opencode" / "auth.json"
-)
+def default_credentials() -> Path:
+    return (
+        _xdg("XDG_DATA_HOME", Path.home() / ".local" / "share")
+        / "opencode"
+        / "auth.json"
+    )
+
+
+DEFAULT_CREDENTIALS = default_credentials()
 DEFAULT_CATALOG = (
     _xdg("XDG_CACHE_HOME", Path.home() / ".cache") / "opencode" / "models.json"
 )
@@ -138,7 +144,7 @@ class OpenAICompatBackend(Backend):
         # None means resolve it from the catalog -- the data-driven path that
         # makes another provider a name rather than a code change.
         self._upstream = upstream
-        self._credentials = credentials or DEFAULT_CREDENTIALS
+        self._credentials = credentials or default_credentials()
         # For the Box's credential-exposure refusal. The one file, and note it
         # carries EVERY provider's key -- see Backend.credentials.
         self.credentials = (self._credentials,)

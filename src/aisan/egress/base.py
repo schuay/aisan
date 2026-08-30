@@ -39,7 +39,7 @@ from __future__ import annotations
 import abc
 import re
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -244,16 +244,34 @@ def credential_exposure(
         src = getattr(spec, "path", None) or getattr(spec, "src", None)
         if src is None:
             continue
+        for backend in backends:
+            hit = credential_containment((src,), backend.credentials)
+            if hit is not None:
+                return src, backend, hit[1]
+    return None
+
+
+def credential_containment(
+    sources: Iterable[Path], credentials: Iterable[Path]
+) -> tuple[Path, Path] | None:
+    """The first (source, credential) where the source contains the credential.
+
+    The containment decision `credential_exposure` applies, without the Backend
+    vocabulary, for callers whose credential list does not come from a box's
+    own egress -- the MCP launcher-bind guard checks against every KNOWN
+    backend credential (`known_credential_paths`), most of which belong to
+    backends the box does not carry.
+    """
+    for src in sources:
         try:
             src_r = src.resolve()
         except OSError:
             src_r = src
-        for backend in backends:
-            for cred in backend.credentials:
-                try:
-                    cred_r = cred.resolve()
-                except OSError:
-                    cred_r = cred
-                if cred_r.is_relative_to(src_r):
-                    return src, backend, cred
+        for cred in credentials:
+            try:
+                cred_r = cred.resolve()
+            except OSError:
+                cred_r = cred
+            if cred_r.is_relative_to(src_r):
+                return src, cred
     return None

@@ -53,9 +53,13 @@ PORT = 8715
 PROVIDER = "aisan"
 CLIENT_KEY_ENV = "AISAN_CODEX_API_KEY"
 DEFAULT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
-DEFAULT_CREDENTIALS = (
-    Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "auth.json"
-)
+
+
+def default_credentials() -> Path:
+    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "auth.json"
+
+
+DEFAULT_CREDENTIALS = default_credentials()
 
 _REFRESH_MARGIN_S = 24 * 60 * 60
 _REFRESH_TIMEOUT_S = 30
@@ -88,7 +92,7 @@ class CodexBackend(Backend):
     ) -> None:
         self._model = model
         self._upstream = upstream
-        self._credentials = credentials or DEFAULT_CREDENTIALS
+        self._credentials = credentials or default_credentials()
         self._codex_command = codex_command
         self.credentials = (self._credentials,)
         self._rpm = rpm

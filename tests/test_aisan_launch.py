@@ -90,6 +90,20 @@ def test_launcher_binds_cover_the_venv_and_every_interpreter_hop():
         assert root in paths
 
 
+def test_launcher_binds_do_not_guess_a_venv_for_a_system_interpreter(tmp_path):
+    # The same defect as the MCP tool-root guess, one module over: for
+    # /usr/bin/python3 the parent-of-parent "venv" is /usr, which
+    # interpreter_roots already covers -- the unproven guess bound it a second
+    # time under the venv's name. A venv is proven by its pyvenv.cfg.
+    usr = tmp_path / "usr" / "bin"
+    usr.mkdir(parents=True)
+    py = usr / "python3"
+    py.write_text("")
+    binds = [Path(str(b.path)) for b in launcher_binds(py)]
+    assert binds.count(tmp_path / "usr") == 1
+    assert len(binds) == len(set(binds))
+
+
 def test_launcher_binds_carry_this_package_and_no_other_editable_tree():
     # A package installed editable beside us must not end up mounted into a box
     # that only needs a relay.

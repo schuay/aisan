@@ -119,12 +119,22 @@ def launcher_binds(python: Path | None = None) -> list[BindSpec]:
     symlink out of it), the interpreter chain it points at, and -- for an
     editable install only -- this package's own source root, which coincides
     with the venv only when it is installed normally.
+
+    The venv is proven by its `pyvenv.cfg`, not guessed from depth: a system
+    interpreter's grandparent is /usr, which `interpreter_roots` already
+    covers, and the unproven guess bound it a second time under the venv's
+    name.
     """
     exe = python or Path(sys.executable)
     venv = exe.parent.parent
-    binds = [Bind(venv, RO), *(Bind(r, RO) for r in interpreter_roots(exe))]
+    binds = [Bind(venv, RO)] if (venv / "pyvenv.cfg").is_file() else []
+    covered = {Path(b.path) for b in binds}
+    for root in interpreter_roots(exe):
+        if root not in covered:
+            covered.add(root)
+            binds.append(Bind(root, RO))
     own = own_source_root()
-    if own is not None and not own.is_relative_to(venv):
+    if own is not None and not any(own.is_relative_to(p) for p in covered):
         binds.append(Bind(own, RO))
     return binds
 

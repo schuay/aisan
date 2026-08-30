@@ -56,9 +56,17 @@ PORT = 8713
 # for the next consumer.
 __all__ = ["PLACEHOLDER_KEY", "AnthropicBackend"]
 
+
 # The default credential location, which is also where the host's Claude Code
-# keeps it. A constructor argument so a test never needs the real one.
-DEFAULT_CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
+# keeps it. A constructor argument so a test never needs the real one. The
+# function is the source of truth: guards that enumerate every backend's
+# credential (`egress.known_credential_paths`) call it so the answer tracks
+# the environment rather than whatever HOME was at import.
+def default_credentials() -> Path:
+    return Path.home() / ".claude" / ".credentials.json"
+
+
+DEFAULT_CREDENTIALS = default_credentials()
 
 # The standard Anthropic API endpoint. Callers can override it for a compatible
 # proxy without changing the route exposed inside the box.
@@ -88,7 +96,7 @@ class AnthropicBackend(Backend):
         upstream: str = DEFAULT_UPSTREAM,
         rpm: int = 120,
     ) -> None:
-        self._credentials = credentials or DEFAULT_CREDENTIALS
+        self._credentials = credentials or default_credentials()
         # For the Box's credential-exposure refusal: the one file this backend
         # reads is the one a spec bind must not contain.
         self.credentials = (self._credentials,)

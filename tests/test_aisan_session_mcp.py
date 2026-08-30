@@ -16,7 +16,7 @@ import pytest
 
 from aisan import Box
 from aisan.presets.codex import codex, codex_argv, codex_binary
-from aisan.session import mcp_notice
+from aisan.session import LaunchRefused, mcp_launcher_binds, mcp_notice
 from aisan.session_mcp import (
     SessionMCP,
     claude_host_mcp,
@@ -143,6 +143,108 @@ def test_mcp_binds_chase_a_uv_tool_launcher_and_python(tmp_path, monkeypatch):
     )
 
 
+def test_a_bare_local_bin_script_is_refused_not_overmounted(tmp_path, monkeypatch):
+    """The overshoot shape: a plain console script (pip --user, npm) sits
+    directly in ~/.local/bin, so the old grandparent guess bound ~/.local --
+    every other tool's state, credential stores included. Refused with the
+    remedy in the message rather than silently narrowed: the script's own
+    imports (~/.local/lib) would not be bound either, so a narrow bind could
+    only fail confusingly at run time."""
+    home = tmp_path / "home"
+    shim_dir = home / ".local" / "bin"
+    shim_dir.mkdir(parents=True)
+    script = shim_dir / "bare-mcp"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    config = SessionMCP({}, ("bare-mcp",), "json")
+
+    with pytest.raises(ValueError, match="self-contained"):
+        mcp_ro_binds(config, str(shim_dir))
+
+
+def test_a_launcher_symlinked_into_a_checkout_is_refused(tmp_path, monkeypatch):
+    """A ~/.local/bin symlink to a script at a checkout's top level: the
+    grandparent is ~/projects, and the guess would have mounted every repo."""
+    home = tmp_path / "home"
+    shim_dir = home / ".local" / "bin"
+    tool = home / "projects" / "tool"
+    shim_dir.mkdir(parents=True)
+    tool.mkdir(parents=True)
+    exe = tool / "serve"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    (shim_dir / "checkout-mcp").symlink_to(exe)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    config = SessionMCP({}, ("checkout-mcp",), "json")
+
+    with pytest.raises(ValueError, match="self-contained"):
+        mcp_ro_binds(config, str(shim_dir))
+
+
+def test_a_pyvenv_cfg_proves_a_tool_root(tmp_path, monkeypatch):
+    """The proof that admits a root: an ordinary venv, whose bin/python is a
+    copy rather than a symlink chain worth walking."""
+    home = tmp_path / "home"
+    shim_dir = home / ".local" / "bin"
+    tool = home / "venvs" / "local-mcp"
+    shim_dir.mkdir(parents=True)
+    (tool / "bin").mkdir(parents=True)
+    (tool / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    exe = tool / "bin" / "local-mcp"
+    exe.write_text("#!python\n")
+    exe.chmod(0o755)
+    (shim_dir / "local-mcp").symlink_to(exe)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    config = SessionMCP({}, ("local-mcp",), "json")
+
+    assert mcp_ro_binds(config, str(shim_dir)) == (shim_dir, tool)
+
+
+def test_no_launcher_bind_may_contain_a_backend_credential_store(tmp_path, monkeypatch):
+    """Structural, over every KNOWN backend credential rather than one box's
+    egress: a root that passes the venv proof but contains a credential store
+    is still refused, and the refusal names the file. The per-box
+    `credential_exposure` check cannot catch this -- the store belongs to a
+    backend the box does not carry."""
+    home = tmp_path / "home"
+    shim_dir = home / ".local" / "bin"
+    root = home / ".local" / "share" / "opencode"
+    (root / "bin").mkdir(parents=True)
+    shim_dir.mkdir(parents=True)
+    (root / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (root / "auth.json").write_text("{}")
+    exe = root / "bin" / "evil-mcp"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    (shim_dir / "evil-mcp").symlink_to(exe)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    config = SessionMCP({}, ("evil-mcp",), "json")
+
+    with pytest.raises(ValueError, match=r"auth\.json"):
+        mcp_ro_binds(config, str(shim_dir))
+
+
+def test_an_unbindable_launcher_is_a_launch_refusal_not_a_traceback(
+    tmp_path, monkeypatch
+):
+    """The refusal reaches the operator through the same return-2 route as an
+    uninstalled command, instead of tracebacking out of every launcher
+    including --explain."""
+    home = tmp_path / "home"
+    shim_dir = home / ".local" / "bin"
+    shim_dir.mkdir(parents=True)
+    script = shim_dir / "bare-mcp"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    config = SessionMCP({}, ("bare-mcp",), "json")
+
+    with pytest.raises(LaunchRefused, match="self-contained"):
+        mcp_launcher_binds(config)
+
+
 def test_missing_mcp_command_fails_before_the_box_owns_the_terminal(
     tmp_path, monkeypatch
 ):
@@ -192,6 +294,8 @@ async def test_real_codex_starts_an_imported_mcp_server_inside_the_box(
     tool = home / ".local" / "share" / "tools" / "local-mcp"
     shim_dir.mkdir(parents=True)
     (tool / "bin").mkdir(parents=True)
+    # The resolver only trusts a proven tool root; a venv marker is the proof.
+    (tool / "pyvenv.cfg").write_text("home = /usr/bin\n")
     server = tool / "bin" / "local-mcp"
     server.write_text(
         "#!/usr/bin/python3\n"

@@ -53,13 +53,15 @@ def mcp_launcher_binds(mcp: SessionMCP | None) -> tuple[Path, ...]:
     nobody re-reads at launch naming one uninstalled server is a refusal, not a
     bug in aisan: it should reach the operator as a nonzero exit and the server's
     name, the same as any other unmet precondition, not as a stack trace that
-    also takes down `--explain`.
+    also takes down `--explain`. `ValueError` is the resolver refusing a
+    launcher it cannot bind narrowly -- an unproven tool root, or a bind that
+    would cover a credential store -- and routes the same way.
     """
     if mcp is None:
         return ()
     try:
         return mcp_ro_binds(mcp)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         raise LaunchRefused(f"refused: {e}") from e
 
 
