@@ -126,6 +126,7 @@ async def _h2_request(
     path: str,
     authority: str = rbe.UPSTREAM_HOST,
     host: str | None = None,
+    extra: list[tuple[bytes, bytes]] | None = None,
 ):
     """Speak real HTTP/2 to the proxy and return (headers, trailers).
 
@@ -155,6 +156,7 @@ async def _h2_request(
             *([(b"host", host.encode())] if host is not None else []),
             (b"content-type", b"application/grpc"),
             (b"te", b"trailers"),
+            *(extra or []),
         ],
         end_stream=False,
     )
@@ -1109,3 +1111,179 @@ async def test_no_credential_is_refused_fast_not_dropped(monkeypatch, tmp_path):
     assert headers[b":status"] == b"200"  # a transport error would be retried
     assert headers[b"grpc-status"] == b"16"  # UNAUTHENTICATED
     assert b"no RBE credential" in headers[b"grpc-message"]
+
+
+async def test_box_chosen_headers_are_dropped_from_the_forward(tmp_path, monkeypatch):
+    """H5: everything the box sends rides the injected cloud bearer, so a header
+    the box CHOSE that reaches Google under it is a capability the allowlist
+    never vetted. `x-goog-user-project` (billing attribution) and
+    `x-goog-request-params` (routing) are the sharp ones. Only the measured
+    transport headers -- content-type, te, user-agent, the grpc- family, the
+    REAPI RequestMetadata -- and the pseudo-headers reach the upstream.
+    """
+    seen: list[list[bytes]] = []
+
+    class _RecordingConn:
+        def __init__(self):
+            self._next = 1
+
+        def get_next_available_stream_id(self):
+            self._next += 2
+            return self._next
+
+        def send_headers(self, sid, headers, end_stream=False):
+            seen.append([k.lower() for k, _ in headers])
+
+        def send_data(self, *a, **k):
+            pass
+
+        def end_stream(self, *a, **k):
+            pass
+
+        def reset_stream(self, *a, **k):
+            pass
+
+        def receive_data(self, data):
+            return []
+
+        def data_to_send(self):
+            return b""
+
+        def initiate_connection(self):
+            pass
+
+        def acknowledge_received_data(self, *a, **k):
+            pass
+
+    async def fake_connect(self):
+        loop = asyncio.get_running_loop()
+        never = loop.create_future()
+
+        class _R:
+            async def read(self, n):
+                await never
+
+        class _W:
+            def write(self, d):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+            async def wait_closed(self):
+                pass
+
+        return _R(), _W(), _RecordingConn()
+
+    monkeypatch.setattr(rbe.Session, "_connect_upstream", fake_connect)
+    sock = tmp_path / "rbe.sock"
+    server = await serve_rbe_unix(sock, _token)
+    extra = [
+        (b"user-agent", b"grpc-go/1.83.1"),
+        (b"grpc-timeout", b"60S"),
+        (b"grpc-encoding", b"gzip"),
+        (b"build.bazel.remote.execution.v2.requestmetadata-bin", b"\x0a\x01x"),
+        (b"x-goog-user-project", b"attacker-project"),
+        (b"x-goog-request-params", b"instance=victim"),
+        (b"x-forwarded-for", b"10.0.0.1"),
+    ]
+    try:
+        with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
+            await asyncio.wait_for(
+                _h2_request(sock, f"{EXEC}/Execute", extra=extra), timeout=3
+            )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert seen, "a permitted method must be forwarded"
+    names = set(seen[0])
+    # Dropped: box-chosen headers that would ride our bearer.
+    assert b"x-goog-user-project" not in names
+    assert b"x-goog-request-params" not in names
+    assert b"x-forwarded-for" not in names
+    # Forwarded: the measured transport set, the grpc- family, and the bearer.
+    for kept in (
+        b"content-type",
+        b"te",
+        b"user-agent",
+        b"grpc-timeout",
+        b"grpc-encoding",
+        b"build.bazel.remote.execution.v2.requestmetadata-bin",
+        b"authorization",
+        b":path",
+        b":authority",
+    ):
+        assert kept in names, kept
+
+
+def _reset_event(stream_id: int) -> h2.events.StreamReset:
+    return h2.events.StreamReset(stream_id=stream_id)
+
+
+async def test_a_reset_stream_repays_its_queued_flow_control_debt():
+    """M1: a queued chunk holds the SOURCE's window shut until it is forwarded.
+    A reset drops the queue, so without repayment the source's connection-level
+    window shrinks for good -- ~64KiB of it strands the peer silently, with
+    `refused` None so the offline fallback never fires. Both queues are repaid
+    to their own source: the box-bound queue owes the box, the upstream-bound
+    queue owes the upstream.
+    """
+    s = Session(_token, RBE_ALLOWED_METHODS)
+    s._c2u[1] = 2
+    s._u2c[2] = 1
+    s._queue(s._to_up, 1, b"x" * 100, 100)
+    s._queue(s._to_up, 1, b"y" * 40, 40)
+    s._queue(s._to_down, 1, b"z" * 200, 200)
+
+    repaid: list[tuple[str, int, int]] = []
+
+    class _Conn:
+        def __init__(self, tag):
+            self.tag = tag
+
+        def acknowledge_received_data(self, size, sid):
+            repaid.append((self.tag, size, sid))
+
+        def reset_stream(self, sid):
+            pass
+
+    down, up = _Conn("down"), _Conn("up")
+    await s._on_down_event(_reset_event(1), down, up)
+
+    # Box-owed chunks repaid to the box at the client stream id.
+    assert ("down", 100, 1) in repaid
+    assert ("down", 40, 1) in repaid
+    # Upstream-owed chunk repaid to the upstream at its twin stream id.
+    assert ("up", 200, 2) in repaid
+    # Queues cleared.
+    assert 1 not in s._to_up
+    assert 1 not in s._to_down
+
+
+async def test_a_drained_closed_stream_repays_the_source():
+    """The other drop site: _drain hits StreamClosedError on the destination and
+    prunes the queue. The queued bytes still owe the source, so the same
+    repayment applies -- a closed twin must not leak the box's window either.
+    """
+    s = Session(_token, RBE_ALLOWED_METHODS)
+    dest = h2.connection.H2Connection(h2.config.H2Configuration(client_side=False))
+    dest.initiate_connection()  # stream 1 is not open on it -> StreamClosedError
+
+    repaid: list[tuple[int, int]] = []
+
+    class _Src:
+        def acknowledge_received_data(self, size, sid):
+            repaid.append((size, sid))
+
+    pending = {1: rbe._Pending()}
+    pending[1].chunks.append((b"hello", 5))
+    pending[1].chunks.append((b"world!", 6))
+
+    s._drain(pending, 1, dest, 1, _Src(), 7)
+
+    assert 1 not in pending
+    assert (5, 7) in repaid and (6, 7) in repaid

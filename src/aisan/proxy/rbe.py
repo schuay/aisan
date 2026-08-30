@@ -91,6 +91,48 @@ ALLOWED_METHODS = frozenset(
 # cache can poison it for every other consumer of the shared instance, and siso
 # does not need it (remote execution updates the cache server-side).
 
+# Request headers forwarded upstream. Everything the box sends rides the
+# cloud-scoped, Gerrit-capable bearer this proxy injects, so a header the box
+# CHOSE that reaches Google under that bearer is a capability the allowlist
+# never vetted -- `x-goog-user-project` (billing/quota attribution),
+# `x-goog-request-params` (routing), whatever a prompt-injected build adds next.
+# Forwarding all-but-`authorization` made "whatever the box sent is data" false.
+#
+# Measured from a full proxied V8 build (siso over grpc-go 1.83.1,
+# GetCapabilities through Execute/ByteStream): siso sends exactly content-type,
+# te, user-agent, grpc-timeout, grpc-accept-encoding, and the REAPI
+# RequestMetadata below -- no `x-goog-*` among them. user-agent is `grpc-go/1.x`,
+# tool identity with no host fingerprint (unlike the model proxies' x-stainless
+# set), so it is kept rather than dropped.
+#
+# The `grpc-` family is passed by PREFIX, not enumerated: the gRPC spec reserves
+# that prefix for transport metadata (grpc-timeout, grpc-encoding,
+# grpc-accept-encoding, grpc-previous-rpc-attempts, the grpc-*-bin tracing
+# pair), none of which carries authorization or reroutes a request -- and
+# hard-coding only the two a plain build happens to send would strip a
+# compressed build's `grpc-encoding` and leave the upstream unable to decode.
+# requestmetadata-bin is box-chosen data the upstream expects (tool and
+# invocation ids for build-event correlation), inert like the protobuf body.
+_FORWARDED_HEADERS = frozenset(
+    {
+        b"content-type",
+        b"te",
+        b"user-agent",
+        b"build.bazel.remote.execution.v2.requestmetadata-bin",
+    }
+)
+
+
+def _forwarded_header(name: bytes) -> bool:
+    """Whether a lowercased box request header may reach the upstream.
+
+    Pseudo-headers (`:method`, `:path`, `:scheme`, `:authority`) are the request
+    itself and handled by the caller, which also rewrites `:authority`/`host`;
+    `authorization` is dropped and replaced with the injected bearer there too.
+    """
+    return name in _FORWARDED_HEADERS or name.startswith(b"grpc-")
+
+
 # gRPC signals application errors in trailers with a 200 status, so a refusal
 # must be a trailer too -- an HTTP error status makes the client report a
 # transport failure and retry, hiding the reason.
@@ -280,7 +322,9 @@ class Session:
                     conn.end_stream(sid)
                 pending.pop(key, None)
         except (h2.exceptions.StreamClosedError, h2.exceptions.NoSuchStreamError):
-            pending.pop(key, None)
+            # The destination stream is gone; the queue will never forward, so
+            # repay its debt to the source rather than dropping it silently.
+            self._discard(pending, key, src_conn, src_sid)
 
     def _drain_all(self, pending, conn, to_upstream: bool, src_conn) -> None:
         """Retry every stalled stream in one direction after a WindowUpdated.
@@ -297,6 +341,31 @@ class Session:
             if sid is None or src_sid is None:
                 continue
             self._drain(pending, key, conn, sid, src_conn, src_sid)
+
+    def _discard(self, pending, key: int, src_conn, src_sid) -> None:
+        """Drop a stream's queue, repaying the source's flow-control debt.
+
+        A queued chunk holds the SOURCE's window shut until it is forwarded (see
+        `_drain`, which repays only as bytes leave). If the stream dies first --
+        a reset, a closed twin -- those bytes never leave, so the ack never
+        happens and the source's CONNECTION-level window shrinks by that much
+        for good. A few resets mid-build silently strand the peer: once ~64KiB
+        of unrepaid debt accumulates it can send nothing more, and `refused`
+        stays None so the offline fallback never fires. Repaying here makes a
+        dropped chunk cost no window.
+
+        `acknowledge_received_data` restores the connection window even for an
+        already-closed stream (it processes the connection manager before
+        looking the stream up), which is the window that leaks; the suppress is
+        for a `src_sid` whose twin is gone.
+        """
+        p = pending.pop(key, None)
+        if p is None or src_conn is None or src_sid is None:
+            return
+        for _data, flow_len in p.chunks:
+            if flow_len:
+                with contextlib.suppress(Exception):
+                    src_conn.acknowledge_received_data(flow_len, src_sid)
 
     def _refuse(
         self,
@@ -466,17 +535,25 @@ class Session:
             # that check; the ProtocolError escaped into `_pump_down`'s broad
             # except and tore the whole connection down with no gRPC status -- the
             # retry-storm-then-local-fallback this module exists to avoid, at will.
-            out = [
-                (
-                    k,
-                    UPSTREAM_HOST.encode()
-                    if k.lower() in (b":authority", b"host")
-                    else v,
-                )
-                for k, v in ev.headers
-                if k.lower() != b"authorization"
-            ]
+            out: list[tuple[bytes, bytes]] = []
+            dropped: list[str] = []
+            for k, v in ev.headers:
+                lk = k.lower()
+                if lk in (b":authority", b"host"):
+                    out.append((k, UPSTREAM_HOST.encode()))
+                elif lk == b"authorization":
+                    continue  # replaced with the injected bearer below
+                elif lk.startswith(b":") or _forwarded_header(lk):
+                    out.append((k, v))
+                else:
+                    dropped.append(lk.decode("latin1"))
             out.append((b"authorization", f"Bearer {bearer}".encode()))
+            if dropped:
+                # Not a refusal -- the request still goes -- but the breadcrumb
+                # for the one case this can break: a future siso sending a header
+                # a real build needs that is not yet measured here. Debug, so it
+                # is there when a build misbehaves without flooding a healthy one.
+                log.debug("rbe proxy: dropped box header(s): %s", ", ".join(dropped))
             uid = up_conn.get_next_available_stream_id()
             self._c2u[ev.stream_id] = uid
             self._u2c[uid] = ev.stream_id
@@ -509,8 +586,10 @@ class Session:
         elif isinstance(ev, h2.events.StreamReset):
             if (uid := self._c2u.pop(ev.stream_id, None)) is not None:
                 self._u2c.pop(uid, None)
-                self._to_up.pop(ev.stream_id, None)
-                self._to_down.pop(ev.stream_id, None)
+                # Repay both queues before dropping them: the box-bound queue
+                # owes the box, the upstream-bound queue owes the upstream.
+                self._discard(self._to_up, ev.stream_id, down, ev.stream_id)
+                self._discard(self._to_down, ev.stream_id, up_conn, uid)
                 with contextlib.suppress(Exception):
                     up_conn.reset_stream(uid)
 
@@ -574,8 +653,8 @@ class Session:
             if cid is not None:
                 self._c2u.pop(cid, None)
                 self._u2c.pop(ev.stream_id, None)
-                self._to_up.pop(cid, None)
-                self._to_down.pop(cid, None)
+                self._discard(self._to_up, cid, down, cid)
+                self._discard(self._to_down, cid, up_conn, ev.stream_id)
                 with contextlib.suppress(Exception):
                     down.reset_stream(cid)
 
