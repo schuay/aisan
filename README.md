@@ -1,22 +1,109 @@
 # aisan
 
-aisan is a set of Linux confinement and credential-aware egress components for
-build and coding workloads. It compiles an explicit filesystem policy to
-Bubblewrap, keeps network credentials on the host, and exposes only the
-allowlisted operations a sandboxed process needs.
+aisan runs a coding agent with everything in the box: the harness, its
+state, and your repo. Nothing else. The box has no network route and
+holds no credential. Model calls still work: each harness gets a host-side
+proxy that checks requests against an allowlist and attaches the real
+credential to traffic the box never sees.
 
-The model- and client-neutral core is roughly 3,100 lines of Python. That count
-covers `BoxSpec`, the sandbox compiler, git bind policy, lifecycle and launcher,
-inspection, the backend interface, relay, fail-closed policy, and the REAPI
-transport. Provider/client adapters, presets, interactive session launchers,
-and MCP importers are integrations outside that core count. The number is an
-audit bound, not a comparison with another project's total source size.
+```sh
+python -m pip install aisan   # or: uv tool install aisan
+aisan claude /path/to/repo
+```
 
-The package also ships integrations for selected model APIs and interactive
-Claude Code, Codex, and opencode sessions. Those are examples and conveniences;
-the core does not depend on any one model or agent.
+That is a normal interactive Claude Code session (`aisan codex` and
+`aisan opencode` work the same way), with three differences:
 
-## What it provides
+- **Zero credentials in the box.** `~/.claude/.credentials.json` is never
+  mounted. The token the client sees is a per-box placeholder; the proxy
+  drops it and attaches the host's real credential: the subscription login
+  by default, or a static API key with `--api-key`. A test asserts from
+  inside a real box that the credential file does not exist.
+- **Zero network by default.** The box gets its own network namespace with no
+  route off the machine. The one egress is a loopback relay to the model
+  proxy over a Unix socket. `--net` opts back into host networking when a
+  task needs it; credential files stay unmounted and model calls still pass
+  through the authenticated proxy.
+- **Selected filesystem slices.** The repo is bound rw at its real absolute
+  path, system directories ro (`/usr`, `/etc`; fresh `/proc` and `/dev`), a
+  tmpfs over `$HOME` and `/tmp`, and nothing else unless a bind spec names
+  it. Local stdio MCP servers declared on the host are started inside the
+  box, where they inherit its filesystem, cleared environment, and network
+  namespace; remote MCP declarations and their authentication state stay on
+  the host.
+
+## Nothing on faith: `--explain`
+
+Every launcher takes `--explain`: it prints the resolved profile and the
+exact Bubblewrap argv from the same `Box` object used to launch, then exits.
+Trimmed:
+
+```
+$ aisan claude /path/to/repo --explain
+
+== inputs ==
+  harness   claude-code
+  repo      /path/to/repo
+  network   own namespace (no route off the machine)
+
+== egress backends (host half on a socket, in-box on loopback) ==
+  anthropic 127.0.0.1:8713 -> /tmp/aisan-proxy-59d1d1bc/anthropic.sock
+
+== tmpfs mounts (mounted before binds; intended writable scratch) ==
+  [ 39] /tmp  (2147483648)
+  [ 43] /home/user  (1073741824  <- $HOME)
+
+== binds in argv order (later shadows earlier on overlap) ==
+  system    /usr /bin /lib /lib64 /sbin /etc /proc /dev
+  [ 45] rw-root   /path/to/repo
+  [ 63] rw        /home/user/.cache/aisan-claude/aisan-4475d1c31168
+  [ 66] ro        /home/user/.config/git/config
+  [ 69] ro        /tmp/aisan-proxy-59d1d1bc
+
+== environment (the box's complete environment; --clearenv first) ==
+  CLAUDE_CONFIG_DIR=/path/to/repo/.aisan-claude-state
+  GIT_PAGER=cat
+  HOME=/home/user
+  PATH=/usr/bin
+  ...
+```
+
+## User bind specs
+
+Presets cover the harness; `--binds FILE` (repeatable, TOML) covers your
+project. The keys are `ro`, `rw`, `overlay`, and `path` entries prepended to
+the box PATH:
+
+```toml
+ro      = ["~/depot_tools"]
+overlay = ["~/.cache/vpython-root.1000"]
+path    = ["~/depot_tools"]
+```
+
+The `path` key grants nothing on its own: every entry must be covered by a
+mount the same file names. `include` pulls in other spec files, expanded in
+place and before the including file's own keys, so a growing collection
+composes in an order the files state rather than one the command line
+implies. [`examples/depot_tools.toml`](examples/depot_tools.toml) is a worked
+example with the reasoning written down.
+
+## As a library: unattended API jobs
+
+The same mechanism drives headless workloads. A preset is a pure
+`args -> BoxSpec` function; `Box` compiles the spec, starts the backends, and
+returns argv. The Vertex backend mints short-lived tokens host-side through
+ADC impersonation, so a batch job's box carries no Google credential either.
+This package was extracted from an autonomous patch pipeline that runs
+model-driven build/test jobs against V8 worktrees; that pipeline remains its
+first consumer.
+
+The REAPI transport is the largest specialized core component. Remote build
+clients such as siso can speak plaintext HTTP/2 to a local endpoint while the
+real bearer stays on the host. It checks `:authority` and `:path` together,
+injects credentials per HTTP/2 stream, and refuses in gRPC's own terms so a
+policy decision is not mistaken for a retryable network failure.
+
+## Design rules
 
 - **`BoxSpec`** is frozen, non-defaulting data. A reviewer can read a call site
   and see what is mounted without simulating default resolution. `Limits` is
@@ -32,21 +119,13 @@ the core does not depend on any one model or agent.
   messages name the policy reason rather than an internal callback.
 - **Presets as pure `args -> BoxSpec` functions**, rather than project switches
   hidden inside the sandbox compiler.
-- **`aisan explain`** renders resolved binds and the exact Bubblewrap argv from
-  the same `Box` used to launch the process.
-- **User bind specs** (`--binds FILE`, repeatable) name paths to mount `ro`,
-  `rw`, or `overlay`, plus `path` entries prepended to the box PATH. The key
-  grants nothing on its own: every entry must be covered by a mount the same
-  file names. `include` pulls in other spec files, expanded in place and
-  before the including file's own keys, so a growing collection composes in an
-  order the files state rather than one the command line implies.
-  `examples/depot_tools.toml` is a worked example.
 
-The REAPI transport is the largest specialized core component. Remote build
-clients such as siso can speak plaintext HTTP/2 to a local endpoint while the
-real bearer stays on the host. It checks `:authority` and `:path` together,
-injects credentials per HTTP/2 stream, and refuses in gRPC's own terms so a
-policy decision is not mistaken for a retryable network failure.
+The model- and client-neutral core is roughly 3,100 lines of Python. That count
+covers `BoxSpec`, the sandbox compiler, git bind policy, lifecycle and launcher,
+inspection, the backend interface, relay, fail-closed policy, and the REAPI
+transport. Provider/client adapters, presets, interactive session launchers,
+and MCP importers are integrations outside that core count. The number is an
+audit bound, not a comparison with another project's total source size.
 
 ## Requirements
 
@@ -70,16 +149,14 @@ unmounted and model calls still pass through authenticated host proxies.
 
 ## Installation
 
-From a checkout:
-
 ```sh
-python -m pip install .
+python -m pip install aisan
 ```
 
 For Vertex credential minting:
 
 ```sh
-python -m pip install '.[google-auth]'
+python -m pip install 'aisan[google-auth]'
 ```
 
 This installs one human-facing command with inspection and interactive
