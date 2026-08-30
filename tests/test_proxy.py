@@ -776,6 +776,41 @@ def test_body_policy_permits_the_real_clients_tools():
     assert BodyPolicy().refuse(b'{"tools": [{"function_declarations": []}]}') is None
 
 
+def test_body_policy_refuses_a_contents_part_that_fetches_a_uri():
+    """NEW-1: the tools gate covers the tool list, but a `contents` part carrying
+    `fileData.fileUri` is the same fetch-a-URL-the-box-chose vector, one level
+    down in the messages -- and it slips a body with NO tools past the old gate
+    (which returned early when tools was absent). Both proto3 spellings."""
+    import json
+
+    import aisan.proxy.vertex as v
+
+    for field in ("fileData", "file_data"):
+        body = json.dumps(
+            {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{field: {"fileUri": "https://x.example/exfil"}}],
+                    }
+                ]
+            }
+        ).encode()
+        reason = v.BodyPolicy().refuse(body)
+        assert reason is not None, field
+        assert field in reason
+    # inline text and base64 are inert and permitted.
+    ok = json.dumps(
+        {
+            "contents": [
+                {"role": "user", "parts": [{"text": "build it"}]},
+                {"role": "user", "parts": [{"inlineData": {"data": "AAAA"}}]},
+            ]
+        }
+    ).encode()
+    assert v.BodyPolicy().refuse(ok) is None
+
+
 @pytest.mark.parametrize(
     ("field", "why"),
     [

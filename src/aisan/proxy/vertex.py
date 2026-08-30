@@ -120,6 +120,15 @@ class Allowlist:
         return any(p.match(path) for p in self._patterns())
 
 
+# `Part` keys that name a URI for GOOGLE to fetch. A `contents` part carrying
+# `fileData: {fileUri: ...}` makes Vertex read that URI on the box's behalf --
+# the same route off the machine the tool fields open, one level down in the
+# messages rather than the tool list, and the URL is the payload. Both proto3
+# JSON spellings, as with the tool fields. inlineData (base64) is inert and
+# permitted; text and the function/thought parts carry no fetch.
+FETCH_PART_FIELDS = frozenset({"fileData", "file_data"})
+
+
 # The one `Tool` field that executes IN THE BOX: the model emits a call, the
 # client runs it, the result goes back as a message. BOTH spellings, because the
 # upstream accepts both and an allowlist that knew only one is bypassed by
@@ -184,6 +193,10 @@ class BodyPolicy:
         if not isinstance(payload, dict):
             return "request body must be a JSON object"
 
+        reason = self._contents_refusal(payload.get("contents"))
+        if reason is not None:
+            return reason
+
         tools = payload.get("tools")
         if tools is None:
             return None
@@ -198,6 +211,31 @@ class BodyPolicy:
                         f"tool field {field!r} executes on the upstream, not in"
                         " the sandbox, and is not permitted"
                     )
+        return None
+
+    def _contents_refusal(self, contents: object) -> str | None:
+        """Refuse a `contents` part that asks Google to fetch a URI.
+
+        The tools gate covers the tool list; this covers the messages, where a
+        `fileData.fileUri` is the same fetch-a-URL-the-box-chose vector. Shapes
+        it cannot read are left to the tools/parser gates -- a non-list or a
+        non-dict part is not a fetch this needs an opinion on."""
+        if not isinstance(contents, list):
+            return None
+        for content in contents:
+            if not isinstance(content, dict):
+                continue
+            parts = content.get("parts")
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if isinstance(part, dict):
+                    for field in part:
+                        if field in FETCH_PART_FIELDS:
+                            return (
+                                f"content part field {field!r} makes the upstream"
+                                " fetch a URL the box chose, and is not permitted"
+                            )
         return None
 
 

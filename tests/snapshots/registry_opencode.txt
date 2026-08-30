@@ -27,7 +27,7 @@
   [..] ro-pin    <MAIN>/.git/worktrees/wt/commondir
   [..] ro-pin    <MAIN>/.git/worktrees/wt/config.worktree
   [..] ro-pin    <MAIN>/.git/objects/pack
-  [..] ro        <OPENCODE_CACHE>/models.json
+  [..] ro-sub    <HOME>/.cache/opencode/models.json
   <AISAN RUNTIME>
   [..] seal-ro   <MAIN>/.git/worktrees
 
@@ -137,7 +137,7 @@
   <MAIN>/.git/objects/pack
   --ro-bind
   <OPENCODE_CACHE>/models.json
-  <OPENCODE_CACHE>/models.json
+  <HOME>/.cache/opencode/models.json
   <AISAN RUNTIME>
   --remount-ro
   <MAIN>/.git/worktrees

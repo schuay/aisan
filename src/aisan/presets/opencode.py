@@ -63,7 +63,7 @@ from pathlib import Path
 
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
-from ..sandbox import RO, RW, Bind, BindSpec
+from ..sandbox import RO, RW, Bind, BindOver, BindSpec
 from ..spec import DEFANG_ENV, BoxSpec, Limits
 
 # Legibility knobs, not security controls. The network namespace already
@@ -85,6 +85,21 @@ _DISABLE_ENV = (
 def _default_catalog() -> Path:
     cache = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
     return Path(cache) / "opencode" / "models.json"
+
+
+def _catalog_bind(catalog: Path) -> list[BindSpec]:
+    """Bind the host catalog at the box read path, or nothing if it is absent.
+
+    Absent is fine: opencode falls back to its embedded (staler) catalog, which
+    still builds -- so this is optional, unlike a bind-over an operator named.
+    Present, it is substituted at ~/.cache/opencode/models.json, where the box
+    reads it regardless of the host's XDG_CACHE_HOME."""
+    if not catalog.is_file():
+        return []
+    box_dst = Path.home() / ".cache" / "opencode" / "models.json"
+    if catalog.resolve() == box_dst.resolve():
+        return [Bind(catalog, RO)]
+    return [BindOver(catalog, box_dst)]
 
 
 def opencode_binary() -> Path | None:
@@ -143,10 +158,14 @@ def opencode(
         # After the ro binds: the state dir is the box's own and nothing may
         # shadow it. Same rule as the Claude Code preset's.
         *([] if state.is_relative_to(worktree) else [Bind(state, RW)]),
-        # The catalog, pinned ro on top of the HOME tmpfs at the path opencode
-        # reads by default. Last: it is a host fact, not a policy, and it
-        # shadows nothing the caller asked for.
-        Bind(catalog, RO, optional=True),
+        # The catalog, at the path opencode reads INSIDE the box. A BindOver,
+        # not a plain Bind of its own path: `_default_catalog` is XDG-aware
+        # host-side, but the box's cleared env sets no XDG_CACHE_HOME, so the box
+        # reads ~/.cache/opencode/models.json -- binding the host file at its own
+        # (possibly XDG) path would land it where the box never looks, and the
+        # pinned --model would then be refused as unknown against the stale
+        # embedded catalog. Last: a host fact, not policy, shadowing nothing.
+        *_catalog_bind(catalog),
     ]
     return BoxSpec(
         root=worktree,

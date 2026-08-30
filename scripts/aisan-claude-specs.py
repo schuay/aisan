@@ -47,7 +47,7 @@ from aisan.egress.anthropic import DEFAULT_UPSTREAM, AnthropicBackend
 from aisan.gitbinds import external_symlink_targets, git_binds
 from aisan.presets.claude_code import claude_code
 from aisan.sandbox import RO, RW, Bind, BindSpec
-from aisan.session import git_config_binds
+from aisan.session import git_config_binds, repo_key
 from aisan.spec import BoxSpec
 
 UPSTREAM = os.environ.get(
@@ -92,7 +92,10 @@ def single_repo(repo: Path) -> BoxSpec:
     # git's identity has to be named or a commit inside dies "tell me who you are".
     return claude_code(
         repo,
-        state=_state_for(repo.name),
+        # repo_key, not repo.name: the state dir is rw and survives the box, so
+        # ~/work/v8 and ~/upstream/v8 sharing a bare-basename dir lets one repo's
+        # session seed the other with a CLAUDE.md read as instructions.
+        state=_state_for(repo_key(repo)),
         egress=(AnthropicBackend(upstream=UPSTREAM),),
         extra_env=(
             ("PATH", "/usr/bin:/usr/local/bin"),

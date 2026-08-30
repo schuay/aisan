@@ -46,7 +46,7 @@ from aisan.egress.openai_compat import (
 )
 from aisan.presets import PRESETS
 from aisan.presets.opencode import opencode, opencode_binary, opencode_default
-from aisan.sandbox import RO, RW
+from aisan.sandbox import RW
 
 # Not a credential: a fixed string, in a file this test wrote, against an
 # upstream that is a local aiohttp handler. Named so a reader does not have to
@@ -486,15 +486,37 @@ def test_no_bind_source_contains_the_credential(tmp_path):
         assert not DEFAULT_CREDENTIALS.is_relative_to(m.src), f"{m.src} would expose it"
 
 
-def test_the_state_dir_is_rw_and_the_catalog_is_ro_and_optional(tmp_path):
+def test_the_state_dir_is_rw_and_the_catalog_substitutes_at_the_box_read_path(tmp_path):
     """Session history is the agent's to write; the catalog is a host fact it
-    reads. Optional, so a host without one still builds the profile."""
+    reads. The catalog is a BindOver, not a Bind of its own path: the box reads
+    ~/.cache/opencode/models.json (no XDG in its cleared env), so the host file
+    (which may sit under XDG_CACHE_HOME) is substituted THERE, or a pinned
+    --model is refused as unknown against the stale embedded catalog (M12)."""
+    from aisan.sandbox import BindOver
+
     spec = _spec(tmp_path)
     modes = {
         Path(b.path): (b.mode, b.optional) for b in spec.binds if hasattr(b, "mode")
     }
     assert modes[tmp_path / "state"] == (RW, False)
-    assert modes[tmp_path / "models.json"] == (RO, True)
+    box_dst = Path.home() / ".cache" / "opencode" / "models.json"
+    overs = [b for b in spec.binds if isinstance(b, BindOver)]
+    assert any(b.src == tmp_path / "models.json" and b.dst == box_dst for b in overs)
+
+
+def test_an_absent_catalog_binds_nothing(tmp_path):
+    # Optional in effect: opencode falls back to its embedded catalog, which
+    # still builds, so a host without a fetched one is not a refusal.
+    from aisan.sandbox import BindOver
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    spec = opencode(wt, state=state, models=tmp_path / "does-not-exist.json")
+    assert not any(
+        isinstance(b, BindOver) and b.dst.name == "models.json" for b in spec.binds
+    )
 
 
 def test_a_state_dir_inside_the_root_needs_no_bind(tmp_path):
