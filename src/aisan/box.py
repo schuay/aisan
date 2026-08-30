@@ -26,6 +26,7 @@ never interprets.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Iterator
 from contextlib import AsyncExitStack, ExitStack, contextmanager, suppress
 from pathlib import Path
@@ -166,9 +167,23 @@ class Box:
                 ensure_dir(e.path)
             else:
                 ensure_dir(e.path.parent)
-                if not e.path.exists():
+                # O_EXCL|O_NOFOLLOW, not touch(): the .git these land in is
+                # box-writable, so an agent could plant `config.worktree` as a
+                # symlink to a host file, and a plain touch would follow it and
+                # create (or stamp) the target as the operator. O_EXCL creates
+                # only a genuinely absent file and O_NOFOLLOW refuses a symlink;
+                # an already-present regular file or a planted link both raise
+                # FileExistsError and are left for the bind to resolve.
+                try:
+                    fd = os.open(
+                        e.path,
+                        os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                        0o600,
+                    )
+                    os.close(fd)
                     created_files.append(e.path)
-                    e.path.touch()
+                except FileExistsError:
+                    pass
         if created_files or created_dirs:
             stack.callback(_undo_host_paths, tuple(created_files), tuple(created_dirs))
 

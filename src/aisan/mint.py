@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 # Returns (access_token, aware-UTC expiry). Tests plug in here rather than
 # reaching for a real cloud credential, which is exactly the dependency the
@@ -33,6 +33,11 @@ _CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
 # request. luci-auth returns in well under a second when it has a live login;
 # anything past this is it wanting something a headless refresh cannot give.
 _TOKEN_TIMEOUT_S = 30
+
+# How long a credential that reports no expiry is treated as valid, so a
+# missing expiry is a short refresh interval rather than a re-mint per
+# request.
+_NO_EXPIRY_TTL = timedelta(minutes=5)
 
 
 def _read_adc_impersonate_token(target: str) -> tuple[str, datetime]:
@@ -49,8 +54,10 @@ def _read_adc_impersonate_token(target: str) -> tuple[str, datetime]:
         target_scopes=[_CLOUD_PLATFORM],
     )
     creds.refresh(Request())
-    # google.auth expiry is naive UTC by convention.
-    expiry = creds.expiry or (datetime.now(UTC).replace(tzinfo=None))
+    # google.auth expiry is naive UTC by convention. A falsy expiry is treated as
+    # a short valid window, not `now`: `now` reads as already expired, so the
+    # refresher re-mints on EVERY request -- a blocking IAM round trip per call.
+    expiry = creds.expiry or (datetime.now(UTC).replace(tzinfo=None) + _NO_EXPIRY_TTL)
     return creds.token, expiry.replace(tzinfo=UTC)
 
 

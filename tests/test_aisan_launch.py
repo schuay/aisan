@@ -32,7 +32,12 @@ from aisan.launch import (
     launcher_binds,
     own_source_root,
 )
-from aisan.runtime import write_client_env, write_manifest
+from aisan.runtime import (
+    CLIENT_ENV_NAME,
+    prepare_runtime_dir,
+    write_client_env,
+    write_manifest,
+)
 from aisan.sandbox import RO
 
 
@@ -340,3 +345,22 @@ async def test_an_isolated_box_reaches_the_host_only_through_the_relay(tmp_path)
     # The negative half: ECONNREFUSED (111) on the host's own loopback port,
     # which is what makes the relay necessary rather than merely convenient.
     assert "host=111" in r.stdout
+
+
+def test_prepare_runtime_dir_clears_a_stale_client_env(monkeypatch, tmp_path):
+    # L6: a --net run writes client-env.json; a SIGKILL skips the cleanup that
+    # would remove it; the launcher checks client-env BEFORE the manifest, so a
+    # stale one makes the next isolated run take the shared branch and never
+    # start relays. prepare_runtime_dir clears both control files so only this
+    # run's fresh one survives.
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    import aisan.runtime as rt
+
+    monkeypatch.setattr(rt.tempfile, "gettempdir", lambda: str(tmp_path))
+    d = prepare_runtime_dir("box-l6")
+    write_client_env(d, {"AISAN_DEAD": "1"})
+    assert (d / CLIENT_ENV_NAME).exists()
+    # A second prepare (the next run reusing the same box_id) must clear it.
+    d2 = prepare_runtime_dir("box-l6")
+    assert d2 == d
+    assert not (d2 / CLIENT_ENV_NAME).exists()

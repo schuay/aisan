@@ -76,6 +76,14 @@ def prepare_runtime_dir(box_id: str) -> Path:
         raise PermissionError(f"runtime directory is not owned by this user: {d}")
     if info.st_mode & 0o077:
         raise PermissionError(f"runtime directory is too permissive: {d}")
+    # Clear the control files a prior run may have left. A --net run writes
+    # client-env.json; a SIGKILL skips the cleanup that would remove it; and the
+    # launcher checks client-env BEFORE the manifest -- so a stale one makes the
+    # next ISOLATED run (which writes only a manifest) take the shared branch,
+    # read a dead port, and never start its relays. Both are rewritten fresh by
+    # `_stage`, so removing a stale copy here cannot lose anything.
+    for name in (MANIFEST_NAME, CLIENT_ENV_NAME):
+        (d / name).unlink(missing_ok=True)
     return d
 
 

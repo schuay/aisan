@@ -562,3 +562,26 @@ async def test_an_in_box_gc_cannot_destroy_a_sibling_worktrees_objects(tmp_path)
         check=False,
     )
     assert still_registered.returncode == 0, f"the sibling worktree was broken:\n{out}"
+
+
+def test_a_planted_symlink_guard_source_is_not_followed(tmp_path):
+    # W12: the .git guard files land in a box-writable .git, so an agent could
+    # plant config.worktree as a symlink to a host file. The Box creates the
+    # guards with O_EXCL|O_NOFOLLOW, so a planted link is not followed and its
+    # target is not created (or stamped) as the operator.
+    import dataclasses
+
+    main, wt = _fake_checkout(tmp_path)
+    target = tmp_path / "outside-the-git"
+    assert not target.exists()
+    planted = main / ".git" / "config.worktree"
+    planted.symlink_to(target)  # dangling: touch() would create `target`
+
+    spec = v8_job(wt, depot_tools=None, unshare_net=True)
+    spec = dataclasses.replace(
+        spec, limits=dataclasses.replace(spec.limits, use_cgroup=False)
+    )
+    box = Box(spec, box_id="w12")
+    with box.staged():
+        pass  # _stage ran _ensure_host_paths over the ensure-paths
+    assert not target.exists(), "a planted symlink was followed into a host write"
