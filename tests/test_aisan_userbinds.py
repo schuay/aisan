@@ -445,3 +445,27 @@ def test_with_path_prefix_refuses_a_relative_or_colon_bearing_dir(tmp_path):
     # A well-formed absolute dir still prepends.
     out = base.with_path_prefix((Path("/opt/tool/bin"),))
     assert dict(out.env)["PATH"].startswith("/opt/tool/bin:")
+
+
+def test_diamond_included_mount_covers_a_path_regardless_of_include_order(tmp_path):
+    # M15: common mounts /tools; a and b both include it (a diamond, expanded
+    # once). b's path=/tools/bin is covered by that mount. Which branch expands
+    # common first depends on include order in a file the reader is not looking
+    # at -- coverage must not, since the final box has the mount either way.
+    (tmp_path / "common.toml").write_text('ro = ["/tools"]\n')
+    (tmp_path / "a.toml").write_text('include = ["common.toml"]\n')
+    (tmp_path / "b.toml").write_text(
+        'include = ["common.toml"]\npath = ["/tools/bin"]\n'
+    )
+    for order in ('["a.toml", "b.toml"]', '["b.toml", "a.toml"]'):
+        root = tmp_path / "root.toml"
+        root.write_text(f"include = {order}\n")
+        spec = load(root, egress=())  # must not raise in EITHER order
+        assert Path("/tools/bin") in spec.path
+
+
+def test_a_path_entry_no_file_in_the_tree_mounts_is_uncovered(tmp_path):
+    # The global check still catches a PATH dir nothing mounts.
+    f = _spec_file(tmp_path, 'ro = ["/tools"]\npath = ["/elsewhere/bin"]\n')
+    with pytest.raises(ValueError, match="not covered"):
+        load(f, egress=())

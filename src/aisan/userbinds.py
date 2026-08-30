@@ -145,7 +145,28 @@ def load(path: Path, *, egress: tuple[Backend, ...]) -> UserSpec:
     no backends passes `()` and says so; a caller with backends cannot omit them
     by accident.
     """
-    return _load(path, egress, [], set())
+    spec = _load(path, egress, [], set())
+    _assert_path_coverage(path, spec)
+    return spec
+
+
+def _assert_path_coverage(path: Path, spec: UserSpec) -> None:
+    """Every PATH dir must sit under some mount the box actually gets.
+
+    Over the WHOLE merged spec, so a diamond-included mount counts no matter
+    which branch expanded it (see `_load`). Normalised before the containment
+    test: `/tools/bin/../../../etc` is `is_relative_to("/tools")` by components
+    while resolving outside it, so an un-normalised check would call an escaping
+    PATH dir covered. A bind's box-side path is its own (`Bind`/`Overlay` mount
+    at their source); userbinds emits no substituting bind."""
+    mounted = [Path(os.path.normpath(b.path)) for b in spec.binds if hasattr(b, "path")]
+    for d in spec.path:
+        if not any(Path(os.path.normpath(d)).is_relative_to(m) for m in mounted):
+            raise ValueError(
+                f"{path}: path entry {d} is not covered by any ro, rw or overlay"
+                " entry in the spec or its includes -- a PATH directory the box"
+                " does not mount resolves nothing"
+            )
 
 
 def _load(
@@ -240,26 +261,12 @@ def _load(
     binds += [Bind(p, RW) for p in _dedup(mounts["rw"])]
 
     dirs = _dedup([*inner_dirs, *_entries(path, doc.get("path", []), "path")])
-    # What this file mounts, counting what it chose to include: a PATH entry
-    # covered by an included mount is covered, and the reader still has both
-    # lines in front of them -- one names the file, the other the directory.
-    mounted = [p for key in _MOUNT_KEYS for p in mounts[key]]
-    mounted += [b.path for b in inner_binds if hasattr(b, "path")]
-    # Normalised before the containment test: `/tools/bin/../../../etc` is
-    # `is_relative_to("/tools")` by components but resolves OUTSIDE it, so an
-    # un-normalised check would call an escaping PATH dir covered.
-    mounted_norm = [Path(os.path.normpath(m)) for m in mounted]
-    uncovered = [
-        d
-        for d in dirs
-        if not any(Path(os.path.normpath(d)).is_relative_to(m) for m in mounted_norm)
-    ]
-    if uncovered:
-        raise ValueError(
-            f"{path}: path entry {uncovered[0]} is not covered by any ro, rw or"
-            " overlay entry in this file -- a PATH directory the box does not"
-            " mount resolves nothing"
-        )
+    # PATH coverage is checked ONCE over the merged tree, in `load` below, not
+    # per file: a diamond include is expanded only on its first path, so its
+    # mounts are absent from `inner_binds` on the second -- and a PATH entry
+    # covered by that include would be reported uncovered or not depending on
+    # include order in a file the reader is not looking at. The final box has
+    # every file's mounts, so coverage is a fact about the whole tree.
 
     exposure = credential_exposure(tuple(binds), egress)
     if exposure is not None:
