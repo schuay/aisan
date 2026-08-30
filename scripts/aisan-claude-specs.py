@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
@@ -82,10 +83,10 @@ def _repo_binds(repo: Path, mode) -> list[BindSpec]:
 
 
 def single_repo(repo: Path) -> BoxSpec:
-    """The baseline: what `aisan claude` builds.
-
-    Here so the multi-repo variants can be read as a diff against it rather than
-    from scratch.
+    """A single-repo baseline in the shape `aisan claude` builds -- not identical
+    to it: the CLI also imports host MCP, terminal env and retry knobs. Here so
+    the multi-repo variants below read as a diff against it rather than from
+    scratch.
     """
     return claude_code(
         repo,

@@ -35,7 +35,7 @@ from .sandbox import Sandbox
 
 
 @dataclass(frozen=True)
-class Mount:
+class MountLine:
     """One mount spec read back out of the wrapper argv. `path` is the mount
     destination; for binds src==dst at the real absolute path."""
 
@@ -88,8 +88,8 @@ def _kind_field(kind: str, color: bool, width: int = 9) -> str:
 
 @dataclass(frozen=True)
 class Profile:
-    mounts: list[Mount]
-    tmpfs: list[Mount]
+    mounts: list[MountLine]
+    tmpfs: list[MountLine]
     env: dict[str, str]
     chdir: str
 
@@ -157,7 +157,7 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
     The argv is what bwrap is actually handed, so ordering here is the real
     precedence; the resolved list is consulted only to name the ro binds that
     are pins."""
-    mounts: list[Mount] = []
+    mounts: list[MountLine] = []
     env: dict[str, str] = {}
     chdir = ""
     pinned, shadowed = _pins_and_shadows(sb)
@@ -171,15 +171,15 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
             # back and its value one; not all tmpfs carry one (a seal's does
             # not), so look it up defensively.
             size = argv[i - 1] if i >= 2 and argv[i - 2] == "--size" else None
-            mounts.append(Mount("tmpfs", argv[i + 1], i, size))
+            mounts.append(MountLine("tmpfs", argv[i + 1], i, size))
             i += 2
         elif a == "--tmp-overlay" and i + 1 < n:
-            mounts.append(Mount("overlay", argv[i + 1], i))
+            mounts.append(MountLine("overlay", argv[i + 1], i))
             i += 2
         elif a == "--remount-ro" and i + 1 < n:
             # The second half of a seal: the tmpfs above went down empty, this
             # closes it once the holes through it have been mounted.
-            mounts.append(Mount("seal-ro", argv[i + 1], i))
+            mounts.append(MountLine("seal-ro", argv[i + 1], i))
             i += 2
         elif a == "--ro-bind" and i + 2 < n:
             src, dst = argv[i + 1], Path(argv[i + 2])
@@ -202,25 +202,25 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
                     )
                 except OSError:
                     kind = "ro"
-            mounts.append(Mount(kind, argv[i + 2], i))
+            mounts.append(MountLine(kind, argv[i + 2], i))
             i += 3
         elif a == "--proc" and i + 1 < n:
-            mounts.append(Mount("proc", argv[i + 1], i))
+            mounts.append(MountLine("proc", argv[i + 1], i))
             i += 2
         elif a == "--dev" and i + 1 < n:
-            mounts.append(Mount("dev", argv[i + 1], i))
+            mounts.append(MountLine("dev", argv[i + 1], i))
             i += 2
         elif a == "--symlink" and i + 2 < n:
             # `--symlink TARGET LINKPATH`: the merged-usr links (/bin -> usr/bin)
             # that stand in for a bound /. Named by the link path, since that is
             # what exists in the box.
-            mounts.append(Mount("symlink", argv[i + 2], i))
+            mounts.append(MountLine("symlink", argv[i + 2], i))
             i += 3
         elif a == "--bind" and i + 2 < n:
             dst = argv[i + 2]
             d = Path(dst).resolve()
             kind = "rw-root" if d == Path(str(sb.root)).resolve() else "rw"
-            mounts.append(Mount(kind, dst, i))
+            mounts.append(MountLine(kind, dst, i))
             i += 3
         elif a == "--setenv" and i + 2 < n:
             env[argv[i + 1]] = argv[i + 2]

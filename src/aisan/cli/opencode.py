@@ -147,7 +147,7 @@ async def _main(argv: list[str]) -> int:
         extra_env=(
             # /usr is bound ro unconditionally, but the preset's PATH is only
             # /usr/bin -- anything elsewhere has to be named.
-            ("PATH", mcp_search_path()),
+            ("PATH", mcp_search_path(local_bin=mcp.enabled)),
             *((("OPENCODE_CONFIG", str(mcp_config)),) if mcp.enabled else ()),
             *terminal_env(),
         ),

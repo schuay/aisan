@@ -36,7 +36,9 @@ refuses alongside `--net`.
 
 Usage: aisan claude [repo] [flags] -- [claude args...]
 
-Env: AISAN_UPSTREAM overrides the Anthropic API base URL.
+Env: AISAN_CLAUDE_UPSTREAM overrides the Anthropic API base URL (the legacy
+AISAN_UPSTREAM is still read, so the naming matches AISAN_CODEX_UPSTREAM and
+AISAN_OPENCODE_UPSTREAM).
 """
 
 from __future__ import annotations
@@ -139,8 +141,12 @@ def parse_args(argv: list[str]):
     parser = interactive_parser("aisan claude", "claude")
     parser.add_argument(
         "--upstream",
-        default=os.environ.get("AISAN_UPSTREAM", DEFAULT_UPSTREAM),
-        help=f"Anthropic API base URL (default: $AISAN_UPSTREAM or {DEFAULT_UPSTREAM})",
+        default=os.environ.get(
+            "AISAN_CLAUDE_UPSTREAM",
+            os.environ.get("AISAN_UPSTREAM", DEFAULT_UPSTREAM),
+        ),
+        help="Anthropic API base URL (default: $AISAN_CLAUDE_UPSTREAM, then the"
+        f" legacy $AISAN_UPSTREAM, then {DEFAULT_UPSTREAM})",
     )
     return parse_interactive_args(parser, argv)
 
@@ -165,7 +171,7 @@ async def _main(argv: list[str]) -> int:
         extra_env=(
             # /usr is bound ro unconditionally, but the preset's PATH is only
             # /usr/bin -- anything elsewhere has to be named.
-            ("PATH", mcp_search_path()),
+            ("PATH", mcp_search_path(local_bin=mcp.enabled)),
             *terminal_env(),
             # Undo the preset's headless legibility knob: it is 0 so an
             # unattended box fails fast instead of looking like it is working.

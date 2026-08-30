@@ -30,7 +30,9 @@ overlay = [
     # shared with the host. ro fails (it takes a lock file even to read) and
     # absent HANGS (it rebuilds the venv, with no network to do it over), so
     # warm-to-read and writable-then-discarded is the only binding that works.
-    # The suffix is your uid.
+    # The `.1000` suffix is a UID -- replace it with your own (`id -u`), or the
+    # overlay source does not exist and assembly refuses with a named
+    # "tmp-overlay source missing" rather than serving.
     "~/.cache/vpython-root.1000",
 ]
 

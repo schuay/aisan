@@ -66,10 +66,21 @@ def problem(path: Path) -> str | None:
 
 
 def targets(root: Path) -> list[Path]:
+    # -z and split on NUL: `ls-files` output split on whitespace breaks any path
+    # with a space in it. is_file() drops entries git lists but the tree does not
+    # have (a deleted-but-staged file, a submodule).
     out = subprocess.run(
-        ["git", "ls-files"], cwd=root, capture_output=True, text=True, check=True
-    ).stdout.split()
-    return sorted(root / p for p in map(Path, out) if is_candidate(p))
+        ["git", "ls-files", "-z"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split("\0")
+    return sorted(
+        root / p
+        for p in map(Path, filter(None, out))
+        if is_candidate(p) and (root / p).is_file()
+    )
 
 
 def stamp(path: Path) -> bool:

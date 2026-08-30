@@ -75,7 +75,7 @@ async def _main(argv: list[str]) -> int:
         state=state,
         egress=(backend,),
         extra_ro=(GIT_CONFIG, *mcp_launcher_binds(mcp)),
-        extra_env=(("PATH", mcp_search_path()), *terminal_env()),
+        extra_env=(("PATH", mcp_search_path(local_bin=mcp.enabled)), *terminal_env()),
         unshare_net=not args.net,
     )
     payload_args = tuple(payload)

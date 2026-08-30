@@ -139,11 +139,18 @@ def _env_names(
     )
 
 
-def mcp_search_path() -> str:
-    """The PATH shared by all interactive boxes and launcher resolution."""
-    return os.pathsep.join(
-        (str(Path.home() / ".local" / "bin"), "/usr/bin", "/usr/local/bin")
-    )
+def mcp_search_path(local_bin: bool = True) -> str:
+    """The PATH for launcher resolution and the box.
+
+    `local_bin` carries `~/.local/bin`, where home-installed MCP servers live.
+    Resolution needs it (that is where a bare command name is found); the box's
+    own PATH does NOT when MCP is off, because nothing binds that dir then -- a
+    PATH entry the box cannot see resolves nothing and only misleads a reader of
+    `explain`. So the launchers pass `local_bin=mcp.enabled` for the box PATH."""
+    dirs = ["/usr/bin", "/usr/local/bin"]
+    if local_bin:
+        dirs.insert(0, str(Path.home() / ".local" / "bin"))
+    return os.pathsep.join(dirs)
 
 
 def mcp_ro_binds(
@@ -331,8 +338,13 @@ def _strip_jsonc(text: str) -> str:
         if text.startswith("/*", index):
             end = text.find("*/", index + 2)
             if end < 0:
-                return text
-            out.extend("\n" for char in text[index : end + 2] if char == "\n")
+                # Unterminated: the comment runs to EOF. Break, keeping what was
+                # already stripped -- returning the ORIGINAL text discarded every
+                # comment removed before this one, so the parse then choked on
+                # them. (`c`, not `char`: the comprehension has its own scope, but
+                # reusing the loop's name reads as a shadow.)
+                break
+            out.extend("\n" for c in text[index : end + 2] if c == "\n")
             index = end + 2
             continue
         out.append(char)
