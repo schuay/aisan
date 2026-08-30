@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from .sandbox import RO, RW, Bind, BindSpec, Seal
+from .sandbox import RO, RW, Bind, BindSpec, EnsurePath, Seal
 
 log = logging.getLogger(__name__)
 
@@ -158,55 +158,15 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
     poisoned before this profile was built, and failing assembly abandons the
     turn rather than binding an attacker-named directory rw as if it were .git.
     """
-    gitfile = worktree / ".git"
-    if gitfile.is_dir() or not gitfile.exists():
+    layout = _git_layout(worktree)
+    if layout is None:
         return []
-    text = gitfile.read_text().strip()
-    if not text.startswith("gitdir:"):
-        return []
-    private = Path(text.removeprefix("gitdir:").strip())
-    main_git = private.parent.parent  # <main>/.git/worktrees/<name> -> <main>/.git
-    # Fail closed on a pointer that is not the expected layout. The pin below
-    # keeps it honest turn-to-turn (the agent cannot rewrite a ro file), so this
-    # only fires on a tree that arrived poisoned -- but binding main_git rw off
-    # an unvalidated pointer is exactly the escape, so it is checked, not assumed.
-    if private.parent.name != "worktrees" or main_git.name != ".git":
-        raise ValueError(
-            f"{gitfile} does not point into a <main>/.git/worktrees/<name> "
-            f"layout (got {private}); refusing to build a profile from it"
-        )
-    # The layout check above only proves the pointer has the RIGHT SHAPE, not
-    # that it names THIS worktree's own repo: `gitdir: /other/repo/.git/worktrees/z`
-    # passes it and would bind an unrelated repo's object store rw (and profile
-    # assembly below would write into it). git keeps a back-pointer for exactly
-    # this -- <private>/gitdir holds the absolute path of the worktree's own .git
-    # file -- so a genuine private dir points back at us and a poisoned pointer
-    # into a foreign repo points back at that repo's worktree, not ours. Resolve
-    # both sides so a benign path-spelling difference is not read as an attack.
-    backpointer = private / "gitdir"
-    if (
-        not backpointer.is_file()
-        or Path(backpointer.read_text().strip()).resolve() != gitfile.resolve()
-    ):
-        raise ValueError(
-            f"{gitfile} points at {private}, whose gitdir back-pointer does not "
-            f"name {gitfile}; refusing to bind a repo this worktree does not own"
-        )
+    gitfile, private, main_git = layout
     alternates = main_git / "objects" / "info" / "alternates"
-    # A pin needs an existing source (a missing one fails the profile rather
-    # than silently dropping a guard), and some are routinely absent:
-    # config.worktree only exists once someone ran `git config --worktree`, and
-    # hooks/ can be missing after a core.hooksPath setup. Create the missing ones
-    # empty -- an empty config contributes nothing and an empty hooks dir runs
-    # nothing -- so the guard is always bindable. Only the missing ones: touching
-    # an existing file churns the shared checkout's mtimes for nothing.
-    (main_git / "hooks").mkdir(exist_ok=True)
-    # alternates lives in objects/info, which itself can be absent on a fresh
-    # clone; create the parent before touching the file.
-    alternates.parent.mkdir(parents=True, exist_ok=True)
-    for f in (main_git / "config", main_git / "config.worktree", alternates):
-        if not f.exists():
-            f.touch()
+    # Pure: the guard sources this pins may not exist yet on a fresh checkout,
+    # and creating them is a host mutation `git_host_files` declares for the Box
+    # to do and undo. A bind is just a path here; resolution checks existence
+    # once the ensure-paths are on disk.
     binds: list[BindSpec] = [
         Bind(main_git, RW),
         Bind(gitfile, RO),
@@ -220,19 +180,81 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
         binds.append(Seal(wts))
     # The hole through the seal, then the pointers inside the hole pinned back on
     # top of it. commondir is never absent in a real private dir, so a missing
-    # one raises rather than being papered over with an empty file that would
-    # point git at the filesystem root; config.worktree is created empty above
-    # for the siblings' sake and here for our own.
+    # one fails the profile rather than being papered over with an empty file
+    # that would point git at the filesystem root -- which is why it is NOT in
+    # `git_host_files`, unlike this worktree's own config.worktree.
     binds.append(Bind(private, RW))
-    own_worktree_config = private / "config.worktree"
-    if not own_worktree_config.exists():
-        own_worktree_config.touch()
-    binds += [Bind(private / "commondir", RO), Bind(own_worktree_config, RO)]
+    binds += [Bind(private / "commondir", RO), Bind(private / "config.worktree", RO)]
     if pin_packs:
-        packs = main_git / "objects" / "pack"
-        # Created when absent for the same reason the config pins are: a guard
-        # whose source does not exist fails the profile, and a repository that
-        # has never been repacked has no pack directory.
-        packs.mkdir(parents=True, exist_ok=True)
-        binds.append(Bind(packs, RO))
+        binds.append(Bind(main_git / "objects" / "pack", RO))
     return binds
+
+
+def _git_layout(worktree: Path) -> tuple[Path, Path, Path] | None:
+    """`(<worktree>/.git file, its private dir, the main .git)` for a linked
+    worktree, or None for a plain checkout whose .git is inside the rw root.
+
+    Raises when the `.git` pointer does not resolve to a
+    `<main>/.git/worktrees/<name>` layout OWNED by this worktree: git keeps a
+    back-pointer (`<private>/gitdir`) naming the worktree's own `.git`, so a
+    poisoned `gitdir: /other/repo/.git/worktrees/z` points back at that repo's
+    worktree, not ours, and binding an unrelated repo's store rw off it is the
+    escape this refuses. Both the shape check and the back-pointer keep it
+    honest; the pin keeps it honest turn-to-turn (the agent cannot rewrite a ro
+    file), so this only fires on a tree that arrived poisoned.
+    """
+    gitfile = worktree / ".git"
+    if gitfile.is_dir() or not gitfile.exists():
+        return None
+    text = gitfile.read_text().strip()
+    if not text.startswith("gitdir:"):
+        return None
+    private = Path(text.removeprefix("gitdir:").strip())
+    main_git = private.parent.parent  # <main>/.git/worktrees/<name> -> <main>/.git
+    if private.parent.name != "worktrees" or main_git.name != ".git":
+        raise ValueError(
+            f"{gitfile} does not point into a <main>/.git/worktrees/<name> "
+            f"layout (got {private}); refusing to build a profile from it"
+        )
+    backpointer = private / "gitdir"
+    if (
+        not backpointer.is_file()
+        or Path(backpointer.read_text().strip()).resolve() != gitfile.resolve()
+    ):
+        raise ValueError(
+            f"{gitfile} points at {private}, whose gitdir back-pointer does not "
+            f"name {gitfile}; refusing to bind a repo this worktree does not own"
+        )
+    return gitfile, private, main_git
+
+
+def git_host_files(
+    worktree: Path, *, pin_packs: bool = False
+) -> tuple[EnsurePath, ...]:
+    """The .git guard sources `git_binds` pins that a fresh checkout may lack.
+
+    Split out so `git_binds` stays a pure function: these are the paths the Box
+    creates empty before assembly and removes again on the inspector's staged
+    path (see `EnsurePath`). Some are routinely absent -- config.worktree only
+    exists once someone ran `git config --worktree`, hooks/ can be missing under
+    a core.hooksPath setup, objects/info and objects/pack are absent on a repo
+    never repacked -- and an empty config contributes nothing while an empty
+    hooks dir runs nothing, so the guard is bindable without the file having to
+    pre-exist. Only these; commondir is deliberately NOT here (a missing one is
+    a refusal, not something to paper over). Empty for a plain checkout.
+    """
+    layout = _git_layout(worktree)
+    if layout is None:
+        return ()
+    _gitfile, private, main_git = layout
+    ensure = [
+        EnsurePath(main_git / "hooks", is_dir=True),
+        EnsurePath(main_git / "config", is_dir=False),
+        EnsurePath(main_git / "config.worktree", is_dir=False),
+        # Its parent objects/info is created for it by the Box.
+        EnsurePath(main_git / "objects" / "info" / "alternates", is_dir=False),
+        EnsurePath(private / "config.worktree", is_dir=False),
+    ]
+    if pin_packs:
+        ensure.append(EnsurePath(main_git / "objects" / "pack", is_dir=True))
+    return tuple(ensure)

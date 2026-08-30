@@ -305,3 +305,45 @@ def test_a_credential_exposing_spec_renders_as_a_refusal(tmp_path):
     text = explain(Box(spec, box_id="t"), inputs=())
     assert "BOX ASSEMBLY REFUSED" in text
     assert "would expose the anthropic backend" in text
+
+
+def test_explaining_a_worktree_does_not_mutate_the_host_git(tmp_path):
+    # M6: git_binds used to mkdir/touch the shared .git at spec-build time, so
+    # `aisan explain <worktree>` -- a dry run -- wrote config.worktree, hooks/,
+    # objects/info/alternates and objects/pack into the main checkout. The
+    # creation moved to the Box, which undoes it on the inspector's staged path,
+    # so a review leaves the host exactly as it found it.
+    from aisan import Box
+    from aisan.explain import explain
+    from aisan.presets.v8_job import v8_job
+
+    main = tmp_path / "main"
+    wt = tmp_path / "wt"
+    (main / ".git" / "worktrees" / "wt").mkdir(parents=True)
+    (wt).mkdir()
+    (wt / ".git").write_text(f"gitdir: {main}/.git/worktrees/wt\n")
+    (main / ".git" / "worktrees" / "wt" / "commondir").write_text("../..\n")
+    (main / ".git" / "worktrees" / "wt" / "gitdir").write_text(f"{wt}/.git\n")
+
+    guards = [
+        main / ".git" / "config",
+        main / ".git" / "config.worktree",
+        main / ".git" / "objects" / "info" / "alternates",
+        main / ".git" / "hooks",
+        main / ".git" / "objects" / "pack",
+    ]
+    before = {g: g.exists() for g in guards}
+    assert not any(before.values()), "fixture should start without the guard files"
+
+    # Building the spec must not mutate: git_binds is pure now.
+    spec = v8_job(wt, depot_tools=None, unshare_net=True)
+    assert not any(g.exists() for g in guards), "spec build mutated the host .git"
+
+    box = Box(spec, box_id="explain-purity")
+    with box.staged():
+        # Inside staging the guards exist, so the profile resolves and renders.
+        report = explain(box, argv=False)
+        assert "BOX ASSEMBLY REFUSED" not in report
+        assert all(g.exists() for g in guards)
+    # ...and are gone again afterward: a dry run left no trace.
+    assert not any(g.exists() for g in guards), "explain left files in the host .git"

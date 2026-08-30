@@ -35,7 +35,7 @@ import shutil
 from pathlib import Path
 
 from ..egress.base import Backend, EgressProfile
-from ..gitbinds import GC_ENV, external_symlink_targets, git_binds
+from ..gitbinds import GC_ENV, external_symlink_targets, git_binds, git_host_files
 from ..sandbox import RO, Bind, BindSpec, Overlay
 from ..spec import DEFANG_ENV, BoxSpec, Limits
 
@@ -240,6 +240,7 @@ def v8_job(
         ),
         egress=egress,
         unshare_net=unshare_net,
+        ensure=git_host_files(worktree, pin_packs=unshare_net),
         limits=Limits(
             memory_max=memory_max,
             cpu_quota=cpu_quota,

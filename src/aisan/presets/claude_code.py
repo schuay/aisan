@@ -71,7 +71,7 @@ import shutil
 from pathlib import Path
 
 from ..egress.base import Backend
-from ..gitbinds import GC_ENV, git_binds
+from ..gitbinds import GC_ENV, git_binds, git_host_files
 from ..sandbox import RO, RW, Bind, BindSpec
 from ..spec import DEFANG_ENV, BoxSpec, Limits
 
@@ -188,6 +188,7 @@ def claude_code(
         ),
         egress=egress,
         unshare_net=unshare_net,
+        ensure=git_host_files(worktree, pin_packs=unshare_net),
         limits=Limits(
             memory_max=memory_max,
             cpu_quota=cpu_quota,

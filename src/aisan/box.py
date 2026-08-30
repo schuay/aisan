@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from contextlib import AsyncExitStack, ExitStack, contextmanager
+from contextlib import AsyncExitStack, ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import Self
 
@@ -78,6 +78,18 @@ def _rw_grant_covers(path: Path, spec: BoxSpec) -> bool:
 log = logging.getLogger(__name__)
 
 
+def _undo_host_paths(files: tuple[Path, ...], dirs: tuple[Path, ...]) -> None:
+    """Remove ensure-paths a box created: files first, then directories deepest
+    first, and only while empty -- a concurrent box that put something real in
+    one keeps it, the same best-effort rule `staged_directory` uses."""
+    for f in files:
+        with suppress(OSError):
+            f.unlink()
+    for d in sorted(set(dirs), key=lambda p: len(p.parts), reverse=True):
+        with suppress(OSError):
+            d.rmdir()
+
+
 class Box:
     """A running box: the mount policy resolved, the egress halves serving.
 
@@ -98,14 +110,18 @@ class Box:
 
     def _stage(self, stack: ExitStack | AsyncExitStack) -> None:
         """Everything that has to exist on disk before `wrapper()` may resolve:
-        the runtime dir, and each backend's bind-over sources.
+        the runtime dir, each backend's bind-over sources, and the spec's
+        ensure-paths (the .git guard files a fresh checkout may lack).
 
         Shared with `staged()` below, which is the inspector's way in. Split out
         so there is ONE statement of what a resolvable box needs -- an inspector
         that staged a little differently from the real path would report a
         profile nobody ever runs, which is precisely the drift the triad exists
-        to catch.
+        to catch. Every source this creates is registered for cleanup on the
+        same stack, so the run path unwinds it at box exit and the inspector's
+        short-lived stack leaves the host exactly as it found it.
         """
+        self._ensure_host_paths(stack)
         prepare_runtime_dir(self.box_id)
         # Registered before anything can fail, so a backend that raises halfway
         # still leaves no directory behind.
@@ -122,6 +138,39 @@ class Box:
                 src = getattr(spec, "src", None)
                 if src is not None and src.parent == self.runtime_dir:
                     stack.callback(src.unlink, missing_ok=True)
+
+    def _ensure_host_paths(self, stack: ExitStack | AsyncExitStack) -> None:
+        """Create the spec's ensure-paths, empty, registering their undo.
+
+        Files are touched, directories mkdir'd, and each path that did not
+        already exist -- including any parent this had to create -- is recorded
+        so the single cleanup callback removes exactly what this box added and
+        nothing that was already there. Empty is equivalent to absent for every
+        file this concerns (an empty git config or hooks dir steers nothing), so
+        removing them on the way out cannot change what host-side git sees.
+        """
+        created_files: list[Path] = []
+        created_dirs: list[Path] = []
+
+        def ensure_dir(d: Path) -> None:
+            cursor = d
+            while not cursor.exists():
+                created_dirs.append(cursor)
+                if cursor == cursor.parent:
+                    break
+                cursor = cursor.parent
+            d.mkdir(parents=True, exist_ok=True)
+
+        for e in self.spec.ensure:
+            if e.is_dir:
+                ensure_dir(e.path)
+            else:
+                ensure_dir(e.path.parent)
+                if not e.path.exists():
+                    created_files.append(e.path)
+                    e.path.touch()
+        if created_files or created_dirs:
+            stack.callback(_undo_host_paths, tuple(created_files), tuple(created_dirs))
 
     async def __aenter__(self) -> Self:
         stack = AsyncExitStack()

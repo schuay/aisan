@@ -26,7 +26,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .egress.base import Backend
-from .sandbox import BindSpec
+from .sandbox import BindSpec, EnsurePath
 
 _BACKEND_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
@@ -106,6 +106,11 @@ class BoxSpec:
     # loopback that is not the host's. False shares the host's complete network.
     unshare_net: bool
     limits: Limits = field(default_factory=Limits)
+    # Host paths to create (empty) before the binds resolve and remove again if
+    # this box created them. The .git guard pins name real host files that may
+    # be absent on a fresh checkout; see EnsurePath for why this is declared
+    # rather than done in the preset that computes the binds.
+    ensure: tuple[EnsurePath, ...] = ()
 
     def __post_init__(self) -> None:
         # Egress without unshare_net is valid only for a backend that supplies

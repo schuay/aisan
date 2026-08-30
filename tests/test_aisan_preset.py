@@ -22,7 +22,7 @@ import pytest
 from conftest import run_boxed
 
 from aisan import Box
-from aisan.gitbinds import external_symlink_targets, git_binds
+from aisan.gitbinds import external_symlink_targets, git_binds, git_host_files
 from aisan.presets.claude_code import claude_code
 from aisan.presets.codex import codex
 from aisan.presets.opencode import opencode
@@ -61,8 +61,14 @@ def _mounts(spec, box_id: str = "test-box"):
     resolving it twice by two routes is how the inspector used to drift from the
     real path. box_id is arbitrary: with no egress it names a runtime dir
     nothing touches.
+
+    Inside `staged()` because the .git guard sources are created there now
+    (EnsurePath), not by the pure preset -- so this resolves what the box
+    actually gets, and leaves the host as it found it.
     """
-    return Box(spec, box_id=box_id).mounts()
+    box = Box(spec, box_id=box_id)
+    with box.staged():
+        return box.mounts()
 
 
 def _mode_at(spec, path: Path) -> str:
@@ -130,12 +136,23 @@ def test_git_binds_is_the_policy_read_top_to_bottom(tmp_path):
         Bind(git / "worktrees" / "wt" / "commondir", RO),  # re-pinned inside it
         Bind(git / "worktrees" / "wt" / "config.worktree", RO),
     ]
-    # Every non-optional source must exist or wrapper() refuses the profile, and
-    # some of these are routinely absent on a real checkout (config.worktree
-    # until someone runs `git config --worktree`, hooks/ under core.hooksPath):
-    # git_binds creates them empty rather than leaving the profile unbuildable.
-    for b in git_binds(wt):
-        assert b.path.exists()
+    # git_binds is PURE: the guard sources it pins that a fresh checkout lacks
+    # (config.worktree until `git config --worktree`, hooks/ under core.hooksPath,
+    # objects/info) are not created by calling it. That host mutation is declared
+    # by git_host_files and done by the Box, so `aisan explain` no longer writes
+    # into the shared .git.
+    absent = git / "config.worktree"
+    assert not absent.exists()
+    git_binds(wt)
+    assert not absent.exists()  # calling it mutated nothing
+    assert absent in {e.path for e in git_host_files(wt, pin_packs=True)}
+    # Inside a staged box the declared sources exist and every non-optional bind
+    # resolves; outside it, the host is left exactly as it was.
+    box = Box(v8_job(wt, depot_tools=None), box_id="t")
+    with box.staged():
+        assert absent.exists()
+        box.mounts()  # resolves without raising
+    assert not absent.exists()
 
 
 def test_a_sibling_needs_no_pin_because_the_seal_removes_it(tmp_path):
@@ -246,7 +263,9 @@ def test_v8_job_profile(tmp_path):
     # siso reads AI_AGENT to go quiet. The spec is the box's WHOLE environment
     # (--clearenv, then --setenv per entry, plus only the backends' client vars),
     # so a defang default that is not named here is one the box does not get.
-    assert "AI_AGENT" in Box(spec, box_id="t").wrapper()
+    box = Box(spec, box_id="t")
+    with box.staged():
+        assert "AI_AGENT" in box.wrapper()
     assert env["AI_AGENT"]
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert spec.limits.memory_max == "8G"
@@ -322,15 +341,19 @@ async def test_a_job_cannot_plant_a_worktree_config_end_to_end(tmp_path):
     )
     (main / ".git" / "refs").mkdir(exist_ok=True)  # the fixture has no refs/ dir
     wts = main / ".git" / "worktrees"
-    out = await run_boxed(
-        f"mkdir {wts}/planted 2>&1; "
-        f"echo x > {wts}/wt/config.worktree 2>&1; "
-        f"touch {wts}/wt/index.lock && echo wrote_lock; "
-        f"touch {main}/.git/refs/probe && echo wrote_refs",
-        # The runner takes something with wrapper(); a Box is that, and using the
-        # real one keeps this exercising the complete argv.
-        sandbox=_WrapperOnly(Box(spec, box_id="seal-test")),
-    )
+    box = Box(spec, box_id="seal-test")
+    # Inside staged(): the .git guard sources are created there now, the same as
+    # on the real run path -- outside it the argv would refuse on a missing pin.
+    with box.staged():
+        out = await run_boxed(
+            f"mkdir {wts}/planted 2>&1; "
+            f"echo x > {wts}/wt/config.worktree 2>&1; "
+            f"touch {wts}/wt/index.lock && echo wrote_lock; "
+            f"touch {main}/.git/refs/probe && echo wrote_refs",
+            # The runner takes something with wrapper(); a Box is that, and using
+            # the real one keeps this exercising the complete argv.
+            sandbox=_WrapperOnly(box),
+        )
     assert "wrote_lock" in out  # git can still lock its own index
     assert "wrote_refs" in out  # refs stay writable (documented give-up)
     assert out.count("Read-only file system") >= 2  # no plant, no own-cfg rewrite

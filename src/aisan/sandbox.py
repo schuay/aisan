@@ -171,6 +171,28 @@ BindSpec = Bind | BindOver | Overlay | Seal
 
 
 @dataclass(frozen=True)
+class EnsurePath:
+    """A host path a profile needs present before its binds resolve, created
+    empty if absent and removed again if the box created it.
+
+    Not a mount. The .git guard pins bind REAL host files, so that an in-box
+    agent cannot make host-side git read a config or hook it planted -- and on a
+    fresh checkout some of those files are absent, while a missing bind source
+    fails the profile. Creating them is a host mutation, and doing it inside the
+    pure preset meant even `aisan explain`, a dry run, wrote into the shared
+    .git. Declared here instead, the Box creates them on the run path and undoes
+    them on the inspector's staged path, so a review leaves the host untouched.
+
+    `is_dir` distinguishes a file (touched, unlinked) from a directory (mkdir'd,
+    rmdir'd only if still empty); the producer knows which, and the two clean up
+    differently.
+    """
+
+    path: Path
+    is_dir: bool
+
+
+@dataclass(frozen=True)
 class Mount:
     """One resolved mount operation, in the order bwrap will apply it.
 
