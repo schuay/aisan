@@ -441,6 +441,7 @@ def test_body_policy_permits_a_real_claude_code_body():
             "tools": [_REAL_TOOL, {**_REAL_TOOL, "name": "Read"}],
             "metadata": {"user_id": "x"},
             "thinking": {"type": "enabled", "budget_tokens": 10000},
+            "temperature": 1.0,
             "stream": True,
             "context_management": {"edits": []},
             "output_config": {},
@@ -514,21 +515,26 @@ def test_body_policy_refuses_upstream_keys(key):
     assert key in reason
 
 
-def test_body_policy_ignores_bodies_it_has_no_opinion_on():
-    """Not JSON, not an object, and no tools: all permitted.
-
-    This policy answers "which capabilities are declared". A body with no
-    declarations to read is not one it has a view on, and a proxy that
-    second-guessed the parse would refuse on a disagreement about JSON rather
-    than about capability -- the upstream rejects malformed bodies itself.
+def test_body_policy_refuses_shapes_it_cannot_classify():
+    """The old "no opinion" leniency assumed this parser and the upstream's
+    agree on what is malformed, and a streaming decoder does not: it reads
+    `{...}{}` value by value and honors the tools in the first object, which
+    this policy never inspected. So an unreadable body is refused, and only an
+    EMPTY body -- the hello routes send none -- keeps the old answer.
     """
     p = BodyPolicy()
     assert p.refuse(b"") is None
-    assert p.refuse(b"not json at all") is None
-    assert p.refuse(b'["an", "array"]') is None
     assert p.refuse(b"{}") is None
-    assert p.refuse(json.dumps({"tools": "not a list"}).encode()) is None
-    assert p.refuse(json.dumps({"tools": ["not an object"]}).encode()) is None
+    assert p.refuse(b"not json at all") is not None
+    assert p.refuse(b'["an", "array"]') is not None
+    assert p.refuse(json.dumps({"tools": "not a list"}).encode()) is not None
+    assert p.refuse(json.dumps({"tools": ["not an object"]}).encode()) is not None
+    # The demonstrated smuggle: a strict-side parse failure whose first value
+    # carries a server-side tool.
+    smuggle = b'{"tools": [{"type": "web_search_20250305", "name": "w"}]}{}'
+    reason = p.refuse(smuggle)
+    assert reason is not None
+    assert "classify" in reason
 
 
 def test_body_policy_refuses_duplicate_keys_at_any_depth():
@@ -568,16 +574,132 @@ def test_body_policy_refuses_a_lenient_json_constant():
     assert p.refuse(behind_nan) is not None
 
 
-def test_body_policy_still_has_no_opinion_on_a_body_it_cannot_read():
-    """The leniency above it is deliberate and stays.
+def test_body_policy_permits_a_measured_tool_round_trip_history():
+    """The negative control for the content gate, measured from claude-cli
+    2.1.246 driving a stub through a full tool round trip: text and thinking
+    blocks in the assistant turn, tool_use, and tool_result carrying both its
+    measured shapes (a plain string, and an array of text blocks). A content
+    allowlist that refused any of these would break every agentic session on
+    its second request."""
+    body = json.dumps(
+        {
+            "model": "claude-opus-4",
+            "max_tokens": 32000,
+            "system": [{"type": "text", "text": "You are Claude Code"}],
+            "messages": [
+                {"role": "user", "content": "run echo measured"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "m", "signature": "s"},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "Bash",
+                            "input": {"command": "echo measured"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": "measured",
+                        },
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [{"type": "text", "text": "measured"}],
+                        },
+                    ],
+                },
+            ],
+            "stream": True,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is None
 
-    Refusing a body that parses two ways is a decision about CAPABILITY -- the
-    upstream may act on a declaration this side never inspected. A body that
-    does not parse at all presents no such disagreement: the upstream rejects
-    it, and refusing here would be this proxy second-guessing a parse rather
-    than gating a capability.
-    """
-    assert BodyPolicy().refuse(b"{not json at all") is None
+
+@pytest.mark.parametrize(
+    ("block", "why"),
+    [
+        (
+            {
+                "type": "image",
+                "source": {"type": "url", "url": "https://x.test/exfil"},
+            },
+            "the upstream fetches the URL; the URL is the payload",
+        ),
+        (
+            {
+                "type": "document",
+                "source": {"type": "url", "url": "https://x.test/e"},
+            },
+            "the same fetch, spelled document",
+        ),
+        (
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "AA"},
+            },
+            "no fetch, but unmeasured on this client; refused until measured",
+        ),
+        (
+            {"type": "a_block_type_invented_next_year"},
+            "fails closed, like the tool types",
+        ),
+    ],
+)
+def test_body_policy_refuses_content_that_asks_the_upstream_to_fetch(block, why):
+    """The body's third gate. `unshare_net` stops the box dialling out; an
+    `image` url source asks ANTHROPIC to dial for it, and the request having
+    been made IS the exfiltration -- so the block types are an allowlist, the
+    posture `openai_responses` took on day one."""
+    body = json.dumps({"messages": [{"role": "user", "content": [block]}]}).encode()
+    reason = BodyPolicy().refuse(body)
+    assert reason is not None, why
+    assert block["type"] in reason
+
+
+def test_the_content_gate_reaches_tool_results_and_system():
+    """The two places a naive walk misses: a block nested in a tool_result's
+    own content, and the `system` field, which takes the same block shape."""
+    p = BodyPolicy()
+    url_image = {"type": "image", "source": {"type": "url", "url": "https://x.test/e"}}
+    nested = json.dumps(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t",
+                            "content": [url_image],
+                        }
+                    ],
+                }
+            ]
+        }
+    ).encode()
+    assert p.refuse(nested) is not None
+    in_system = json.dumps({"system": [url_image], "messages": []}).encode()
+    assert p.refuse(in_system) is not None
+
+
+def test_body_policy_refuses_an_unmeasured_top_level_key():
+    """The keys are an allowlist too: not every server-acting capability
+    declares itself as a tool (`web_search_options` on the chat-completions
+    family did not). The refusal names the key, for the operator reading the
+    log and the agent reading the refusal."""
+    body = json.dumps(
+        {"model": "m", "messages": [], "a_key_invented_next_year": 1}
+    ).encode()
+    reason = BodyPolicy().refuse(body)
+    assert reason is not None
+    assert "a_key_invented_next_year" in reason
 
 
 async def test_a_refused_body_never_reaches_the_upstream_or_the_credential(tmp_path):

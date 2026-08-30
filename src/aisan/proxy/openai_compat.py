@@ -129,6 +129,35 @@ CLIENT_TOOL_TYPES = frozenset({"function"})
 # is a tag added here, not a new branch in code.
 REFUSED_KEYS: tuple[str, ...] = ("web_search_options",)
 
+# Top-level keys measured on the wire from opencode 1.18.23 across a full tool
+# round trip, plus the reasoning knobs measured on 1.18.18 driving a thinking
+# model (temperature, reasoning_effort, thinking). An allowlist for the same
+# reason the tool types are one: this transport fronts ~147 providers that
+# accrete server-side capabilities independently, and `web_search_options`
+# proved not every capability declares itself as a tool. A refused key names
+# itself, and the fix is one measured tag.
+ALLOWED_KEYS = frozenset(
+    {
+        "max_tokens",
+        "messages",
+        "model",
+        "reasoning_effort",
+        "stream",
+        "stream_options",
+        "temperature",
+        "thinking",
+        "tool_choice",
+        "tools",
+    }
+)
+
+# Content part types with no URL for the upstream to retrieve. This client
+# sends message content as plain strings (measured: system, user, assistant
+# and tool roles alike); parts appear when rich content is attached, and the
+# fetchable ones -- `image_url`, `file`, `input_audio` -- are exactly what the
+# allowlist refuses.
+ALLOWED_CONTENT_TYPES = frozenset({"text"})
+
 
 @dataclass(frozen=True)
 class BodyPolicy:
@@ -145,6 +174,8 @@ class BodyPolicy:
     client_types: frozenset[str] = CLIENT_TOOL_TYPES
     container_types: frozenset[str] = frozenset()
     refused_keys: tuple[str, ...] = REFUSED_KEYS
+    allowed_keys: frozenset[str] = ALLOWED_KEYS
+    content_types: frozenset[str] = ALLOWED_CONTENT_TYPES
 
     def refuse(self, body: bytes) -> str | None:
         """The reason to refuse `body`, or None to permit it.
@@ -162,6 +193,15 @@ class BodyPolicy:
         for key in self.refused_keys:
             if key in payload:
                 return f"`{key}` is not permitted by the sandbox proxy"
+        if unknown := set(payload) - self.allowed_keys:
+            return (
+                "field(s) not permitted by the sandbox proxy:"
+                f" {', '.join(sorted(unknown))}"
+            )
+
+        reason = self._content_refusal(payload)
+        if reason is not None:
+            return reason
 
         if "tools" not in payload:
             return None
@@ -201,6 +241,37 @@ class BodyPolicy:
                 f"tool type {kind!r} executes on the upstream, not in the"
                 " sandbox, and is not permitted"
             )
+        return None
+
+    def _content_refusal(self, payload: dict[str, object]) -> str | None:
+        """Message content parts as an egress channel, gated like the tools.
+
+        The fetchable part types make the UPSTREAM retrieve what the box
+        chose, and the URL is the payload. The Responses transport gates its
+        input items the same way; bodies with no `messages` (Responses bodies
+        among them) have nothing for this walk to read.
+        """
+        messages = payload.get("messages")
+        if messages is None:
+            return None
+        if not isinstance(messages, list):
+            return "`messages` must be an array"
+        for message in messages:
+            if not isinstance(message, dict):
+                return "every message must be a JSON object"
+            content = message.get("content")
+            if content is None or isinstance(content, str):
+                continue
+            if not isinstance(content, list):
+                return "message content must be a string or an array of parts"
+            for part in content:
+                if not isinstance(part, dict):
+                    return "every content part must be a JSON object"
+                kind = part.get("type")
+                if not isinstance(kind, str) or kind not in self.content_types:
+                    return (
+                        f"content type {kind!r} is not permitted by the sandbox proxy"
+                    )
         return None
 
 

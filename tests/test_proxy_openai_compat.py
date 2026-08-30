@@ -184,6 +184,53 @@ def test_body_policy_refuses_shapes_it_cannot_classify(body):
     assert BodyPolicy().refuse(body) is not None
 
 
+def test_body_policy_refuses_fetchable_content_parts():
+    """The content gate on this family: measured traffic is plain strings in
+    every role, so the parts allowlist is {text} and the fetchable types --
+    `image_url` is the demonstrated one -- are refused by name."""
+    p = BodyPolicy()
+    body = json.dumps(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://x.test/exfil"},
+                        }
+                    ],
+                }
+            ]
+        }
+    ).encode()
+    reason = p.refuse(body)
+    assert reason is not None
+    assert "image_url" in reason
+    ok = json.dumps(
+        {
+            "messages": [
+                {"role": "system", "content": "s"},
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            ]
+        }
+    ).encode()
+    assert p.refuse(ok) is None
+
+
+def test_body_policy_refuses_an_unmeasured_top_level_key():
+    """The general fix behind the `web_search_options` denylist entry: measured
+    keys are a whitelist, so the NEXT server-acting field is a refusal on day
+    one. `functions` is the sharp case -- the legacy spelling of `tools`, which
+    the tool gate never saw."""
+    p = BodyPolicy()
+    for key in ("functions", "a_key_invented_next_year"):
+        body = json.dumps({"model": "m", "messages": [], key: []}).encode()
+        reason = p.refuse(body)
+        assert reason is not None, key
+        assert key in reason
+
+
 def test_body_policy_refuses_duplicate_keys_at_any_depth():
     # A first-wins upstream and Python's default last-wins parser would inspect
     # different tool types. Refusing duplicates removes that parser seam.

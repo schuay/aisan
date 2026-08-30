@@ -83,6 +83,9 @@ class PathAllowlist(_PathAllowlist):
 class BodyPolicy(_BodyPolicy):
     client_types: frozenset[str] = CLIENT_TOOL_TYPES
     container_types: frozenset[str] = CLIENT_TOOL_CONTAINERS
+    # The unknown-key refusal itself runs in the base policy; this is the set
+    # it runs against.
+    allowed_keys: frozenset[str] = ALLOWED_KEYS
 
     def refuse(self, body: bytes) -> str | None:
         reason = super().refuse(body)
@@ -90,8 +93,6 @@ class BodyPolicy(_BodyPolicy):
             return reason
 
         payload = parse_json_object(body)
-        if unknown := set(payload) - ALLOWED_KEYS:
-            return f"unsupported Responses field(s): {', '.join(sorted(unknown))}"
         if payload.get("store", False) is not False:
             return "`store` must be false"
         if payload.get("stream") is not True:

@@ -182,6 +182,40 @@ CLIENT_TOOL_TYPES = frozenset({"custom"})
 # conversation, and the far side executes.
 REFUSED_KEYS = ("mcp_servers", "container")
 
+# Top-level keys measured on the wire from claude-cli 2.1.246 across a full
+# tool round trip (the model turn, the topic-detection call; count_tokens takes
+# a subset). An allowlist, not a denylist, for the same reason as the tool
+# types: a server-acting field need not declare itself as a tool --
+# `mcp_servers` does not -- so a key this policy does not know arrives as a
+# loud refusal naming itself, and the fix is one measured tag.
+ALLOWED_KEYS = frozenset(
+    {
+        "context_management",
+        "max_tokens",
+        "messages",
+        "metadata",
+        "model",
+        "output_config",
+        "stream",
+        "system",
+        "temperature",
+        "thinking",
+        "tools",
+    }
+)
+
+# Content block types that carry no URL for the upstream to fetch. Measured
+# from the same round trip: text (and system's text blocks), tool_use and
+# tool_result on the turn after a tool call, thinking when extended thinking
+# is on; redacted_thinking is the API's own transform of thinking and rides
+# with it. `image` and `document` are deliberately absent: their url sources
+# make ANTHROPIC's servers fetch a URL the box chose -- the same route the
+# tool-type gate closes -- and their base64 sources are refused with them
+# until a measurement forces the finer split.
+ALLOWED_CONTENT_TYPES = frozenset(
+    {"text", "tool_use", "tool_result", "thinking", "redacted_thinking"}
+)
+
 
 @dataclass(frozen=True)
 class BodyPolicy:
@@ -200,6 +234,13 @@ class BodyPolicy:
     not. A new server-side tool type is then a refusal rather than a hole, which
     is the same posture the header allowlist takes and for the same reason.
 
+    Three gates, one posture: the top-level keys (a server-acting field need
+    not declare itself as a tool), the tool types, and the message content
+    block types (an `image` or `document` url source makes the upstream fetch
+    a URL the box chose, and the URL is the payload). All three are measured
+    from the real client, so a key or block it grows next year is a refusal
+    naming itself rather than a hole.
+
     Bounded, and worth stating so the claim is not overread: this refuses a route
     off the machine for bytes the box already holds. It is not what keeps the
     credential out -- that is the absence of any bind naming it.
@@ -207,42 +248,54 @@ class BodyPolicy:
 
     client_types: frozenset[str] = CLIENT_TOOL_TYPES
     refused_keys: tuple[str, ...] = REFUSED_KEYS
+    allowed_keys: frozenset[str] = ALLOWED_KEYS
+    content_types: frozenset[str] = ALLOWED_CONTENT_TYPES
 
     def refuse(self, body: bytes) -> str | None:
         """The reason to refuse `body`, or None to permit it.
 
-        A body that is not JSON, or not an object, is PERMITTED here: this
-        policy answers "which capabilities are declared", and a body with no
-        declarations to read is not one it has an opinion on. The upstream
-        rejects malformed bodies itself, and a proxy that second-guessed the
-        parse would refuse requests on a disagreement about JSON rather than
-        about capability.
-
-        A body that parses TWO ways is refused, and that is not the same
-        leniency read backwards. A repeated key is accepted by both parsers and
-        resolved by neither spec, so the tools this side reads are not
-        necessarily the tools the upstream runs -- the disagreement is about
-        capability, which is the one thing this policy does have an opinion on.
+        An empty body is permitted -- the hello routes send none, and a request
+        with nothing in it declares nothing. Anything else this parser cannot
+        read as one unambiguous JSON object IS refused. The old leniency ("the
+        upstream rejects malformed bodies itself") assumed the two parsers
+        agree on what is malformed, and a streaming upstream decoder does not:
+        it reads `{...}{}` value by value and honors tools in the first object,
+        which this policy never inspected. A body this side cannot classify
+        would leave the capability decision to the upstream.
         """
+        if not body:
+            return None
         try:
             payload = load_json_unambiguous(body)
         except AmbiguousBody as e:
             return f"the sandbox proxy cannot read this body unambiguously: {e}"
-        except ValueError:
-            return None
+        except ValueError as e:
+            return f"request body is not JSON the sandbox proxy can classify: {e}"
         if not isinstance(payload, dict):
-            return None
+            return "request body must be a JSON object"
 
         for key in self.refused_keys:
             if key in payload:
                 return f"`{key}` is not permitted by the sandbox proxy"
+        if unknown := set(payload) - self.allowed_keys:
+            return (
+                "field(s) not permitted by the sandbox proxy:"
+                f" {', '.join(sorted(unknown))}"
+            )
 
-        tools = payload.get("tools")
-        if not isinstance(tools, list):
+        reason = self._tools_refusal(payload.get("tools"))
+        if reason is not None:
+            return reason
+        return self._content_refusal(payload)
+
+    def _tools_refusal(self, tools: object) -> str | None:
+        if tools is None:
             return None
+        if not isinstance(tools, list):
+            return "`tools` must be an array"
         for tool in tools:
             if not isinstance(tool, dict):
-                continue  # the upstream's schema check owns this, not ours
+                return "every tool must be a JSON object"
             # Absent is checked as a MISSING KEY, not as a `None` value. The two
             # are different to the upstream -- absent selects `custom`, while an
             # explicit null is refused outright as `Input tag 'None'` -- so a
@@ -256,6 +309,49 @@ class BodyPolicy:
                     f"tool type {kind!r} executes on the upstream, not in the"
                     " sandbox, and is not permitted"
                 )
+        return None
+
+    def _content_refusal(self, payload: dict[str, object]) -> str | None:
+        """Message content as an egress channel, gated like the tools.
+
+        Neither the key nor the tool gate reads message content, and content is
+        not inert: an `image` or `document` block with a url source makes the
+        UPSTREAM fetch a URL the box chose, and the URL is the payload --
+        `openai_responses` closed exactly this on day one. `system` takes the
+        same block shape and is walked too.
+        """
+        messages = payload.get("messages")
+        if messages is not None:
+            if not isinstance(messages, list):
+                return "`messages` must be an array"
+            for message in messages:
+                if not isinstance(message, dict):
+                    return "every message must be a JSON object"
+                reason = self._blocks_refusal(message.get("content"))
+                if reason is not None:
+                    return reason
+        return self._blocks_refusal(payload.get("system"))
+
+    def _blocks_refusal(self, content: object) -> str | None:
+        """One content value: absent, a plain string, or allowlisted blocks.
+
+        A `tool_result` nests another content value of the same shape, which
+        recurses through the same allowlist.
+        """
+        if content is None or isinstance(content, str):
+            return None
+        if not isinstance(content, list):
+            return "message content must be a string or an array of blocks"
+        for block in content:
+            if not isinstance(block, dict):
+                return "every content block must be a JSON object"
+            kind = block.get("type")
+            if not isinstance(kind, str) or kind not in self.content_types:
+                return f"content type {kind!r} is not permitted by the sandbox proxy"
+            if kind == "tool_result":
+                reason = self._blocks_refusal(block.get("content"))
+                if reason is not None:
+                    return reason
         return None
 
 
