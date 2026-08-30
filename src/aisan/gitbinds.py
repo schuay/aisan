@@ -185,9 +185,36 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
     # `git_host_files`, unlike this worktree's own config.worktree.
     binds.append(Bind(private, RW))
     binds += [Bind(private / "commondir", RO), Bind(private / "config.worktree", RO)]
+    binds += [Bind(p, RO) for p, _is_dir in _submodule_steering(main_git)]
     if pin_packs:
         binds.append(Bind(main_git / "objects" / "pack", RO))
     return binds
+
+
+def _submodule_steering(main_git: Path) -> list[tuple[Path, bool]]:
+    """(path, is_dir) for each present submodule gitdir's config and hooks.
+
+    A submodule keeps its gitdir under `<main>/.git/modules/<name>`, and
+    host-side git run in that submodule reads its config (a core.fsmonitor or
+    credential.helper there executes as the host user) and runs its hooks -- the
+    same host-exec vector the main .git pins close, one level down and in a tree
+    the box can also write. Pinned ro when present.
+
+    Bounded on purpose: top-level submodules only (nested ones are rare and left
+    uncovered), and a snapshot like the pre-seal worktree pins -- a submodule
+    initialised after the profile is built is not covered. Empty when the repo
+    has no `modules/` at all, which is the common case.
+    """
+    modules = main_git / "modules"
+    if not modules.is_dir():
+        return []
+    steering: list[tuple[Path, bool]] = []
+    for sub in sorted(modules.iterdir()):
+        # A gitdir, not some other entry: `config` (or `HEAD`) marks one.
+        if (sub / "config").exists() or (sub / "HEAD").exists():
+            steering.append((sub / "config", False))
+            steering.append((sub / "hooks", True))
+    return steering
 
 
 def _git_layout(worktree: Path) -> tuple[Path, Path, Path] | None:
@@ -254,6 +281,9 @@ def git_host_files(
         # Its parent objects/info is created for it by the Box.
         EnsurePath(main_git / "objects" / "info" / "alternates", is_dir=False),
         EnsurePath(private / "config.worktree", is_dir=False),
+    ]
+    ensure += [
+        EnsurePath(p, is_dir=is_dir) for p, is_dir in _submodule_steering(main_git)
     ]
     if pin_packs:
         ensure.append(EnsurePath(main_git / "objects" / "pack", is_dir=True))

@@ -585,3 +585,19 @@ def test_a_planted_symlink_guard_source_is_not_followed(tmp_path):
     with box.staged():
         pass  # _stage ran _ensure_host_paths over the ensure-paths
     assert not target.exists(), "a planted symlink was followed into a host write"
+
+
+def test_a_submodule_gitdir_config_and_hooks_are_pinned(tmp_path):
+    # W11: a submodule keeps its gitdir under .git/modules/<name>, and host-side
+    # git in that submodule reads its config and runs its hooks -- the main .git
+    # host-exec vector, one level down. They are pinned ro when present.
+    from aisan.gitbinds import git_binds
+
+    main, wt = _fake_checkout(tmp_path)
+    sub = main / ".git" / "modules" / "dep"
+    sub.mkdir(parents=True)
+    (sub / "config").write_text("")
+    (sub / "hooks").mkdir()
+    pinned = {b.path for b in git_binds(wt) if getattr(b, "mode", None) == RO}
+    assert sub / "config" in pinned
+    assert sub / "hooks" in pinned
