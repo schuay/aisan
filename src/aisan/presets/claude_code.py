@@ -20,9 +20,12 @@ and HOME holds only what other binds happened to create. The tmpfs is there to
 give tools a writable scratch at the real HOME path, not to conceal anything, and
 reading it as the safety mechanism would put the claim on the wrong line.
 
-What the box gets instead is `ANTHROPIC_API_KEY` set to a placeholder and a base
-URL pointing at the in-box relay; the real bearer is attached host-side, on the
-far side of a namespace the box cannot cross.
+What the box gets instead is a base URL pointing at the in-box relay and a
+per-box relay token, in whichever variable matches the credential the proxy will
+attach (`CLAUDE_CODE_OAUTH_TOKEN` for the host's subscription login,
+`ANTHROPIC_API_KEY` for a static key -- see `egress.anthropic`). The real
+credential is attached host-side, on the far side of a namespace the box cannot
+cross.
 `test_the_credential_is_not_in_the_box` asserts it from inside a real box,
 because a preset that grew the bind later would otherwise pass every other test
 in the suite.

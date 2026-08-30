@@ -35,7 +35,12 @@ from pathlib import Path
 import pytest
 
 from aisan import Box
-from aisan.egress.anthropic import PLACEHOLDER_KEY, PORT, AnthropicBackend
+from aisan.egress.anthropic import (
+    OAUTH_TOKEN_ENV,
+    PLACEHOLDER_KEY,
+    PORT,
+    AnthropicBackend,
+)
 from aisan.egress.base import Backend
 from aisan.presets import PRESETS
 from aisan.presets.claude_code import (
@@ -196,9 +201,13 @@ class _StubBackend(Backend):
     port = PORT
 
     def client_env(self):
+        # Kept in step with the real backend by
+        # `test_the_real_backend_and_the_preset_agree_on_the_client_env`: a stub
+        # that drifted would let the boxed tests below keep passing while
+        # asserting an environment the real system no longer builds.
         return {
             "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{self.port}",
-            "ANTHROPIC_API_KEY": PLACEHOLDER_KEY,
+            OAUTH_TOKEN_ENV: PLACEHOLDER_KEY,
         }
 
     @contextlib.asynccontextmanager
@@ -287,7 +296,7 @@ async def test_the_box_reaches_the_model_only_through_the_relay(tmp_path):
         "s.sendall(b'ping'); print('relay=' + s.recv(32).decode()); s.close()\n"
         "n = socket.socket(); n.settimeout(3)\n"
         f"print('host=' + str(n.connect_ex(('127.0.0.1', {host_port}))))\n"
-        "print('key=' + os.environ['ANTHROPIC_API_KEY'])\n"
+        f"print('token=' + os.environ[{OAUTH_TOKEN_ENV!r}])\n"
     )
     try:
         r = await _run_in_box(spec, script)
@@ -300,7 +309,7 @@ async def test_the_box_reaches_the_model_only_through_the_relay(tmp_path):
     assert "host=111" in r.stdout
     # And what the box holds is the placeholder, which is the other half of why
     # the credential's absence is survivable.
-    assert f"key={PLACEHOLDER_KEY}" in r.stdout
+    assert f"token={PLACEHOLDER_KEY}" in r.stdout
 
 
 def test_the_default_entry_builds_without_a_deployment(tmp_path):
@@ -320,3 +329,15 @@ def test_the_real_backend_and_the_preset_agree_on_the_port(tmp_path):
     nobody is serving."""
     spec = _spec(tmp_path, egress=(AnthropicBackend(credentials=tmp_path / "c"),))
     assert spec.egress[0].client_env()["ANTHROPIC_BASE_URL"].endswith(f":{PORT}")
+
+
+def test_the_real_backend_and_the_preset_agree_on_the_client_env(tmp_path):
+    """The stub above stands in for the backend in every boxed test here.
+
+    Ports were already pinned; the variable NAMES were not, and they are the
+    half that moved when the box's dress started tracking the credential kind.
+    Without this, renaming it in the backend leaves the boxed tests green while
+    they assert an environment nothing builds any more.
+    """
+    real = AnthropicBackend(credentials=tmp_path / "c").client_env()
+    assert set(_StubBackend().client_env()) == set(real)

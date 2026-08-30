@@ -29,7 +29,14 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientSession, UnixConnector, web
 
-from aisan.egress.anthropic import PLACEHOLDER_KEY, PORT, AnthropicBackend
+from aisan.egress.anthropic import (
+    API_KEY_ENV,
+    OAUTH_TOKEN_ENV,
+    PLACEHOLDER_KEY,
+    PORT,
+    SUBSCRIPTION_ENV,
+    AnthropicBackend,
+)
 from aisan.egress.base import PreflightError
 
 # Not a credential: a fixed string, in a file this test wrote, against an
@@ -77,19 +84,76 @@ async def _hello(request: web.Request) -> web.Response:
 def test_the_box_is_told_a_placeholder_and_a_route_and_nothing_else(tmp_path):
     """Both variables matter, for different reasons.
 
-    The base URL is the route. The KEY is what stops the client looking for a
+    The base URL is the route. The TOKEN is what stops the client looking for a
     credential the box does not have: with none set, Claude Code reads
     `~/.claude/.credentials.json`, which is absent in the box, and tries to log
-    in interactively rather than failing. Measured against 2.1.219.
+    in interactively rather than failing. Measured against 2.1.219 for the key
+    dress and 2.1.246 for the subscription one.
+
+    The variable NAME tracks the credential kind, and the credential file here
+    does not exist -- which is the other half of the assertion: a description
+    computed on a host with nothing logged in is still complete, because
+    `explain` and the snapshots run there.
     """
     env = AnthropicBackend(credentials=tmp_path / "c.json").client_env()
     assert env == {
         "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{PORT}",
-        "ANTHROPIC_API_KEY": PLACEHOLDER_KEY,
+        OAUTH_TOKEN_ENV: PLACEHOLDER_KEY,
     }
-    # A placeholder that looked like a key would be one somebody eventually
-    # believed. It says what it is.
+    # A placeholder that looked like a credential would be one somebody
+    # eventually believed. It says what it is.
     assert "placeholder" in PLACEHOLDER_KEY
+
+
+def test_an_api_key_backend_dresses_the_box_as_an_api_key_client(tmp_path):
+    """The kind picks BOTH halves, and the halves must not drift apart.
+
+    Measured: the client's `anthropic-beta` set differs by dress, and the proxy
+    forwards that header -- so a box dressed for one credential while the proxy
+    attaches the other announces a protocol its credential does not match. This
+    pins the box-facing half of each kind; `test_the_upstream_credential_matches
+    _the_dress` pins the other.
+    """
+    env = AnthropicBackend(api_key="sk-ant-not-real").client_env()
+    assert env == {
+        "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{PORT}",
+        API_KEY_ENV: PLACEHOLDER_KEY,
+    }
+    # Nothing on disk to protect: the key lives in memory, so there is no path
+    # for the Box's credential-exposure refusal to be given.
+    assert AnthropicBackend(api_key="sk-ant-not-real").credentials == ()
+
+
+def test_a_backend_holds_exactly_one_credential_kind(tmp_path):
+    """Both would mean an implicit precedence, which is how credentials get mixed up."""
+    with pytest.raises(ValueError, match="at most one"):
+        AnthropicBackend(credentials=tmp_path / "c.json", api_key="sk-ant-not-real")
+
+
+def test_the_plan_label_is_read_best_effort_and_never_raises(tmp_path):
+    """A display-only label must not be able to break a dry run.
+
+    `client_env` is called by `explain` and by the snapshot tests on hosts with
+    no credential at all. Absent, unreadable and malformed all have to omit the
+    variable rather than raise -- and a present one has to appear, or the label
+    silently stops tracking the account.
+    """
+    missing = AnthropicBackend(credentials=tmp_path / "absent.json").client_env()
+    assert SUBSCRIPTION_ENV not in missing
+
+    junk = tmp_path / "junk.json"
+    junk.write_text("not json at all")
+    assert SUBSCRIPTION_ENV not in AnthropicBackend(credentials=junk).client_env()
+
+    wrong_shape = tmp_path / "shape.json"
+    wrong_shape.write_text(json.dumps({"claudeAiOauth": {"subscriptionType": 7}}))
+    assert (
+        SUBSCRIPTION_ENV not in AnthropicBackend(credentials=wrong_shape).client_env()
+    )
+
+    present = tmp_path / "max.json"
+    present.write_text(json.dumps({"claudeAiOauth": {"subscriptionType": "max"}}))
+    assert AnthropicBackend(credentials=present).client_env()[SUBSCRIPTION_ENV] == "max"
 
 
 def test_the_port_is_distinct_from_the_other_backends():
@@ -270,16 +334,18 @@ async def test_shared_backend_serves_authenticated_tcp_with_per_box_state(tmp_pa
     try:
         async with backend.serve_shared(tmp_path) as activation:
             endpoint = activation.client_env["ANTHROPIC_BASE_URL"]
-            client_token = activation.client_env["ANTHROPIC_API_KEY"]
+            client_token = activation.client_env[OAUTH_TOKEN_ENV]
             assert activation.port == int(endpoint.rsplit(":", 1)[1])
             assert client_token.endswith(PLACEHOLDER_KEY[-20:])
             assert client_token != PLACEHOLDER_KEY
+            # Presented the way this dress presents it. The other location is
+            # covered by `test_either_dress_can_present_the_relay_token`.
             async with (
                 ClientSession() as session,
                 session.post(
                     f"{endpoint}/v1/messages",
                     data=b"{}",
-                    headers={"x-api-key": client_token},
+                    headers={"authorization": f"Bearer {client_token}"},
                 ) as response,
             ):
                 assert response.status == 200
@@ -302,8 +368,7 @@ async def test_one_backend_can_hold_two_shared_activations(tmp_path):
         ):
             assert first.port != second.port
             assert (
-                first.client_env["ANTHROPIC_API_KEY"]
-                != second.client_env["ANTHROPIC_API_KEY"]
+                first.client_env[OAUTH_TOKEN_ENV] != second.client_env[OAUTH_TOKEN_ENV]
             )
     finally:
         await up_runner.cleanup()
@@ -357,5 +422,83 @@ async def test_a_stale_socket_from_a_killed_box_does_not_block_the_next_one(tmp_
     try:
         async with backend.serve(runtime):
             assert backend.socket_path(runtime).is_socket()
+    finally:
+        await up_runner.cleanup()
+
+
+async def test_the_upstream_credential_matches_the_dress(tmp_path):
+    """The other half of the pairing: an API-key kind attaches `x-api-key`.
+
+    The subscription kind's bearer is pinned by
+    `test_the_backend_serves_and_injects_the_credential_it_read`. This one pins
+    the second kind, and pins that the box-facing dress and the upstream header
+    are chosen together rather than by two independent settings.
+
+    The host half of this kind is otherwise unmeasured -- no real key was
+    available to answer upstream -- so what is asserted here is the whole of
+    what aisan controls: the header it attaches and the one it never forwards.
+    """
+    got: dict[str, str] = {}
+
+    async def upstream(request: web.Request) -> web.Response:
+        got.update({k.lower(): v for k, v in request.headers.items()})
+        return web.json_response({"ok": True})
+
+    up, up_runner = await _upstream_server(upstream)
+    backend = AnthropicBackend(api_key="sk-ant-not-real", upstream=up)
+    try:
+        async with backend.serve_shared(tmp_path) as activation:
+            endpoint = activation.client_env["ANTHROPIC_BASE_URL"]
+            client_token = activation.client_env[API_KEY_ENV]
+            async with (
+                ClientSession() as session,
+                session.post(
+                    f"{endpoint}/v1/messages",
+                    data=b"{}",
+                    headers={"x-api-key": client_token},
+                ) as response,
+            ):
+                assert response.status == 200
+    finally:
+        await up_runner.cleanup()
+
+    assert got["x-api-key"] == "sk-ant-not-real"
+    # The box's own token stopped at the proxy, and no bearer was invented.
+    assert got["x-api-key"] != client_token
+    assert "authorization" not in got
+
+
+async def test_either_dress_can_present_the_relay_token(tmp_path):
+    """The relay authenticates a VALUE, not a location.
+
+    A box dressed for a subscription presents the token in `authorization`, one
+    dressed for a key presents it in `x-api-key` (both measured). The proxy
+    accepts either, so the dress can change without the check having to be told;
+    what it must never accept is a request carrying neither, or the wrong value
+    in either.
+    """
+    up, up_runner = await _upstream_server(_hello)
+    backend = AnthropicBackend(
+        credentials=_credentials(tmp_path / "c.json"), upstream=up
+    )
+    try:
+        async with backend.serve_shared(tmp_path) as activation:
+            endpoint = activation.client_env["ANTHROPIC_BASE_URL"]
+            token = activation.client_env[OAUTH_TOKEN_ENV]
+
+            async def post(headers: dict[str, str]) -> int:
+                async with (
+                    ClientSession() as session,
+                    session.post(
+                        f"{endpoint}/v1/messages", data=b"{}", headers=headers
+                    ) as response,
+                ):
+                    return response.status
+
+            assert await post({"authorization": f"Bearer {token}"}) == 200
+            assert await post({"x-api-key": token}) == 200
+            assert await post({"authorization": "Bearer wrong"}) == 401
+            assert await post({"x-api-key": "wrong"}) == 401
+            assert await post({}) == 401
     finally:
         await up_runner.cleanup()

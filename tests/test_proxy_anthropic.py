@@ -12,8 +12,10 @@ its adversarial cases written down.
 
 Most of this file is therefore refusals and drops. The happy path is one test;
 the rest are the things that must NOT reach the upstream -- above all the box's
-own `x-api-key`, which is a placeholder by construction and would be an
-attacker-chosen string if a prompt-injected agent set one.
+own relay token -- which arrives in `x-api-key` or `authorization` depending on
+the dress its credential kind chose, is a per-box string by construction, and
+would be an attacker-chosen string if a prompt-injected agent set one. Both are
+dropped unconditionally, so which one carried it changes nothing here.
 
 Everything here talks to the proxy over its UNIX socket directly. The relay's
 loopback half is `test_proxy.py`'s, and the claim that a REAL `claude` reaches a

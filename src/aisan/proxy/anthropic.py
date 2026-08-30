@@ -28,10 +28,12 @@ allowlist in both directions:
   `anthropic-beta` (protocol selectors, measured required), `accept` (the client
   asks for SSE and parses what it asked for). Plus `x-claude-code-session-id`,
   which is none of those and is explained on its own below.
-- DROPPED, always: `x-api-key` and `authorization`. The box's key is a
-  placeholder by construction, so forwarding it forwards nothing useful -- and a
-  prompt-injected agent that sets one would be choosing the string we send
-  upstream. Also every hop-by-hop and body-framing header (`host`, `connection`,
+- DROPPED, always: `x-api-key` and `authorization`. Whichever of the two the
+  box was dressed to use, its value is a per-box relay token by construction, so
+  forwarding it forwards nothing useful -- and a prompt-injected agent that sets
+  one would be choosing the string we send upstream. The drop is unconditional
+  and comes BEFORE the allowlist loop, so the credential this proxy attaches is
+  the only one on the wire no matter which header the box presented. Also every hop-by-hop and body-framing header (`host`, `connection`,
   `content-length`, `accept-encoding`): the client session computes those for the
   connection it actually opens, and a forwarded copy describes the wrong one.
 - DROPPED, by judgement: the `x-stainless-*` set (arch, os, lang, runtime,
@@ -95,6 +97,7 @@ from .http import (
     AmbiguousBody,
     LogGate,
     RateLimit,
+    bearer_token,
     load_json_unambiguous,
     relayed_response_headers,
     request_path,
@@ -392,11 +395,19 @@ def _error(status: int, kind: str, message: str) -> web.Response:
 # own Claude Code owns that credential and may rewrite the file at any moment, so
 # a value read once goes stale in a way this process must not try to repair.
 TokenSource = Callable[[], Awaitable[str]]
+# The headers that authenticate ONE request upstream. A callable rather than a
+# value for the same reason `TokenSource` is: the credential is re-read per
+# request, never captured. A dict rather than a bearer string because the header
+# depends on the credential kind -- a subscription authenticates with
+# `authorization`, a static key with `x-api-key` -- and the kind is the caller's
+# to know. Same shape as `openai_compat.AuthorizationSource`.
+AuthorizationSource = Callable[[], Awaitable[dict[str, str]]]
 
 
 def make_app(
     *,
-    token: TokenSource,
+    token: TokenSource | None = None,
+    authorization: AuthorizationSource | None = None,
     upstream: str,
     paths: PathAllowlist | None = None,
     headers: HeaderAllowlist | None = None,
@@ -404,6 +415,8 @@ def make_app(
     rate: RateLimit | None = None,
     client_token: str | None = None,
 ) -> web.Application:
+    if (token is None) == (authorization is None):
+        raise ValueError("provide exactly one of token or authorization")
     path_allow = paths or PathAllowlist()
     header_allow = headers or HeaderAllowlist()
     body_policy = body or BodyPolicy()
@@ -412,9 +425,17 @@ def make_app(
     base = upstream.rstrip("/")
 
     async def handle(request: web.Request) -> web.StreamResponse:
+        # Either location, because the box's dress depends on the credential
+        # kind: an API-key-dressed client sends `x-api-key`, a subscription
+        # dressed one sends `authorization` (measured). What is checked is the
+        # VALUE -- a per-box secret -- so a second place to present it adds no
+        # second principal, and both arms reject duplicates and compare in
+        # constant time. Neither header is ever forwarded, whichever carried it.
         presented = request.headers.getall("x-api-key", [])
-        if not token_matches(
-            presented[0] if len(presented) == 1 else None, client_token
+        api_key = presented[0] if len(presented) == 1 else None
+        if not (
+            token_matches(api_key, client_token)
+            or token_matches(bearer_token(request), client_token)
         ):
             return _error(401, "authentication_error", "invalid aisan proxy token")
         # Through `policy_permits`, so an allowlist that RAISES denies rather
@@ -448,7 +469,11 @@ def make_app(
             return _error(403, "permission_error", reason)
 
         try:
-            bearer = await token()
+            injected = (
+                await authorization()
+                if authorization is not None
+                else {"authorization": f"Bearer {await token()}"}
+            )
         except Exception as e:
             # The credential went away mid-session -- the file was rewritten,
             # or its token expired past what preflight checked. Answered as an
@@ -465,7 +490,7 @@ def make_app(
         # last -- dropping betas the request depends on. aiohttp forwards an
         # iterable of pairs verbatim, so every one survives.
         out: list[tuple[str, str]] = [
-            ("authorization", f"Bearer {bearer}"),
+            *injected.items(),
             ("content-type", "application/json"),
         ]
         for name, value in request.headers.items():

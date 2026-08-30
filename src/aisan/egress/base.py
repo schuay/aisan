@@ -63,11 +63,13 @@ class PreflightError(RuntimeError):
         self.fix = fix
 
 
-# The key value every isolated backend hands its box. Distinct from a real key by
-# construction, and self-describing: it shows up in the box's environment, in
-# `explain` output and in a snapshot, so it should say what it is to whoever
-# reads it there. Its only job is to stop the client looking for a credential
-# the box does not have -- the value is deliberately meaningless.
+# The token value every isolated backend hands its box. Distinct from a real
+# credential by construction, and self-describing: it shows up in the box's
+# environment, in `explain` output and in a snapshot, so it should say what it is
+# to whoever reads it there. Its only job is to stop the client looking for a
+# credential the box does not have -- the value is deliberately meaningless. Which
+# ENV VAR carries it is the backend's to say, and for the Anthropic one it tracks
+# the credential kind; this constant is only the value.
 #
 # Shared mode uses the last 20 characters as a stable Claude-approved suffix on
 # a token with a fresh random prefix. Knowing the suffix grants nothing; the

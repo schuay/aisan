@@ -38,9 +38,9 @@
 
 == environment (the box's complete environment; --clearenv first) ==
   AI_AGENT=aisan
-  ANTHROPIC_API_KEY=aisan-placeholder-not-a-credential
   ANTHROPIC_BASE_URL=http://127.0.0.1:8713
   CLAUDE_CODE_MAX_RETRIES=0
+  CLAUDE_CODE_OAUTH_TOKEN=aisan-placeholder-not-a-credential
   CLAUDE_CONFIG_DIR=<STATE>
   DEBIAN_FRONTEND=noninteractive
   DISABLE_AUTOUPDATER=1
@@ -212,7 +212,7 @@
   ANTHROPIC_BASE_URL
   http://127.0.0.1:8713
   --setenv
-  ANTHROPIC_API_KEY
+  CLAUDE_CODE_OAUTH_TOKEN
   aisan-placeholder-not-a-credential
   --chdir
   <ROOT>

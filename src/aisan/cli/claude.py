@@ -36,6 +36,11 @@ refuses alongside `--net`.
 
 Usage: aisan claude [repo] [flags] -- [claude args...]
 
+`--api-key` bills the turn to $ANTHROPIC_API_KEY instead of the host's Claude
+Code login. The default is the login, because that is the credential aisan
+reads: the box is dressed to match whichever it is, so the in-box client reports
+the billing it is actually on rather than the shape of its relay token.
+
 Env: AISAN_CLAUDE_UPSTREAM overrides the Anthropic API base URL (the legacy
 AISAN_UPSTREAM is still read, so the naming matches AISAN_CODEX_UPSTREAM and
 AISAN_OPENCODE_UPSTREAM).
@@ -110,6 +115,12 @@ def seed_state(state: Path, repo: Path) -> None:
     approved = responses.get("approved")
     if not isinstance(approved, list):
         approved = responses["approved"] = []
+    # Only the API-key dress trips this dialog -- measured: with the box holding
+    # ANTHROPIC_API_KEY and no seeded approval, the CLI blocks on "Detected a
+    # custom API key in your environment", which in an unattended box is a hang.
+    # The subscription dress has no key to approve and never sees it. Seeded
+    # unconditionally anyway: it costs one list entry, and a state file that is
+    # correct for whichever dress the next run picks cannot go stale.
     if PLACEHOLDER_KEY[-20:] not in approved:  # the CLI stores the last 20 chars
         approved.append(PLACEHOLDER_KEY[-20:])
     _object_at(_object_at(config, "projects"), str(repo))["hasTrustDialogAccepted"] = (
@@ -148,6 +159,12 @@ def parse_args(argv: list[str]):
         help="Anthropic API base URL (default: $AISAN_CLAUDE_UPSTREAM, then the"
         f" legacy $AISAN_UPSTREAM, then {DEFAULT_UPSTREAM})",
     )
+    parser.add_argument(
+        "--api-key",
+        action="store_true",
+        help="bill to the API key in $ANTHROPIC_API_KEY instead of the host's"
+        " Claude Code subscription login",
+    )
     return parse_interactive_args(parser, argv)
 
 
@@ -162,7 +179,20 @@ async def _main(argv: list[str]) -> int:
     mcp = claude_host_mcp()
     mcp_config = state / "aisan-host-mcp.json"
 
-    backend = AnthropicBackend(upstream=args.upstream)
+    # A flag rather than "use the key if one happens to be exported": which
+    # account a turn is billed to is not something to infer from the ambient
+    # environment. The key is read from the environment and never from argv --
+    # a credential in a command line is visible to every process on the host.
+    api_key = None
+    if args.api_key:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            print(
+                "aisan claude: --api-key needs ANTHROPIC_API_KEY set on the host",
+                file=sys.stderr,
+            )
+            return 2
+    backend = AnthropicBackend(upstream=args.upstream, api_key=api_key)
     spec = claude_code(
         repo,
         state=state,

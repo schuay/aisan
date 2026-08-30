@@ -179,7 +179,8 @@ def test_claude_code_profile_snapshot(tmp_path, pinned_host):
     covers the two extra binds and the client env omitted by the dry-run shape.
 
     The backend is constructed with a credentials path that does not exist. It
-    is never read here (nothing runs), and naming the real one would make the
+    is only read best-effort here (for the plan label; an
+    absent one just omits it), and naming the real one would make the
     snapshot depend on the host's login state.
     """
     from aisan.egress.anthropic import AnthropicBackend
