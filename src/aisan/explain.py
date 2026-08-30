@@ -46,6 +46,46 @@ class Mount:
     size: str | None = None  # tmpfs only
 
 
+# Kind -> ANSI, grouped by what a reviewer scans FOR, never decoration:
+#   red/bold  the box can write here, and the one it must not miss -- ro-shadow,
+#             an ro bind a later rw defeats, reads as protected but is writable;
+#   yellow    writable by design (the rw root, binds, tmpfs, overlay);
+#   green     a guard doing its job (a pin, a seal);
+#   cyan      a substitution -- the box reads a DIFFERENT file than the host's;
+#   dim       inert surface (plain ro, the fixed system mounts).
+_KIND_ANSI = {
+    "ro-shadow": "1;31",
+    "rw-root": "33",
+    "rw": "33",
+    "tmpfs": "33",
+    "overlay": "33",
+    "ro-pin": "32",
+    "seal-ro": "32",
+    "ro-sub": "36",
+    "ro": "2",
+    "system": "2",
+    "proc": "2",
+    "dev": "2",
+    "symlink": "2",
+}
+
+# The fixed system surface, collapsed to one disclosed line: identical in every
+# box, so per-line it is noise between a reviewer and the policy. Named, not
+# hidden -- a change to it still shows as a changed path in the one line.
+_SURFACE_KINDS = frozenset({"system", "proc", "dev", "symlink"})
+
+
+def _kind_field(kind: str, color: bool, width: int = 9) -> str:
+    """The kind column, padded to `width`, wrapped in its colour when `color`.
+
+    Padded before colouring so the ANSI bytes never enter the column math and
+    the paths stay aligned; plain and identical to the old output when off, so
+    a pipe or a snapshot sees no escape codes."""
+    field = f"{kind:<{width}}"
+    ansi = _KIND_ANSI.get(kind)
+    return f"\x1b[{ansi}m{field}\x1b[0m" if color and ansi else field
+
+
 @dataclass(frozen=True)
 class Profile:
     mounts: list[Mount]
@@ -223,7 +263,11 @@ def assembly_refusal(box: Box) -> Exception | None:
 
 
 def explain(
-    box: Box, *, inputs: tuple[tuple[str, str], ...] = (), argv: bool = True
+    box: Box,
+    *,
+    inputs: tuple[tuple[str, str], ...] = (),
+    argv: bool = True,
+    color: bool = False,
 ) -> str:
     """The whole report for `box`, as text.
 
@@ -301,10 +345,15 @@ def explain(
         out.write("  (none)\n")
 
     section("binds in argv order (later shadows earlier on overlap)")
-    for m in sorted(prof.mounts, key=lambda x: x.idx):
-        if m.kind == "tmpfs":
+    ordered = [m for m in sorted(prof.mounts, key=lambda x: x.idx) if m.kind != "tmpfs"]
+    surface = [m for m in ordered if m.kind in _SURFACE_KINDS]
+    if surface:
+        paths = " ".join(m.path for m in surface)
+        out.write(f"  {_kind_field('system', color)} {paths}\n")
+    for m in ordered:
+        if m.kind in _SURFACE_KINDS:
             continue
-        out.write(f"  [{m.idx:>3}] {m.kind:<9} {m.path}\n")
+        out.write(f"  [{m.idx:>3}] {_kind_field(m.kind, color)} {m.path}\n")
 
     # A seal is two ops far apart in the argv (an empty tmpfs where the directory
     # was, then a ro remount after the holes through it are mounted), so neither
@@ -474,6 +523,7 @@ def main(argv: list[str] | None = None) -> int:
                 box,
                 inputs=(("preset", args.preset), ("root", str(args.root))),
                 argv=not args.no_argv,
+                color=sys.stdout.isatty(),
             ),
             end="",
         )

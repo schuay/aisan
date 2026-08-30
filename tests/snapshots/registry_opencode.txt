@@ -15,15 +15,7 @@
   [..] <MAIN>/.git/worktrees  (no size)
 
 == binds in argv order (later shadows earlier on overlap) ==
-  [..] system    /usr
-  [..] symlink   /bin
-  [..] symlink   /lib
-  [..] symlink   /lib64
-  [..] symlink   /sbin
-  [..] system    /etc
-  [..] proc      /proc
-  [..] dev       /dev
-  [..] system    /run/systemd/journal/stdout
+  system    /usr /bin /lib /lib64 /sbin /etc /proc /dev /run/systemd/journal/stdout
   [..] rw-root   <ROOT>
   [..] rw        <MAIN>/.git
   [..] ro-pin    <ROOT>/.git

@@ -292,6 +292,7 @@ async def run_interactive(
                         ("repo", str(repo)),
                         ("binds", ", ".join(map(str, binds)) if binds else "(none)"),
                     ),
+                    color=sys.stdout.isatty(),
                 ),
                 end="",
             )
