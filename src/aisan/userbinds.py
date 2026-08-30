@@ -245,7 +245,15 @@ def _load(
     # lines in front of them -- one names the file, the other the directory.
     mounted = [p for key in _MOUNT_KEYS for p in mounts[key]]
     mounted += [b.path for b in inner_binds if hasattr(b, "path")]
-    uncovered = [d for d in dirs if not any(d.is_relative_to(m) for m in mounted)]
+    # Normalised before the containment test: `/tools/bin/../../../etc` is
+    # `is_relative_to("/tools")` by components but resolves OUTSIDE it, so an
+    # un-normalised check would call an escaping PATH dir covered.
+    mounted_norm = [Path(os.path.normpath(m)) for m in mounted]
+    uncovered = [
+        d
+        for d in dirs
+        if not any(Path(os.path.normpath(d)).is_relative_to(m) for m in mounted_norm)
+    ]
     if uncovered:
         raise ValueError(
             f"{path}: path entry {uncovered[0]} is not covered by any ro, rw or"
@@ -279,7 +287,19 @@ def _entries(path: Path, raw: object, key: str) -> list[Path]:
         raise ValueError(f"{path}: {key} must be an array of non-empty path strings")
     out = []
     for entry in raw:
-        p = Path(entry).expanduser()
+        # os.pathsep in one entry becomes TWO PATH entries once joined, and the
+        # second rides past the coverage check that saw one string. A real path
+        # never needs it; refuse it rather than let it smuggle a directory in.
+        if os.pathsep in entry:
+            raise ValueError(f"{path}: {key} entry {entry!r} contains {os.pathsep!r}")
+        try:
+            p = Path(entry).expanduser()
+        except RuntimeError as e:
+            # ~nosuchuser and friends: a RuntimeError bypasses the "ValueError
+            # naming the file" contract this loader promises its caller.
+            raise ValueError(
+                f"{path}: {key} entry {entry!r} cannot be expanded: {e}"
+            ) from e
         if not p.is_absolute():
             p = path.parent / p
         out.append(p)

@@ -396,3 +396,52 @@ def test_a_malformed_include_names_the_inner_file(tmp_path):
 
     with pytest.raises(ValueError, match=r"inner\.toml: unknown key"):
         load(outer, egress=())
+
+
+def test_a_path_entry_may_not_smuggle_a_second_dir_with_a_colon(tmp_path):
+    # L1: os.pathsep in one entry becomes two PATH entries once joined, and the
+    # second (/tmp) rides past the coverage check that inspected one string.
+    f = _spec_file(tmp_path, 'ro = ["/tools"]\npath = ["/tools/bin:/tmp"]\n')
+    with pytest.raises(ValueError, match="contains"):
+        load(f, egress=())
+
+
+def test_a_path_entry_cannot_dotdot_escape_its_covering_mount(tmp_path):
+    # L1: `/tools/bin/../../../etc` is is_relative_to("/tools") by components but
+    # resolves to /etc, outside anything the file mounts. Normalising the
+    # coverage check closes that -- the "cannot widen by a byte" invariant holds.
+    f = _spec_file(tmp_path, 'ro = ["/tools"]\npath = ["/tools/bin/../../../etc"]\n')
+    with pytest.raises(ValueError, match="not covered"):
+        load(f, egress=())
+
+
+def test_an_unexpandable_home_is_a_named_valueerror_not_a_runtimeerror(tmp_path):
+    # L10: ~nosuchuser raises RuntimeError from expanduser, which bypasses the
+    # "ValueError naming the file" contract the loader promises its caller.
+    f = _spec_file(tmp_path, 'ro = ["~nosuchuser_aisan_xyz/x"]\n')
+    with pytest.raises(ValueError, match="cannot be expanded"):
+        load(f, egress=())
+
+
+def test_with_path_prefix_refuses_a_relative_or_colon_bearing_dir(tmp_path):
+    # W10: the combinator claimed a PATH prefix names box directories but
+    # enforced nothing -- a relative dir resolves against the box cwd and a
+    # colon smuggles a second entry. Both are refused now, at the combinator, so
+    # a direct caller cannot break the invariant userbinds relies on.
+    from aisan.spec import BoxSpec
+
+    base = BoxSpec(
+        root=tmp_path,
+        binds=(),
+        tmpfs=(),
+        env=(("PATH", "/usr/bin"),),
+        egress=(),
+        unshare_net=True,
+    )
+    with pytest.raises(ValueError, match="not absolute"):
+        base.with_path_prefix((Path("relative/dir"),))
+    with pytest.raises(ValueError, match="smuggle"):
+        base.with_path_prefix((Path("/a:/b"),))
+    # A well-formed absolute dir still prepends.
+    out = base.with_path_prefix((Path("/opt/tool/bin"),))
+    assert dict(out.env)["PATH"].startswith("/opt/tool/bin:")

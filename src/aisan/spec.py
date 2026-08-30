@@ -21,14 +21,12 @@ them are the same policy. `box.py` is where the two meet.
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from .egress.base import _NAME_RE as _BACKEND_NAME_RE
 from .egress.base import Backend
 from .sandbox import BindSpec, EnsurePath
-
-_BACKEND_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 # Noninteractive defaults for any box that runs build tooling. Not a bwrap flag
 # and not a mount, so nothing here enforces it: a spec's `env` is the box's WHOLE
@@ -177,6 +175,19 @@ class BoxSpec:
         """
         if not dirs:
             return self
+        # The invariant this claims -- a PATH prefix names box directories -- was
+        # enforced nowhere: a relative dir resolves against the box's cwd, and a
+        # dir containing os.pathsep smuggles a second PATH entry past every
+        # coverage check. Both are refused here so no caller (userbinds or a
+        # direct one) can assert the invariant while breaking it.
+        for d in dirs:
+            if os.pathsep in str(d):
+                raise ValueError(
+                    f"PATH prefix dir {d} contains {os.pathsep!r}, which would"
+                    " smuggle a second PATH entry"
+                )
+            if not Path(d).is_absolute():
+                raise ValueError(f"PATH prefix dir {d} is not absolute")
         prefix = os.pathsep.join(str(d) for d in dirs)
         env = list(self.env)
         last = max((i for i, (k, _) in enumerate(env) if k == "PATH"), default=None)
