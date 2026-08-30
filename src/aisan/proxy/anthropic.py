@@ -222,6 +222,24 @@ ALLOWED_CONTENT_TYPES = frozenset(
     {"text", "tool_use", "tool_result", "thinking", "redacted_thinking"}
 )
 
+# The two additions a box on the HOST'S network may make, and nothing else.
+#
+# `web_search_20250305` executes upstream: it makes Anthropic's servers issue a
+# query the box chose, which is exactly the route the isolated policy closes.
+# `tool_choice` rides with it -- measured on 2.1.246, Claude Code issues a
+# DEDICATED single-shot request carrying only the server tool plus a tool_choice
+# forcing it, and folds the answer back into the conversation as an ordinary
+# `tool_result`. So no new content block type is needed, and the main
+# conversation's shape is unchanged.
+#
+# Deliberately measured-only, like every other tag here. Claude Code's WebFetch
+# is NOT in this set because it does not need to be: with the host's network the
+# box fetches the URL itself and sends the model text (measured -- a WebFetch of
+# example.com completes with the isolated policy in force). A server-side fetch
+# tool would be a new tag, added when something is measured sending one.
+SHARED_NET_TOOL_TYPES = CLIENT_TOOL_TYPES | {"web_search_20250305"}
+SHARED_NET_KEYS = ALLOWED_KEYS | {"tool_choice"}
+
 
 @dataclass(frozen=True)
 class BodyPolicy:
@@ -250,12 +268,38 @@ class BodyPolicy:
     Bounded, and worth stating so the claim is not overread: this refuses a route
     off the machine for bytes the box already holds. It is not what keeps the
     credential out -- that is the absence of any bind naming it.
+
+    Which is also why there are two of these. The gate is worth exactly what the
+    box's OWN route off the machine is not worth: under `unshare_net` there is
+    none, and this is the boundary. Without it the box is in the host's network
+    namespace with the host's full connectivity (`explain` prints it in those
+    words), so it can dial `https://x.example/<bytes>` directly, and refusing to
+    let it ask the upstream to do the same protects nothing while breaking web
+    search. `for_shared_network` is that second policy, and it is DERIVED, never
+    passed: the backend builds it in `serve_shared`, which the Box calls only
+    when the spec says the network is shared. No caller can ask the isolated
+    policy to relax, which is the property this module insists on everywhere
+    else -- a boundary whose strength depends on what the last caller passed is
+    not a boundary.
     """
 
     client_types: frozenset[str] = CLIENT_TOOL_TYPES
     refused_keys: tuple[str, ...] = REFUSED_KEYS
     allowed_keys: frozenset[str] = ALLOWED_KEYS
     content_types: frozenset[str] = ALLOWED_CONTENT_TYPES
+
+    @classmethod
+    def for_shared_network(cls) -> BodyPolicy:
+        """The policy for a box that already has the host's network.
+
+        Narrow on purpose: two tags, both measured. Everything else the strict
+        policy refuses is still refused here -- `mcp_servers` and `container`,
+        every other server-side tool type, and `image`/`document` blocks whose
+        url source would make the upstream fetch for the box. A box with the
+        host's network needs none of those to reach the network, so relaxing
+        them would buy nothing and lose the refusal that names them.
+        """
+        return cls(client_types=SHARED_NET_TOOL_TYPES, allowed_keys=SHARED_NET_KEYS)
 
     def refuse(self, body: bytes) -> str | None:
         """The reason to refuse `body`, or None to permit it.

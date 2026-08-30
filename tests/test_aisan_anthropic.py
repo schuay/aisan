@@ -502,3 +502,56 @@ async def test_either_dress_can_present_the_relay_token(tmp_path):
             assert await post({}) == 401
     finally:
         await up_runner.cleanup()
+
+
+_WEB_SEARCH = {
+    "model": "m",
+    "messages": [{"role": "user", "content": [{"type": "text", "text": "foo"}]}],
+    "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+    "tool_choice": {"type": "tool", "name": "web_search"},
+}
+
+
+async def test_the_transport_decides_the_body_policy(tmp_path):
+    """Which policy a box gets is derived from its network mode, not passed.
+
+    `serve` is what the Box calls under `unshare_net` and `serve_shared` is what
+    it calls without it, so the transport already encodes the one fact the
+    relaxation rests on: whether the box can reach the network itself. This pins
+    both directions at the backend, because the policy objects agreeing in
+    isolation would not catch `serve_shared` being wired to the strict one.
+    """
+    up, up_runner = await _upstream_server(_hello)
+    backend = AnthropicBackend(
+        credentials=_credentials(tmp_path / "c.json"), upstream=up
+    )
+    body = json.dumps(_WEB_SEARCH).encode()
+    runtime = tmp_path / "rt"
+    runtime.mkdir()
+    try:
+        async with backend.serve_shared(tmp_path) as activation:
+            endpoint = activation.client_env["ANTHROPIC_BASE_URL"]
+            token = activation.client_env[OAUTH_TOKEN_ENV]
+            async with (
+                ClientSession() as session,
+                session.post(
+                    f"{endpoint}/v1/messages",
+                    data=body,
+                    headers={"authorization": f"Bearer {token}"},
+                ) as response,
+            ):
+                assert response.status == 200
+
+        # Same backend, same body, isolated transport: refused.
+        async with backend.serve(runtime):
+            sock = backend.socket_path(runtime)
+            async with (
+                ClientSession(connector=UnixConnector(path=str(sock))) as session,
+                session.post(
+                    "http://anthropic.invalid/v1/messages", data=body
+                ) as response,
+            ):
+                assert response.status == 403
+                assert "tool_choice" in (await response.json())["error"]["message"]
+    finally:
+        await up_runner.cleanup()

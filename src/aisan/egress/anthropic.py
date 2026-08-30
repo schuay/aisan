@@ -41,7 +41,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..proxy.anthropic import make_app
+from ..proxy.anthropic import BodyPolicy, make_app
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
 from .base import (
@@ -368,9 +368,15 @@ class AnthropicBackend(Backend):
     @asynccontextmanager
     async def serve_shared(self, runtime_dir: Path) -> AsyncIterator[BackendActivation]:
         client_token = shared_proxy_token()
+        # The relaxed body policy, and this is the only place it is built. The
+        # Box calls `serve_shared` exactly when the spec does not unshare the
+        # network (`box.py`), so "the box has the host's connectivity" is not
+        # something a caller asserts here -- it is what choosing this transport
+        # already means. `serve` above keeps the strict policy.
         app = make_app(
             authorization=self._upstream_auth,
             upstream=self._upstream,
+            body=BodyPolicy.for_shared_network(),
             rate=RateLimit(per_minute=self._rpm),
             client_token=client_token,
         )

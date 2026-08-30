@@ -979,3 +979,85 @@ async def test_refusal_warnings_are_rate_limited(tmp_path, caplog):
     warnings = [r for r in caplog.records if "refused" in r.getMessage()]
     assert warnings, "the refusal must still be logged at all"
     assert len(warnings) <= 13, f"{len(warnings)} warnings for 40 refusals"
+
+
+# The web-search request as claude-cli 2.1.246 actually sends it: a dedicated
+# single-shot call carrying only the server tool and a tool_choice forcing it.
+_WEB_SEARCH_BODY = {
+    "model": "m",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": [{"type": "text", "text": "foo"}]}],
+    "metadata": {},
+    "stream": True,
+    "system": [{"type": "text", "text": "s"}],
+    "temperature": 1,
+    "thinking": {"type": "disabled"},
+    "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+    "tool_choice": {"type": "tool", "name": "web_search"},
+}
+
+
+def test_the_isolated_policy_still_refuses_the_web_search_request():
+    """The default is unchanged, and that is the half that matters.
+
+    A box under `unshare_net` has no route off the machine, so asking the
+    upstream to run a query it chose IS the route. Both gates catch this body;
+    the key gate happens to answer first.
+    """
+    reason = BodyPolicy().refuse(json.dumps(_WEB_SEARCH_BODY).encode())
+    assert reason is not None
+    assert "tool_choice" in reason
+    tools_only = {k: v for k, v in _WEB_SEARCH_BODY.items() if k != "tool_choice"}
+    reason = BodyPolicy().refuse(json.dumps(tools_only).encode())
+    assert reason is not None
+    assert "web_search_20250305" in reason
+
+
+def test_the_shared_network_policy_permits_the_web_search_request():
+    """Permitted on the strength of the box's network mode and nothing else.
+
+    A box outside `unshare_net` sits in the host's namespace with the host's
+    connectivity, so it can dial the query's destination itself; refusing to let
+    it ask the upstream instead protects nothing and breaks web search.
+    """
+    assert (
+        BodyPolicy.for_shared_network().refuse(json.dumps(_WEB_SEARCH_BODY).encode())
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("patch", "needle"),
+    [
+        ({"mcp_servers": [{"url": "https://x.test"}]}, "mcp_servers"),
+        ({"container": "c"}, "container"),
+        ({"tools": [{"type": "code_execution_20250522"}]}, "code_execution"),
+        ({"tools": [{"type": "computer_20250124"}]}, "computer_20250124"),
+        (
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "source": {"type": "url", "url": "u"}}
+                        ],
+                    }
+                ]
+            },
+            "image",
+        ),
+        ({"unmeasured_key": 1}, "unmeasured_key"),
+    ],
+)
+def test_the_shared_network_policy_relaxes_two_tags_and_no_others(patch, needle):
+    """Two measured additions, not an open door.
+
+    Everything else stays refused even here. Not because a box with the host's
+    network could not reach the network -- it plainly can -- but because
+    relaxing a tag nothing was measured needing trades a refusal that names
+    itself for a hole nobody is watching, and buys that box nothing.
+    """
+    body = json.dumps({**_WEB_SEARCH_BODY, **patch}).encode()
+    reason = BodyPolicy.for_shared_network().refuse(body)
+    assert reason is not None
+    assert needle in reason
