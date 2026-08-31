@@ -26,8 +26,14 @@ from aisan.gitbinds import external_symlink_targets, git_binds, git_host_files
 from aisan.presets.claude_code import claude_code
 from aisan.presets.codex import codex
 from aisan.presets.opencode import opencode
-from aisan.presets.v8_job import v8_job
+from aisan.presets.v8_job import depot_tools_grant, v8_job
 from aisan.sandbox import RO, RW, Bind, Overlay, Seal
+from aisan.spec import Grant
+
+# Not `import aisan.presets.v8_job as ...`: the package re-exports the v8_job
+# FUNCTION under that name, so attribute-based module import hands back the
+# function. import_module reads sys.modules and gets the module.
+v8_job_module = importlib.import_module("aisan.presets.v8_job")
 
 
 def _fake_checkout(tmp_path) -> tuple[Path, Path]:
@@ -631,3 +637,61 @@ def test_external_symlink_targets_confined_to_the_main_checkout(tmp_path, caplog
     assert Path("/") not in targets
     warned = " ".join(r.getMessage() for r in caplog.records)
     assert "deps" in warned and "outside the main checkout" in warned
+
+
+def test_the_depot_tools_grant_is_the_tree_its_cache_its_path_and_its_env(
+    tmp_path, monkeypatch
+):
+    """One definition of what depot_tools needs, so `v8_job` and `--grant` cannot
+    disagree about it -- and so an operator composing the mounts by hand cannot
+    get the environment wrong, which is the half that fails in depot_tools'
+    vocabulary rather than the box's."""
+    depot_tools = tmp_path / "depot_tools"
+    depot_tools.mkdir()
+    cache = tmp_path / "vpython-root.1000"
+    cache.mkdir()
+    monkeypatch.setattr(v8_job_module, "_vpython_cache", lambda: cache)
+
+    grant = depot_tools_grant(depot_tools)
+
+    assert Overlay(cache) in grant.binds
+    assert Bind(depot_tools, RO, optional=True) in grant.binds
+    assert grant.path == (depot_tools,)
+    assert dict(grant.env)["DEPOT_TOOLS_UPDATE"] == "0"
+    assert dict(grant.env)["PRESUBMIT_SKIP_NETWORK"] == "1"
+
+
+def test_a_host_without_depot_tools_has_an_empty_grant(monkeypatch):
+    """Empty rather than env-only: the variables earn their place because the
+    tree is mounted, and an empty grant is what lets the launcher say the tree
+    was not found instead of building a box with two inert variables."""
+    monkeypatch.setattr(v8_job_module.shutil, "which", lambda _: None)
+
+    grant = depot_tools_grant()
+
+    assert not grant
+    assert grant.binds == () and grant.path == () and grant.env == ()
+
+
+def test_v8_job_still_carries_the_depot_tools_environment(tmp_path):
+    """The preset consumes the same grant the flag does. Named here as well as
+    in the snapshot, because the snapshot says what the environment IS and this
+    says which two variables must not go missing from it."""
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    depot_tools = tmp_path / "depot_tools"
+    depot_tools.mkdir()
+
+    env = dict(v8_job(worktree, depot_tools=depot_tools).env)
+
+    assert env["DEPOT_TOOLS_UPDATE"] == "0"
+    assert env["PRESUBMIT_SKIP_NETWORK"] == "1"
+    assert env["PATH"].split(":")[0] == str(depot_tools)
+
+
+def test_a_grant_cannot_name_path_through_its_environment():
+    """`with_env` runs after `with_path_prefix`, so a PATH pair in a grant's env
+    would replace the box's PATH instead of prepending to it -- silently, and
+    only for boxes that named this grant. The `path` field is the way to say it."""
+    with pytest.raises(ValueError, match="names PATH through"):
+        Grant(env=(("PATH", "/opt/tools"),))

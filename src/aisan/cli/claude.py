@@ -235,6 +235,7 @@ async def _main(argv: list[str]) -> int:
         binary=claude_code_binary,
         binds=args.binds,
         egress_profiles=args.egress,
+        grants=args.grant,
         explain_only=args.explain,
         prepare=prepare,
         mcp=mcp,

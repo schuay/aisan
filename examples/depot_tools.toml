@@ -10,16 +10,19 @@
 # Adjust them to this host and keep the file wherever your own configuration
 # lives -- it is data, not a preset.
 #
-# ONE-TIME HOST SETUP, which no bind can do for you:
+# FOR DEPOT_TOOLS ITSELF, PREFER THE BUILT-IN GRANT:
 #
-#     touch ~/depot_tools/.disable_auto_update
+#     aisan claude /path/to/v8 --grant depot_tools
 #
-# The `gclient` and `fetch` wrappers run `update_depot_tools` on every
-# invocation, which is a `git fetch` into a checkout the box mounts read-only
-# and cannot reach the network from: without the file, `gclient --version`
-# exits 255 with "Couldn't fetch main branch". depot_tools' own switch is that
-# file, it belongs to your checkout rather than to a launcher, and a spec that
-# created it would be a profile that writes to the host it is describing.
+# It grants everything below -- found on this host rather than written down --
+# plus the environment no bind spec can express: depot_tools' wrappers run
+# `update_depot_tools` on every invocation, which is a `git fetch` the box
+# cannot make, and `gclient --version` then exits 255 with "Couldn't fetch main
+# branch". Turning that off is a value rather than a mount, so it lives in the
+# grant (see `aisan.presets.v8_job.depot_tools_grant`) and not here.
+#
+# This file remains the example of composing your OWN paths, and of what to
+# write when a tree has no grant.
 
 ro = [
     "~/depot_tools",

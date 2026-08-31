@@ -171,6 +171,7 @@ async def _main(argv: list[str]) -> int:
         binary=opencode_binary,
         binds=args.binds,
         egress_profiles=args.egress,
+        grants=args.grant,
         explain_only=args.explain,
         prepare=(lambda: mcp.write(mcp_config)) if mcp.enabled else None,
         mcp=mcp,

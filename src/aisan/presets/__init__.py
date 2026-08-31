@@ -21,11 +21,17 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..egress.base import EgressProfile
-from ..spec import BoxSpec
+from ..spec import BoxSpec, Grant
 from .claude_code import claude_code, claude_code_default
 from .codex import codex, codex_default
 from .opencode import opencode, opencode_default
-from .v8_job import v8_job, v8_job_default, v8_rbe, v8_rbe_shared_net
+from .v8_job import (
+    depot_tools_grant,
+    v8_job,
+    v8_job_default,
+    v8_rbe,
+    v8_rbe_shared_net,
+)
 
 PRESETS: dict[str, Callable[[Path], BoxSpec]] = {
     "claude_code": claude_code_default,
@@ -47,13 +53,23 @@ EGRESS_PROFILES: dict[str, Callable[[Path], EgressProfile]] = {
     "v8-rbe-with-net-unsafe": v8_rbe_shared_net,
 }
 
+# What `--grant NAME` resolves through. A grant is a fact about the HOST rather
+# than about the checkout -- where depot_tools is installed, where vpython keeps
+# its venvs -- so unlike an egress profile it takes no root, and a box rooted
+# anywhere gets the same one.
+GRANTS: dict[str, Callable[[], Grant]] = {
+    "depot_tools": depot_tools_grant,
+}
+
 __all__ = [
     "EGRESS_PROFILES",
+    "GRANTS",
     "PRESETS",
     "claude_code",
     "claude_code_default",
     "codex",
     "codex_default",
+    "depot_tools_grant",
     "opencode",
     "opencode_default",
     "v8_job",

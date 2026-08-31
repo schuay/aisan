@@ -73,6 +73,51 @@ class Limits:
 
 
 @dataclass(frozen=True)
+class Grant:
+    """What one `--grant NAME` contributes to a box: the mounts, PATH entries
+    and environment some tree needs to work inside a box that has no network.
+
+    Deliberately not named for tools: a tool tree is the first case, but the
+    shape fits anything aisan can know how to hand a box -- a CA bundle and the
+    variable naming it, a device node and the library path that finds it. What
+    every one of them has in common is that it WIDENS the box, which is why the
+    flag says grant.
+
+    The sibling of `EgressProfile`, and the split between them is what each is a
+    fact ABOUT. An egress profile is a fact about a checkout -- an RBE project,
+    where a tree keeps its config -- so it is a function of the box's root. A
+    grant is a fact about the HOST: where depot_tools is installed, where
+    vpython keeps its venvs. It takes no root, and a box rooted anywhere gets
+    the same one.
+
+    `env` is the half no bind can express, and the reason this type exists
+    rather than a list of mounts. A tool tree bound read-only into a box with no
+    route does not merely lack the network -- it tries to USE it, on every
+    invocation, and fails in its own vocabulary rather than in the box's. The
+    value that turns that off is knowledge about the tree, so it belongs beside
+    the mounts that need it and not in each operator's config file.
+    """
+
+    binds: tuple[BindSpec, ...] = ()
+    path: tuple[Path, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        # PATH through `env` would be applied AFTER `path` and win, silently
+        # replacing the box's PATH with this grant's idea of it rather than
+        # prepending to it. The field exists so that cannot be written by hand.
+        if any(k == "PATH" for k, _ in self.env):
+            raise ValueError("a grant names PATH through `path`, not through `env`")
+
+    def __bool__(self) -> bool:
+        """Whether this grant contributes anything. A tree absent from this host
+        resolves to an empty grant rather than a refusal -- the same shape
+        `EgressProfile` uses, and the launcher says so rather than building a box
+        that silently lacks what was asked for."""
+        return bool(self.binds or self.path or self.env)
+
+
+@dataclass(frozen=True)
 class BoxSpec:
     """One box's complete policy: what it may touch, and how it reaches out.
 
@@ -156,12 +201,11 @@ class BoxSpec:
     def with_path_prefix(self, dirs: tuple[Path, ...]) -> BoxSpec:
         """This spec with `dirs` prepended to the box's PATH.
 
-        The one env combinator, and it exists because PATH is the variable
-        whose values are DIRECTORIES: a bind the box cannot resolve by name is
-        half a grant, and completing it adds no reach the bind did not. It is
-        not a general `with_env` -- everything else a payload wants set is a
-        value rather than a mount, and belongs in the spec that names the box's
-        environment outright.
+        The mount-completing env combinator, and it exists because PATH is the
+        variable whose values are DIRECTORIES: a bind the box cannot resolve by
+        name is half a grant, and completing it adds no reach the bind did not.
+        Values that are not directories go through `with_env`, which is a wider
+        grant and says so.
 
         Prepended, not appended: a caller adding a tool tree means the box to
         use that one. An absent PATH is set rather than refused, so this
@@ -197,6 +241,25 @@ class BoxSpec:
             value = env[last][1]
             env[last] = ("PATH", f"{prefix}{os.pathsep}{value}" if value else prefix)
         return replace(self, env=tuple(env))
+
+    def with_env(self, extra: tuple[tuple[str, str], ...]) -> BoxSpec:
+        """This spec with `extra` env pairs appended, later winning.
+
+        Wider than `with_path_prefix`: these are VALUES, so nothing here is
+        checkable the way a PATH dir is checkable against the mounts. That is
+        why it exists for aisan's own named grants -- resolved through a
+        registry in this repo, applied by the flag that selected them -- and why
+        the user bind format still refuses an env key. A value a person writes
+        into an unreviewed file is a secret this box cannot see it carrying.
+
+        Appended rather than merged, because `env` is an ordered tuple that
+        bwrap replays through `--setenv` in order: a later pair overriding an
+        earlier one is the semantics, and rewriting the earlier would hide from
+        a reader that two callers named the same variable.
+        """
+        if not extra:
+            return self
+        return replace(self, env=(*self.env, *extra))
 
     def with_egress(self, extra: list[Backend]) -> BoxSpec:
         """This spec with `extra` backends added. Order is irrelevant here --

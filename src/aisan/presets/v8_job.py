@@ -37,8 +37,20 @@ from pathlib import Path
 from ..egress.base import Backend, EgressProfile
 from ..gitbinds import GC_ENV, external_symlink_targets, git_binds, git_host_files
 from ..sandbox import RO, Bind, BindSpec, Overlay
-from ..spec import DEFANG_ENV, BoxSpec, Limits
+from ..spec import DEFANG_ENV, BoxSpec, Grant, Limits
 
+# The variable that bites before a turn even starts. The `gclient` and `fetch`
+# wrappers run `update_depot_tools` on every invocation, which is a `git fetch`
+# into a checkout the box mounts read-only and cannot reach the network from,
+# so `gclient --version` exits 255 with "Couldn't fetch main branch" -- which
+# reads as a broken checkout. depot_tools gates on this variable in two places:
+# the `gclient` wrapper skips calling the updater at all, and update_depot_tools
+# skips the fetch, the cipd sync and the python bootstrap. Its file switch,
+# .disable_auto_update, is not an option here -- it would have to be created on
+# the HOST, in a tree the box only reads, and bwrap cannot mount one in
+# (measured, 0.12.0: "Can't create file ...: Read-only file system", because the
+# mountpoint would have to be created inside a read-only bind).
+#
 # `git cl presubmit` fetches the live CL description and validates OWNERS
 # against Gerrit, both over authenticated /a/ endpoints. Those need an SSO
 # cookie the box deliberately does not have (no ~/.gitcookies, /run unbound), so
@@ -53,7 +65,10 @@ from ..spec import DEFANG_ENV, BoxSpec, Limits
 # OWNERS or the CL description. That is the right trade here, because the CQ
 # re-runs the full set and is the authority; the in-box run is a fast local
 # sanity check, not a gate.
-_PRESUBMIT_ENV = (("PRESUBMIT_SKIP_NETWORK", "1"),)
+_DEPOT_TOOLS_ENV = (
+    ("DEPOT_TOOLS_UPDATE", "0"),
+    ("PRESUBMIT_SKIP_NETWORK", "1"),
+)
 
 
 def _vpython_cache() -> Path:
@@ -91,6 +106,47 @@ def _tool_cache_overlays() -> list[Path]:
     """
     cache = _vpython_cache()
     return [cache] if cache.is_dir() else []
+
+
+def depot_tools_root() -> Path | None:
+    """The depot_tools checkout on this host, or None.
+
+    Found through `autoninja` on the PATH rather than a configured path: the
+    directory is whatever the operator cloned and put on their PATH, and a
+    default naming ~/depot_tools is wrong for everyone who cloned it elsewhere.
+    """
+    autoninja = shutil.which("autoninja")
+    return Path(autoninja).parent if autoninja else None
+
+
+def depot_tools_grant(depot_tools: Path | None = None) -> Grant:
+    """depot_tools as a box can use it: the tree, its vpython cache, its PATH
+    entry, and the two variables that stop it reaching for a network it has not
+    got.
+
+    One definition, used by `v8_job` and by `--grant depot_tools` on the
+    interactive launchers, because an operator composing this by hand gets the
+    mounts right and the environment wrong -- the mounts fail loudly and the
+    environment fails as a depot_tools error about a git remote.
+
+    `depot_tools` overrides discovery, for a consumer that has one and does not
+    want it looked up. An absent tree yields an empty grant: a host without
+    depot_tools can still describe the box.
+    """
+    root = depot_tools if depot_tools is not None else depot_tools_root()
+    if root is None:
+        # Empty rather than env-only: the variables are worth setting because
+        # the tree is mounted, and a caller that asked for depot_tools on a host
+        # without it should hear so rather than get two inert variables.
+        return Grant()
+    return Grant(
+        binds=(
+            *(Overlay(p) for p in _tool_cache_overlays()),
+            Bind(root, RO, optional=True),
+        ),
+        path=(root,),
+        env=_DEPOT_TOOLS_ENV,
+    )
 
 
 def sisoenv_path(worktree: Path) -> Path:
@@ -194,17 +250,12 @@ def v8_job(
     gone away is a bind to skip, not a profile to refuse -- unlike the .git pins,
     which are guards and must exist.
     """
-    if depot_tools is None:
-        autoninja = shutil.which("autoninja")
-        depot_tools = Path(autoninja).parent if autoninja else None
+    grant = depot_tools_grant(depot_tools)
     ro = [*external_symlink_targets(worktree), *extra_ro]
-    if depot_tools is not None:
-        ro.append(depot_tools)
     home = Path.home()
     # depot_tools stays first (build tooling precedence); extra_path carries the
     # consumer's launcher dirs, so MCP servers named bare in a config resolve.
-    parts = [str(depot_tools)] if depot_tools else []
-    path_env = ":".join([*parts, *extra_path, "/usr/bin"])
+    path_env = ":".join([*(str(d) for d in grant.path), *extra_path, "/usr/bin"])
     # The whole mount policy, in the order bwrap applies it and later winning.
     # Read top to bottom: warm caches, then everything the box may read, then
     # what it may write (the rw root goes down inside resolve(), between the
@@ -212,7 +263,9 @@ def v8_job(
     # its own three -- the runtime dir, aisan's interpreter, the backends'
     # bind-overs -- after all of these.
     binds: list[BindSpec] = [
-        *(Overlay(p) for p in _tool_cache_overlays()),
+        # The grant first, so the consumer's own extra_ro shadows it rather
+        # than the other way round.
+        *grant.binds,
         *(Bind(p, RO, optional=True) for p in ro),
         *git_binds(worktree, pin_packs=unshare_net),
     ]
@@ -236,7 +289,7 @@ def v8_job(
             ("HOME", str(home)),
             ("PATH", path_env),
             *GC_ENV,
-            *_PRESUBMIT_ENV,
+            *grant.env,
         ),
         egress=egress,
         unshare_net=unshare_net,

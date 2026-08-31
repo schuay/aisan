@@ -18,9 +18,9 @@
   system    /usr /bin /lib /lib64 /sbin /etc /proc /dev /run/systemd/journal/stdout
   [..] rw-root   <ROOT>
   [..] overlay   <VPYTHON_CACHE>/vpython-root
+  [..] ro        <DEPOT_TOOLS>
   [..] ro        <MAIN>/build
   [..] ro        <MAIN>/third_party/icu
-  [..] ro        <DEPOT_TOOLS>
   [..] rw        <MAIN>/.git
   [..] ro-pin    <ROOT>/.git
   [..] ro-pin    <MAIN>/.git/config
@@ -40,6 +40,7 @@
 == environment (the box's complete environment; --clearenv first) ==
   AI_AGENT=aisan
   DEBIAN_FRONTEND=noninteractive
+  DEPOT_TOOLS_UPDATE=0
   GIT_CONFIG_COUNT=3
   GIT_CONFIG_KEY_0=gc.auto
   GIT_CONFIG_KEY_1=gc.pruneExpire
@@ -108,14 +109,14 @@
   --tmp-overlay
   <VPYTHON_CACHE>/vpython-root
   --ro-bind
+  <DEPOT_TOOLS>
+  <DEPOT_TOOLS>
+  --ro-bind
   <MAIN>/build
   <MAIN>/build
   --ro-bind
   <MAIN>/third_party/icu
   <MAIN>/third_party/icu
-  --ro-bind
-  <DEPOT_TOOLS>
-  <DEPOT_TOOLS>
   --bind
   <MAIN>/.git
   <MAIN>/.git
@@ -200,6 +201,9 @@
   --setenv
   GIT_CONFIG_VALUE_2
   never
+  --setenv
+  DEPOT_TOOLS_UPDATE
+  0
   --setenv
   PRESUBMIT_SKIP_NETWORK
   1

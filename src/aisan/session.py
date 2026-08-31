@@ -22,7 +22,7 @@ from .box import Box
 from .egress.base import PreflightError
 from .explain import assembly_refusal, explain
 from .launch import exit_status
-from .presets import EGRESS_PROFILES
+from .presets import EGRESS_PROFILES, GRANTS
 from .sandbox import RO, Bind, BindOver, BindSpec
 from .session_mcp import SessionMCP, mcp_ro_binds
 from .spec import BoxSpec
@@ -171,6 +171,15 @@ def interactive_parser(prog: str, executable: str) -> argparse.ArgumentParser:
         " --net",
     )
     parser.add_argument(
+        "--grant",
+        metavar="NAME",
+        action="append",
+        choices=sorted(GRANTS),
+        help="add a named grant: the mounts, PATH entries and environment a"
+        " tree needs inside a box with no network"
+        f" (one of: {', '.join(sorted(GRANTS))}). Repeatable",
+    )
+    parser.add_argument(
         "--explain",
         action="store_true",
         help="print the resolved profile and exit; nothing runs",
@@ -229,23 +238,25 @@ def terminal_env() -> tuple[tuple[str, str], ...]:
     )
 
 
-def apply_egress_and_binds(
+def apply_launcher_flags(
     spec: BoxSpec,
     repo: Path,
     *,
     egress_profiles: list[str] | None,
+    grants: list[str] | None,
     binds: list[Path] | None,
 ) -> BoxSpec:
-    """Apply `--egress` profiles and `--binds` files to `spec`, the shared way an
+    """Apply `--egress`, `--grant` and `--binds` to `spec`, the shared way an
     interactive launcher and `aisan explain` both need them.
 
-    A review that omitted these would describe a box no operator runs -- egress
-    and user binds are the largest thing a caller adds on top of a preset. Prints
-    notices to stderr (a profile that found nothing, a profile's own notice) and
-    raises `LaunchRefused` carrying the exit code on a hard error, so the CLI
-    that called it prints the reason and exits with that code rather than
+    A review that omitted these would describe a box no operator runs -- these
+    are the largest thing a caller adds on top of a preset. Prints notices to
+    stderr (a profile that found nothing, a profile's own notice) and raises
+    `LaunchRefused` carrying the exit code on a hard error, so the CLI that
+    called it prints the reason and exits with that code rather than
     tracebacking. The order is the model's: egress first (its backends gate the
-    credential guard the user binds run through), then each bind file whole.
+    credential guard the user binds run through), then grants, then each bind file
+    whole -- so a user file shadows a grant the same way it shadows the preset.
     """
     # Named once each: the flag is repeatable so several profiles compose, and
     # naming one twice is a typo rather than a request for two of it -- which
@@ -282,6 +293,26 @@ def apply_egress_and_binds(
         if profile.notice:
             print(profile.notice, file=sys.stderr)
 
+    # Named once each, like the egress flag, and applied whole: a grant is
+    # aisan's own knowledge about what a tree needs, so there is nothing here
+    # for the operator to get subtly wrong except which grants to ask for.
+    for name in dict.fromkeys(grants or []):
+        grant = GRANTS[name]()
+        if not grant:
+            # The tree is not on this host. Not a refusal -- the box is still a
+            # box -- but silence would look identical to a grant that worked.
+            print(
+                f"NOTE: grant {name} found nothing on this host;"
+                " the box gets none of it.",
+                file=sys.stderr,
+            )
+            continue
+        spec = (
+            spec.with_binds(list(grant.binds))
+            .with_path_prefix(grant.path)
+            .with_env(grant.env)
+        )
+
     # In the order given, each file applied whole: later-wins is the model's
     # only precedence rule, so two files compose the same way two entries in
     # one file do -- which is what makes a shared tool spec and a per-project
@@ -312,14 +343,15 @@ async def run_interactive(
     binary: Callable[[], Path | None],
     binds: list[Path] | None,
     egress_profiles: list[str] | None,
+    grants: list[str] | None,
     explain_only: bool,
     prepare: Callable[[], None] | None = None,
     mcp: SessionMCP | None = None,
 ) -> int:
-    """Apply egress profiles and user binds, explain or run, keep the status."""
+    """Apply the composition flags, explain or run, keep the status."""
     try:
-        spec = apply_egress_and_binds(
-            spec, repo, egress_profiles=egress_profiles, binds=binds
+        spec = apply_launcher_flags(
+            spec, repo, egress_profiles=egress_profiles, grants=grants, binds=binds
         )
     except LaunchRefused as e:
         print(e, file=sys.stderr)

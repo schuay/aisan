@@ -500,8 +500,8 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
     import sys
 
-    from .presets import EGRESS_PROFILES, PRESETS
-    from .session import LaunchRefused, apply_egress_and_binds
+    from .presets import EGRESS_PROFILES, GRANTS, PRESETS
+    from .session import LaunchRefused, apply_launcher_flags
 
     p = argparse.ArgumentParser(prog="aisan explain")
     p.add_argument("preset", choices=sorted(PRESETS))
@@ -513,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
         help="describe only; never start a backend (the default and only mode"
         " today, kept explicit so a future --run cannot be the default)",
     )
-    # The same two knobs a launcher takes, so a review sees the box an operator
+    # The same knobs a launcher takes, so a review sees the box an operator
     # actually runs: a preset alone omits the largest thing a caller adds.
     p.add_argument(
         "--egress",
@@ -521,6 +521,13 @@ def main(argv: list[str] | None = None) -> int:
         choices=sorted(EGRESS_PROFILES),
         metavar="NAME",
         help="add an egress profile's backends and binds (repeatable)",
+    )
+    p.add_argument(
+        "--grant",
+        action="append",
+        choices=sorted(GRANTS),
+        metavar="NAME",
+        help="add a named grant's mounts, PATH entries and env (repeatable)",
     )
     p.add_argument(
         "--binds",
@@ -535,8 +542,8 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     spec = PRESETS[args.preset](root)
     try:
-        spec = apply_egress_and_binds(
-            spec, root, egress_profiles=args.egress, binds=args.binds
+        spec = apply_launcher_flags(
+            spec, root, egress_profiles=args.egress, grants=args.grant, binds=args.binds
         )
     except LaunchRefused as e:
         print(e, file=sys.stderr)

@@ -190,6 +190,24 @@ aisan codex /path/to/repo --net
 Launcher options come before a literal `--`; arguments after it are passed to
 the underlying client unchanged.
 
+`--grant NAME` adds a named grant: the mounts, PATH entries and environment
+some tree needs inside a box with no network route.
+
+```sh
+aisan claude /path/to/v8 --grant depot_tools
+```
+
+Today the one grant is `depot_tools`, which supplies the checkout found through
+`autoninja` on your PATH, vpython's venv store as an overlay, and the two
+variables that stop depot_tools reaching for a network it has not got --
+without them `gclient` exits 255 on a `git fetch` it cannot make, which reads
+as a broken checkout. The environment is why this is a profile rather than a
+bind spec: a `--binds` file names paths, and the value that turns off an
+auto-update is not one. Grants are applied before `--binds`, so a user file
+still shadows them, and `--explain` renders the result. The name is not
+tool-specific on purpose -- a CA bundle and the variable naming it, or a device
+node and the library path that finds it, are the same shape.
+
 Runtime dependencies are limited to `aiohttp` and `h2`. The Google credential
 chain is optional. A boundary test walks the package AST and fails when a module
 imports an undeclared third-party dependency.

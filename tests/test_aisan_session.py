@@ -64,7 +64,7 @@ def test_staged_directory_removes_only_what_it_created(tmp_path):
     assert not (existing / "client").exists()
 
 
-def _cli(tmp_path, argv):
+def _cli(tmp_path, argv, path=None):
     """A launcher run against a HOME of its own.
 
     The scrub matters: the launchers discover host MCP config through these
@@ -76,6 +76,11 @@ def _cli(tmp_path, argv):
     drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
     env = {k: v for k, v in os.environ.items() if k not in drop}
     env["HOME"] = str(home)
+    if path is not None:
+        # Grants discover their tree on the PATH, so a test that asserts
+        # what one contributes has to own the PATH -- otherwise it asserts what
+        # this machine happens to have installed.
+        env["PATH"] = str(path)
     return subprocess.run(
         [sys.executable, "-m", "aisan.cli.main", *argv],
         capture_output=True,
@@ -436,6 +441,7 @@ async def test_the_run_path_routes_an_assembly_refusal_to_return_2(
         binary=lambda: repo / "claude",
         binds=None,
         egress_profiles=None,
+        grants=None,
         explain_only=False,
     )
     assert code == 2
@@ -485,6 +491,7 @@ async def test_the_run_path_normalizes_a_signal_death_to_shell_status(
         binary=lambda: repo / "claude",
         binds=None,
         egress_profiles=None,
+        grants=None,
         explain_only=False,
     )
     assert code == 143
@@ -533,3 +540,104 @@ def test_git_config_binds_empty_without_a_config(tmp_path, monkeypatch):
     monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: tmp_path / "empty"))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     assert git_config_binds() == []
+
+
+def _fake_depot_tools(tmp_path):
+    """A depot_tools directory as `depot_tools_grant` finds one: by `autoninja`
+    on the PATH. Returned for the caller to pass as the box's PATH."""
+    depot_tools = tmp_path / "depot_tools"
+    depot_tools.mkdir()
+    autoninja = depot_tools / "autoninja"
+    autoninja.write_text("#!/bin/sh\nexit 0\n")
+    autoninja.chmod(0o755)
+    return depot_tools
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_a_grant_brings_its_mounts_its_path_and_its_environment(tmp_path, command):
+    """The env half is the reason the flag exists: depot_tools bound read-only
+    into a box with no route tries to `git fetch` itself on every gclient
+    invocation and exits 255, which reads as a broken checkout rather than as a
+    missing network."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    depot_tools = _fake_depot_tools(tmp_path)
+
+    result = _cli(
+        tmp_path,
+        [command, "--grant", "depot_tools", "--explain", str(repo)],
+        path=depot_tools,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"ro        {depot_tools}" in result.stdout
+    assert "DEPOT_TOOLS_UPDATE=0" in result.stdout
+    path_line = next(
+        line for line in result.stdout.splitlines() if line.strip().startswith("PATH=")
+    )
+    assert path_line.strip().removeprefix("PATH=").split(os.pathsep)[0] == str(
+        depot_tools
+    )
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_a_grant_this_host_lacks_says_so(tmp_path, command):
+    # Same reasoning as the egress profile that finds nothing: not a refusal,
+    # but a box quietly missing what was asked for looks like a working one.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    empty = tmp_path / "empty-path"
+    empty.mkdir()
+
+    result = _cli(
+        tmp_path,
+        [command, "--grant", "depot_tools", "--explain", str(repo)],
+        path=empty,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "grant depot_tools found nothing" in result.stderr
+    assert "DEPOT_TOOLS_UPDATE" not in result.stdout
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_a_user_bind_file_still_shadows_a_grant(tmp_path, command):
+    """Grants are applied before `--binds`, so the operator's file keeps the
+    last word -- the same precedence a bind file has over the preset."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    depot_tools = _fake_depot_tools(tmp_path)
+    spec_file = tmp_path / "mine.toml"
+    spec_file.write_text(f'rw = ["{depot_tools}"]\n')
+
+    result = _cli(
+        tmp_path,
+        [
+            command,
+            "--grant",
+            "depot_tools",
+            "--binds",
+            str(spec_file),
+            "--explain",
+            str(repo),
+        ],
+        path=depot_tools,
+    )
+
+    assert result.returncode == 0, result.stderr
+    # On the classification, not on the presence of a line: both mounts are in
+    # the list either way, and only the classifier says which one the box ends
+    # up with. The profile's ro bind is the shadowed one.
+    assert f"ro-shadow {depot_tools}" in result.stdout
+    assert f"rw        {depot_tools}" in result.stdout
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_an_unknown_grant_is_refused_by_name(tmp_path, command):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = _cli(tmp_path, [command, "--grant", "nope", "--explain", str(repo)])
+
+    assert result.returncode == 2
+    assert "nope" in result.stderr and "depot_tools" in result.stderr
