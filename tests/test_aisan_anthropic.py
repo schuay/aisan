@@ -555,3 +555,101 @@ async def test_the_transport_decides_the_body_policy(tmp_path):
                 assert "tool_choice" in (await response.json())["error"]["message"]
     finally:
         await up_runner.cleanup()
+
+
+async def test_a_token_that_expires_mid_session_is_refused_with_the_host_fix(tmp_path):
+    """The failure this exists for: a session outliving the token it launched
+    with, on a machine where the only Claude Code running is the one in the box,
+    reading a placeholder. Nothing refreshes the file, so the bearer goes stale
+    under a session preflight passed.
+
+    Forwarding it got the agent Anthropic's own 401, which its client renders as
+    "Please run /login" -- impossible in a box with no credential file and no
+    route to the OAuth endpoints. The refusal has to name the HOST-side fix, and
+    it has to happen here rather than upstream.
+    """
+    reached = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        reached.append(request.path)
+        return web.json_response({"ok": True})
+
+    up, up_runner = await _upstream_server(upstream)
+    runtime = tmp_path / "rt"
+    runtime.mkdir()
+    credentials = _credentials(tmp_path / "c.json")
+    backend = AnthropicBackend(credentials=credentials, upstream=up)
+    try:
+        async with backend.serve(runtime):
+            sock = backend.socket_path(runtime)
+            async with ClientSession(connector=UnixConnector(path=str(sock))) as s:
+                headers = {"x-api-key": PLACEHOLDER_KEY}
+                async with s.post(
+                    "http://anthropic.invalid/v1/messages", data=b"{}", headers=headers
+                ) as r:
+                    assert r.status == 200
+
+                # The token ages out under the running box. The file is intact
+                # and the login is valid -- only the access token is past due.
+                _credentials(credentials, ttl_s=-60)
+
+                async with s.post(
+                    "http://anthropic.invalid/v1/messages", data=b"{}", headers=headers
+                ) as r:
+                    assert r.status == 503
+                    body = await r.json()
+    finally:
+        await up_runner.cleanup()
+
+    # Only the first request was worth forwarding: a bearer aisan knows is
+    # expired buys an upstream round trip and a worse message.
+    assert reached == ["/v1/messages"]
+    assert body["error"]["type"] == "authentication_error"
+    message = body["error"]["message"]
+    assert "expired" in message
+    assert "claude auth login" in message and "HOST" in message
+    assert str(credentials) in message
+    # The number, never the token -- this message reaches the agent's transcript.
+    assert FAKE_TOKEN not in message
+
+
+async def test_one_request_reads_the_credential_file_exactly_once(
+    tmp_path, monkeypatch
+):
+    """Both values out of one read. Two reads would let the host rewrite the
+    file in between and pair a fresh expiry with the token from before it --
+    which is precisely an expired bearer passing the expiry check."""
+    import aisan.egress.anthropic as backend_module
+
+    reads = []
+    real = backend_module._read_oauth
+
+    def counted(path):
+        reads.append(path)
+        return real(path)
+
+    monkeypatch.setattr(backend_module, "_read_oauth", counted)
+
+    up, up_runner = await _upstream_server(_hello)
+    runtime = tmp_path / "rt"
+    runtime.mkdir()
+    backend = AnthropicBackend(
+        credentials=_credentials(tmp_path / "c.json"), upstream=up
+    )
+    try:
+        async with backend.serve(runtime):
+            sock = backend.socket_path(runtime)
+            reads.clear()
+            async with (
+                ClientSession(connector=UnixConnector(path=str(sock))) as s,
+                s.post(
+                    "http://anthropic.invalid/v1/messages",
+                    data=b"{}",
+                    headers={"x-api-key": PLACEHOLDER_KEY},
+                ) as r,
+            ):
+                assert r.status == 200
+    finally:
+        await up_runner.cleanup()
+
+    assert len(reads) == 1

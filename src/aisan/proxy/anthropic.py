@@ -524,9 +524,11 @@ def make_app(
             # error the agent can read rather than a traceback, and the reason
             # never carries the credential: `e` here is a file or a parse
             # failure, both of which name a path, not a value.
-            log.error("anthropic proxy: no credential to attach: %s", e)
+            log.error("anthropic proxy: no usable credential to attach: %s", e)
             return _error(
-                503, "authentication_error", f"sandbox proxy has no credential: {e}"
+                503,
+                "authentication_error",
+                f"sandbox proxy has no usable credential: {e}",
             )
 
         # A list of pairs, not a dict: `anthropic-beta` is a list the client may

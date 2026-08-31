@@ -65,6 +65,17 @@ PORT = 8713
 __all__ = ["PLACEHOLDER_KEY", "AnthropicBackend"]
 
 
+class ExpiredCredential(Exception):
+    """The credential file is readable and its token is past `expiresAt`.
+
+    Its own type because it is the one credential failure that is nobody's
+    mistake: the file is intact, the login is valid, and the access token simply
+    aged out of a session that ran longer than one. What it is NOT is a reason
+    to refresh -- see the module docstring on why that race is not aisan's to
+    lose.
+    """
+
+
 # The default credential location, which is also where the host's Claude Code
 # keeps it. A constructor argument so a test never needs the real one. The
 # function is the source of truth: guards that enumerate every backend's
@@ -130,7 +141,39 @@ class _PlanCredential:
         return (self.path,)
 
     async def upstream(self) -> dict[str, str]:
-        return {"authorization": f"Bearer {_read_bearer(self.path)}"}
+        """The bearer to attach, refused once it has expired.
+
+        Preflight checks the same file, but a session outlives the token it
+        launched with -- and nothing refreshes that token while the only Claude
+        Code on this machine is the one inside the box, reading a placeholder.
+        Forwarding the stale bearer got the agent Anthropic's own 401, which its
+        client renders as "Please run /login": advice that cannot work in a box
+        with no credential file and no route to the OAuth endpoints. Refused
+        here instead, with the reason and the host-side fix, which is what the
+        proxy's caller already documents this path as doing.
+
+        Expired means expired, with none of preflight's margin: that margin
+        exists to fail before bwrap owns the terminal, and mid-session there is
+        nothing to gain by refusing a token that still works.
+
+        One read for both values. Two would let the host rewrite the file in
+        between and pair a fresh expiry with a stale token.
+        """
+        data = _read_oauth(self.path)
+        token = data.get("accessToken")
+        if not isinstance(token, str) or not token:
+            raise KeyError(f"{self.path} has no claudeAiOauth.accessToken")
+        expires_ms = data.get("expiresAt")
+        if not isinstance(expires_ms, int):
+            raise KeyError(f"{self.path} has no integer claudeAiOauth.expiresAt")
+        expired_for = time.time() - expires_ms / 1000.0
+        if expired_for > 0:
+            # The number, never the token -- the same rule `check` follows.
+            raise ExpiredCredential(
+                f"the access token in {self.path} expired {int(expired_for)}s"
+                f" ago and aisan never refreshes it. Fix: {_FIX_EXPIRED}"
+            )
+        return {"authorization": f"Bearer {token}"}
 
     def dress(self, token: str) -> dict[str, str]:
         env = {OAUTH_TOKEN_ENV: token}
