@@ -200,9 +200,9 @@ aisan claude /path/to/v8 --grant depot_tools
 Today the one grant is `depot_tools`, which supplies the checkout found through
 `autoninja` on your PATH, vpython's venv store as an overlay, and the two
 variables that stop depot_tools reaching for a network it has not got --
-without them `gclient` exits 255 on a `git fetch` it cannot make, which reads
-as a broken checkout. The environment is why this is a profile rather than a
-bind spec: a `--binds` file names paths, and the value that turns off an
+without the first of them `gclient` exits 255 on a `git fetch` it cannot make,
+which reads as a broken checkout. The environment is why this is a grant rather
+than a bind spec: a `--binds` file names paths, and the value that turns off an
 auto-update is not one. Grants are applied before `--binds`, so a user file
 still shadows them, and `--explain` renders the result. The name is not
 tool-specific on purpose -- a CA bundle and the variable naming it, or a device

@@ -462,6 +462,31 @@ def test_with_path_prefix_refuses_a_relative_or_colon_bearing_dir(tmp_path):
     assert dict(out.env)["PATH"].startswith("/opt/tool/bin:")
 
 
+def test_a_path_prefix_already_present_is_not_repeated(tmp_path):
+    """Naming a grant a preset already applied used to render
+    `<tree>:<tree>:/usr/bin` -- a second entry that resolves nothing, in the
+    artifact whose whole job is to be read closely. First occurrence wins, which
+    is what PATH lookup does anyway, so nothing the box resolves changes."""
+    from aisan.spec import BoxSpec
+
+    base = BoxSpec(
+        root=tmp_path,
+        binds=(),
+        tmpfs=(),
+        env=(("PATH", "/opt/tool/bin:/usr/bin"),),
+        egress=(),
+        unshare_net=True,
+    )
+
+    out = base.with_path_prefix((Path("/opt/tool/bin"),))
+
+    assert dict(out.env)["PATH"] == "/opt/tool/bin:/usr/bin"
+    # A dir that is not already there still goes to the front, and the order of
+    # everything behind it is untouched.
+    later = out.with_path_prefix((Path("/opt/other/bin"),))
+    assert dict(later.env)["PATH"] == "/opt/other/bin:/opt/tool/bin:/usr/bin"
+
+
 def test_diamond_included_mount_covers_a_path_regardless_of_include_order(tmp_path):
     # M15: common mounts /tools; a and b both include it (a diamond, expanded
     # once). b's path=/tools/bin is covered by that mount. Which branch expands

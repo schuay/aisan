@@ -232,14 +232,19 @@ class BoxSpec:
                 )
             if not Path(d).is_absolute():
                 raise ValueError(f"PATH prefix dir {d} is not absolute")
-        prefix = os.pathsep.join(str(d) for d in dirs)
         env = list(self.env)
         last = max((i for i, (k, _) in enumerate(env) if k == "PATH"), default=None)
+        value = env[last][1] if last is not None else ""
+        entries = [*(str(d) for d in dirs), *(value.split(os.pathsep) if value else [])]
+        # First occurrence wins, which is how PATH lookup already works: a
+        # repeat of an earlier entry resolves nothing and only makes the
+        # rendered profile harder to read. It shows up when a caller names a
+        # grant the preset already applied.
+        path = os.pathsep.join(dict.fromkeys(entries))
         if last is None:
-            env.append(("PATH", prefix))
+            env.append(("PATH", path))
         else:
-            value = env[last][1]
-            env[last] = ("PATH", f"{prefix}{os.pathsep}{value}" if value else prefix)
+            env[last] = ("PATH", path)
         return replace(self, env=tuple(env))
 
     def with_env(self, extra: tuple[tuple[str, str], ...]) -> BoxSpec:

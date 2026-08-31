@@ -64,7 +64,7 @@ def test_staged_directory_removes_only_what_it_created(tmp_path):
     assert not (existing / "client").exists()
 
 
-def _cli(tmp_path, argv, path=None):
+def _cli(tmp_path, argv, host_path=None):
     """A launcher run against a HOME of its own.
 
     The scrub matters: the launchers discover host MCP config through these
@@ -76,11 +76,11 @@ def _cli(tmp_path, argv, path=None):
     drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
     env = {k: v for k, v in os.environ.items() if k not in drop}
     env["HOME"] = str(home)
-    if path is not None:
-        # Grants discover their tree on the PATH, so a test that asserts
-        # what one contributes has to own the PATH -- otherwise it asserts what
-        # this machine happens to have installed.
-        env["PATH"] = str(path)
+    if host_path is not None:
+        # Grants discover their tree on the HOST's PATH, so a test asserting
+        # what one contributes has to own it -- otherwise it asserts what this
+        # machine happens to have installed.
+        env["PATH"] = str(host_path)
     return subprocess.run(
         [sys.executable, "-m", "aisan.cli.main", *argv],
         capture_output=True,
@@ -566,7 +566,7 @@ def test_a_grant_brings_its_mounts_its_path_and_its_environment(tmp_path, comman
     result = _cli(
         tmp_path,
         [command, "--grant", "depot_tools", "--explain", str(repo)],
-        path=depot_tools,
+        host_path=depot_tools,
     )
 
     assert result.returncode == 0, result.stderr
@@ -592,7 +592,7 @@ def test_a_grant_this_host_lacks_says_so(tmp_path, command):
     result = _cli(
         tmp_path,
         [command, "--grant", "depot_tools", "--explain", str(repo)],
-        path=empty,
+        host_path=empty,
     )
 
     assert result.returncode == 0, result.stderr
@@ -621,7 +621,7 @@ def test_a_user_bind_file_still_shadows_a_grant(tmp_path, command):
             "--explain",
             str(repo),
         ],
-        path=depot_tools,
+        host_path=depot_tools,
     )
 
     assert result.returncode == 0, result.stderr
