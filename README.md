@@ -213,6 +213,49 @@ does not resolve, install, update, or download dependencies. The checks do not
 rewrite files; run Ruff or `scripts/add-license-headers.py` explicitly to apply
 a reported fix.
 
+## Plugin commands
+
+Out-of-tree commands register in the `aisan.commands` entry point group:
+
+```toml
+[project.entry-points."aisan.commands"]
+jetski = "aisan_corp.cli.jetski:main"
+```
+
+Installed alongside aisan, they are dispatched by name and need no wrapper
+binary of their own:
+
+```sh
+uv tool install aisan --with git+ssh://example.com/aisan-corp
+aisan jetski /path/to/repo
+```
+
+The contract is the one the built-in launchers already follow: a callable
+taking the tokens after the command name and returning an exit status, with
+`LaunchRefused` handled by the dispatcher. Everything else a plugin imports
+from `aisan` is internal and may change between versions.
+
+Four rules the dispatcher enforces:
+
+- **Built-ins are not overridable.** Installing a plugin installs its whole
+  dependency closure, and any distribution in it can register in this group
+  though only the plugin was trusted. A claim on `claude`, `codex`, `opencode`
+  or `explain` is refused and reported.
+- **Discovery costs nothing on the built-in path.** The group is read only when
+  the first token names no built-in, and when help is printed. `aisan claude`
+  scans no metadata and imports no plugin.
+- **A broken plugin is not a broken aisan.** The import happens on the path
+  that asked for it; a failure names the plugin and leaves every other command
+  working.
+- **Duplicate names resolve by sorting**, not by `sys.path` order, and the
+  plugin that loses is named.
+
+Plugins get no separate audit path: `--explain` belongs to the launcher, so a
+plugin that builds a box should accept it and print the resolved profile the
+same way the built-in launchers do. Note also that aisan binds its own venv
+read-only into every box with egress, so a plugin installed beside it is
+readable from inside the box.
+
 ## Relationship to sandbox-runtime
 
 [Anthropic's sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime)
