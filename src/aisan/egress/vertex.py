@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -68,6 +69,26 @@ class _Token:
         return self._token
 
 
+def default_credentials() -> tuple[Path, ...]:
+    """Every file Application Default Credentials may be read from here.
+
+    Two, because `google.auth.default()` takes GOOGLE_APPLICATION_CREDENTIALS
+    when it is set and the gcloud well-known file otherwise (CLOUDSDK_CONFIG
+    moving the directory), and the guards want the paths a box must not reach
+    rather than the one this process would pick. Naming only the live one would
+    leave the other bindable: any process in a box holding it can point ADC
+    back at it.
+    """
+    paths = []
+    explicit = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if explicit:
+        paths.append(Path(explicit))
+    config = os.environ.get("CLOUDSDK_CONFIG")
+    root = Path(config) if config else Path.home() / ".config" / "gcloud"
+    paths.append(root / "application_default_credentials.json")
+    return tuple(dict.fromkeys(paths))
+
+
 class VertexBackend(Backend):
     """Model calls through a host-side proxy on loopback `PORT`."""
 
@@ -89,6 +110,9 @@ class VertexBackend(Backend):
         self._location = location
         self._models = models
         self._impersonate = impersonate
+        # ADC is minted in memory, but what it is minted FROM is a file, and a
+        # box that can read it can mint the same token for itself.
+        self.credentials = default_credentials()
         # A test may inject `fetch` in place of the real mint -- otherwise
         # exercising this backend would require a real cloud credential, which is
         # exactly the dependency the proxy exists to keep out of the loop.

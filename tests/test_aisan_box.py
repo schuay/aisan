@@ -635,6 +635,30 @@ def test_masking_follows_the_destination_not_the_source(tmp_path):
         masked.wrapper()
 
 
+def test_a_bind_of_the_adc_store_is_refused_for_a_vertex_box(tmp_path, monkeypatch):
+    """The Vertex route mints in memory, but it mints FROM a file.
+
+    A box holding the ADC store can point `google.auth` at it and mint the same
+    token the proxy exists to keep host-side, so the store is the backend's
+    credential in the sense every guard here means -- which it did not declare
+    until this test.
+    """
+    from aisan.egress.vertex import VertexBackend
+
+    gcloud = tmp_path / "gcloud"
+    gcloud.mkdir()
+    (gcloud / "application_default_credentials.json").write_text("{}")
+    monkeypatch.setenv("CLOUDSDK_CONFIG", str(gcloud))
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    b = VertexBackend(rpm=1, project="p", location="l", models=("m",), fetch=object())
+    spec = _spec(wt, egress=(b,), binds=(Bind(gcloud, RO),))
+    box = Box(spec, box_id=str(tmp_path / "j"))
+    with box.staged(), pytest.raises(ValueError, match="would expose the vertex"):
+        box.wrapper()
+
+
 def test_a_root_beside_a_credential_is_allowed(tmp_path):
     b = _FakeBackend()
     b.credentials = (tmp_path / "credentials" / "key.json",)

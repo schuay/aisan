@@ -201,6 +201,24 @@ def test_a_pyvenv_cfg_proves_a_tool_root(tmp_path, monkeypatch):
     assert mcp_ro_binds(config, str(shim_dir)) == (shim_dir, tool)
 
 
+def test_the_known_credential_list_covers_the_mint_from_disk_backends(monkeypatch):
+    """A token minted in memory is not a credential kept off disk.
+
+    The Vertex and RBE routes both mint from a store the host keeps (ADC,
+    luci-auth's), and a bind handing either to a box hands over the mint. They
+    were missing from this list while it claimed to name every backend
+    credential on the host, which is the claim the launcher guard is built on.
+    """
+    from aisan.egress import known_credential_paths
+    from aisan.egress.reapi import LUCI_STORE
+    from aisan.egress.vertex import default_credentials as adc
+
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    known = set(known_credential_paths())
+    assert LUCI_STORE in known
+    assert set(adc()) <= known
+
+
 def test_no_launcher_bind_may_contain_a_backend_credential_store(tmp_path, monkeypatch):
     """Structural, over every KNOWN backend credential rather than one box's
     egress: a root that passes the venv proof but contains a credential store
