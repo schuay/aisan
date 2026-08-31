@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Literal
 
 from .egress import known_credential_paths
-from .egress.base import credential_containment
+from .egress.base import credential_overlap
 from .launch import interpreter_roots
 from .statedir import write_sealed
 
@@ -167,7 +167,7 @@ def mcp_ro_binds(
     # Structural, over every KNOWN backend credential rather than this box's
     # egress: the store another client keeps is exposure all the same, and the
     # box's own backends would never name it.
-    hit = credential_containment(out, known_credential_paths())
+    hit = credential_overlap(out, known_credential_paths())
     if hit is not None:
         raise ValueError(
             f"MCP launcher bind {hit[0]} would expose the credential store"

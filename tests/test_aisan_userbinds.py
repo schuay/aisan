@@ -390,6 +390,21 @@ def test_the_credential_guard_reaches_inside_an_include(tmp_path):
         load(outer, egress=(AnthropicBackend(credentials=creds),))
 
 
+def test_the_credential_guard_looks_inside_the_store_too(tmp_path):
+    # Overlap, not one-way containment. A credential store is a directory whose
+    # point is the token inside it, so a file naming that token names the
+    # credential -- and the containment test that only asked "does this bind
+    # hold the store" answered no and let it through.
+    store = tmp_path / "chrome_infra"
+    store.mkdir()
+    token = store / "luci_context"
+    token.write_text("{}")
+    spec = _named_spec(tmp_path / "user.toml", f'ro = ["{token}"]\n')
+
+    with pytest.raises(ValueError, match="would expose"):
+        load(spec, egress=(AnthropicBackend(credentials=store),))
+
+
 def test_a_malformed_include_names_the_inner_file(tmp_path):
     _named_spec(tmp_path / "inner.toml", 'wr = ["~/typo"]\n')
     outer = _named_spec(tmp_path / "outer.toml", 'include = ["inner.toml"]\n')

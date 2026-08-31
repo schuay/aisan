@@ -247,9 +247,9 @@ def _anc_eq(child: str, ancestor: str) -> bool:
 def assembly_refusal(box: Box) -> Exception | None:
     """The refusal box assembly raises for this spec, or None if it resolves.
 
-    `_sandbox()` refuses a spec whose binds would shadow a tmpfs or the rw root
-    or expose a backend credential; `wrapper()` refuses a bind whose mandatory
-    source is missing. Both are the finding `--explain` exists to surface: this
+    `_sandbox()` refuses a box whose mounts would leave a backend credential
+    readable inside it; `wrapper()` refuses a bind whose mandatory source is
+    missing, and mounts that would shadow a tmpfs or the rw root. Both are the finding `--explain` exists to surface: this
     is where `explain` reads the refusal to render it, and where the CLI reads
     it to exit nonzero, so a scripted `--explain && run` does not treat a
     refused profile as a passed review. Both builders are pure, so probing them

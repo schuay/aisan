@@ -44,7 +44,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..sandbox import BindSpec
+from ..sandbox import BindSpec, paths_overlap
 
 
 class PreflightError(RuntimeError):
@@ -225,13 +225,12 @@ def credential_exposure(
     binds: tuple[BindSpec, ...], backends: tuple[Backend, ...]
 ) -> tuple[Path, Backend, Path] | None:
     """The first (bind source, backend, credential) where a bind's source
-    contains a backend's credential, or None.
+    overlaps a backend's credential, or None.
 
-    Containment, not equality: binding the credential's PARENT exposes it just
-    as surely as binding the file, and equality is the containment edge case.
-    Resolved on both sides, so a symlinked home compares against its real
-    target -- the same rule `_strict_ancestor` applies in the sandbox, for the
-    same reason.
+    Overlap, not equality: binding the credential's PARENT exposes it just as
+    surely as binding the file, and so does binding one file INSIDE a credential
+    store. `sandbox.paths_overlap` is that decision, made once for every guard
+    that asks it.
 
     A rule about a bind LIST, and so about a user bind file, which is the one
     caller left: a path a person wrote into a --binds file may not name a
@@ -254,33 +253,25 @@ def credential_exposure(
         if src is None:
             continue
         for backend in backends:
-            hit = credential_containment((src,), backend.credentials)
+            hit = credential_overlap((src,), backend.credentials)
             if hit is not None:
                 return src, backend, hit[1]
     return None
 
 
-def credential_containment(
+def credential_overlap(
     sources: Iterable[Path], credentials: Iterable[Path]
 ) -> tuple[Path, Path] | None:
-    """The first (source, credential) where the source contains the credential.
+    """The first (source, credential) that overlap.
 
-    The containment decision `credential_exposure` applies, without the Backend
-    vocabulary, for callers whose credential list does not come from a box's
-    own egress -- the MCP launcher-bind guard checks against every KNOWN
-    backend credential (`known_credential_paths`), most of which belong to
-    backends the box does not carry.
+    The decision `credential_exposure` applies, without the Backend vocabulary,
+    for callers whose credential list does not come from a box's own egress --
+    the MCP launcher-bind guard checks against every KNOWN backend credential
+    (`known_credential_paths`), most of which belong to backends the box does
+    not carry.
     """
     for src in sources:
-        try:
-            src_r = src.resolve()
-        except OSError:
-            src_r = src
         for cred in credentials:
-            try:
-                cred_r = cred.resolve()
-            except OSError:
-                cred_r = cred
-            if cred_r.is_relative_to(src_r):
+            if paths_overlap(src, cred):
                 return src, cred
     return None

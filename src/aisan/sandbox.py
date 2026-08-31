@@ -272,6 +272,22 @@ def _resolved(p: Path) -> Path:
         return p
 
 
+def paths_overlap(a: Path, b: Path) -> bool:
+    """Whether `a` and `b` are the same path or one is inside the other.
+
+    The overlap decision, once, for every guard that asks whether a mount and a
+    credential touch. EITHER direction: a mount above a credential store
+    publishes the store whole, and a mount of one file inside it publishes that
+    file -- which, for a store whose point is the token it holds, is the same
+    answer. A one-way containment test reads as the stricter rule and is not.
+
+    Resolved on both sides: these are host paths, where a symlinked home and its
+    target are one directory.
+    """
+    ra, rb = _resolved(a), _resolved(b)
+    return ra.is_relative_to(rb) or rb.is_relative_to(ra)
+
+
 def _reachable_through(mounts: list[Mount], path: Path) -> Path | None:
     """The source of the mount that leaves `path` readable in the box after
     `mounts` have been applied in order, or None.
@@ -287,10 +303,6 @@ def _reachable_through(mounts: list[Mount], path: Path) -> Path | None:
     published at several destinations (a bind-over mounts a source somewhere its
     own name does not appear), and a tmpfs over one of them says nothing about
     the others.
-
-    Overlap in EITHER direction. A mount above the credential publishes it
-    whole; a mount of one file INSIDE a credential store publishes that file,
-    which for a store whose point is the token it holds is the same answer.
 
     Sources are resolved and destinations are not, because they are facts about
     two different filesystems. A source is a host path, where a symlinked home
@@ -311,10 +323,13 @@ def _reachable_through(mounts: list[Mount], path: Path) -> Path | None:
         if m.src is None:
             continue
         src = _resolved(m.src)
-        if target.is_relative_to(src):
-            visible[m.dst / target.relative_to(src)] = m.src
-        elif src.is_relative_to(target):
-            visible[m.dst] = m.src
+        if not paths_overlap(target, src):
+            continue
+        # Where that overlap lands in the box: under the mount point when the
+        # source holds the credential, AT it when the credential holds the
+        # source. Geometry, not policy -- `paths_overlap` already decided.
+        inside = target.relative_to(src) if target.is_relative_to(src) else Path()
+        visible[m.dst / inside] = m.src
     # The LAST source to publish a given box path, because re-publishing the
     # same path overwrites the value while keeping its position: what the
     # operator has to remove is the mount that won, not the one it covered.

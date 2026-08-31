@@ -247,8 +247,8 @@ class AnthropicBackend(Backend):
             else _PlanCredential(credentials or default_credentials())
         )
         # For the Box's credential-exposure refusal: the files this backend
-        # reads are the ones a spec bind must not contain. Empty for a kind that
-        # holds its credential in memory.
+        # reads are the ones the box's mounts must leave unreadable inside it.
+        # Empty for a kind that holds its credential in memory.
         self.credentials = self._credential.files
         self._upstream = upstream
         self._rpm = rpm

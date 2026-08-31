@@ -81,9 +81,12 @@ The credential guard is why `load` takes the egress tuple. Until now every
 bind source was audited code plus a snapshot; a user file is the first
 input nobody reviewed, and the credential-absence claim is subtraction -- a
 spec naming `~` would re-add exactly what the profile exists to keep out.
-`load` refuses such a file naming the key it came from, and `Box._sandbox`
-enforces the same rule over spec binds at assembly, so neither a user file
-nor a hand-composed caller can route around it.
+`load` refuses such a file naming the key it came from. `Box._sandbox` then
+asks the harder question of the assembled box -- whether its mounts leave the
+credential readable inside -- so neither a user file nor a hand-composed
+caller can route around it. This one is deliberately the stricter of the two:
+a path a person wrote down may not name the credential even if some later
+mount would go on to cover it.
 
 Git-awareness is NOT applied here. For interactive sessions the perimeter
 model treats the whole root as the session's, and hook-pinning user repos
@@ -273,7 +276,8 @@ def _load(
         src, backend, cred = exposure
         raise ValueError(
             f"{path}: {src} would expose the {backend.name} backend's"
-            f" credential at {cred} -- a user bind may not contain it"
+            f" credential at {cred} -- a user bind may not name it, nor"
+            " anything containing it or inside it"
         )
     return UserSpec(binds, tuple(dirs))
 

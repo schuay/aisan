@@ -575,6 +575,41 @@ def test_binding_one_file_inside_a_credential_store_is_refused(tmp_path, monkeyp
         box.wrapper()
 
 
+def test_masking_follows_the_destination_not_the_source(tmp_path):
+    """Why exposure is tracked as box-side paths rather than host ones.
+
+    A bind-over publishes a host file at a destination whose name has nothing
+    to do with the source, and a later mount over that destination shadows it:
+    bwrap 0.11.2, `--ro-bind <token> <d>/t --ro-bind <d> <d>`, reads the empty
+    host file rather than the token. Tracked at the source, that box would be
+    refused for a credential it cannot read; tracked at the destination, the
+    mask is seen and the same list without it is still refused.
+    """
+    store = tmp_path / "store"
+    store.mkdir()
+    token = store / "token"
+    token.write_text("t\n")
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "t").touch()
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    b = _FakeBackend()
+    b.credentials = (token,)
+    published = BindOver(token, d / "t")
+
+    box = Box(_spec(wt, egress=(b,), binds=(published,)), box_id=str(tmp_path / "j"))
+    with box.staged(), pytest.raises(ValueError, match="would expose the fake backend"):
+        box.wrapper()
+
+    masked = Box(
+        _spec(wt, egress=(b,), binds=(published, Bind(d, RO))),
+        box_id=str(tmp_path / "j"),
+    )
+    with masked.staged():
+        masked.wrapper()
+
+
 def test_a_root_beside_a_credential_is_allowed(tmp_path):
     b = _FakeBackend()
     b.credentials = (tmp_path / "credentials" / "key.json",)
