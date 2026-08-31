@@ -238,28 +238,41 @@ def _bindable(p: Path) -> bool:
     return True
 
 
-# The ro roots _SYSTEM_ARGS already binds (/usr, /etc). An RO bind that resolves
-# to one of these is already mounted (and mounted early, in the safe order), so
-# emitting it again is pure waste -- and, when it lands after a tmpfs it covers
-# (the motivating bug: a launcher-resolved interpreter root of /usr re-emitted after
-# the $HOME tmpfs), a leak. Parsed from _SYSTEM_ARGS so it cannot drift.
-_SYSTEM_RO_ROOTS = frozenset(
-    Path(_SYSTEM_ARGS[i + 2])
+# The ro binds _SYSTEM_ARGS already makes (/usr, /etc), as (source, destination).
+# Parsed rather than written out a second time so the two cannot drift: one of
+# the readers below decides what to drop and the other decides what a box can
+# read, and a stale copy of this list would get both wrong.
+_SYSTEM_RO_BINDS = tuple(
+    (Path(_SYSTEM_ARGS[i + 1]), Path(_SYSTEM_ARGS[i + 2]))
     for i in range(len(_SYSTEM_ARGS) - 2)
     if _SYSTEM_ARGS[i] == "--ro-bind"
 )
+
+
+def _system_ro_roots() -> frozenset[Path]:
+    """The paths an RO bind need not re-emit, because the box already has them
+    mounted there, early and in the safe order. Re-emitting one is pure waste --
+    and, when it lands after a tmpfs it covers (the motivating bug: a
+    launcher-resolved interpreter root of /usr re-emitted after the $HOME
+    tmpfs), a leak.
+
+    Identity binds only. The claim being made is "a bind of this SOURCE at this
+    same path is already in effect", which a system bind of one path at another
+    would not support -- it would leave the source unmounted while the name
+    looked taken.
+    """
+    return frozenset(dst for src, dst in _SYSTEM_RO_BINDS if src == dst)
 
 
 def _system_mounts() -> list[Mount]:
     """The fixed system surface as mounts, for checks that must reason about
     what the box gets rather than only about what the caller asked for.
 
-    Read from `_SYSTEM_RO_ROOTS` (and so from `_SYSTEM_ARGS`) at call time, for
-    the same reason that set is parsed rather than written out: two spellings of
-    the system surface drift, and a credential check reading the stale one would
-    pass a box that mounts the credential.
+    ALL of it, identity or not, and in the order bwrap applies it -- ahead of
+    everything a profile asks for. A check that skipped an entry here would be
+    a check reading a smaller box than the one that runs.
     """
-    return [Mount("ro", p, p) for p in sorted(_SYSTEM_RO_ROOTS)]
+    return [Mount("ro", dst, src) for src, dst in _SYSTEM_RO_BINDS]
 
 
 def _resolved(p: Path) -> Path:
@@ -449,7 +462,7 @@ class Sandbox:
                 elif not spec.path.exists():
                     raise FileNotFoundError(f"bind source missing: {spec.path}")
                 if spec.mode is RO:
-                    if spec.path.resolve() in _SYSTEM_RO_ROOTS:
+                    if spec.path.resolve() in _system_ro_roots():
                         continue
                     if any(_strict_ancestor(spec.path, t) for t in tmpfs_mounts):
                         early.append(spec)

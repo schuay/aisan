@@ -493,7 +493,7 @@ def test_binding_a_system_root_that_holds_home_is_not_an_exposure(
     Python is exactly it (see `launch.interpreter_roots`).
     """
     system_root, home, worktree = _home_under_a_system_root(tmp_path)
-    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_ROOTS", frozenset({system_root}))
+    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_BINDS", ((system_root, system_root),))
     b = _FakeBackend()
     b.credentials = (home / ".config" / "chrome_infra",)
     spec = _spec(
@@ -521,7 +521,7 @@ def test_a_credential_reachable_through_the_system_surface_is_refused(
     the spec into one about the box.
     """
     system_root, home, worktree = _home_under_a_system_root(tmp_path)
-    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_ROOTS", frozenset({system_root}))
+    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_BINDS", ((system_root, system_root),))
     b = _FakeBackend()
     b.credentials = (home / ".config" / "chrome_infra",)
     box = Box(_spec(worktree, egress=(b,)), box_id=str(tmp_path / "j"))
@@ -539,7 +539,7 @@ def test_a_home_tmpfs_does_not_excuse_a_spec_bind_of_the_credential(
     containment rule gave, kept for the case it was right about.
     """
     system_root, home, worktree = _home_under_a_system_root(tmp_path)
-    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_ROOTS", frozenset({system_root}))
+    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_BINDS", ((system_root, system_root),))
     cred = home / ".config" / "chrome_infra"
     b = _FakeBackend()
     b.credentials = (cred,)
@@ -561,7 +561,7 @@ def test_binding_one_file_inside_a_credential_store_is_refused(tmp_path, monkeyp
     credential" answers no here.
     """
     system_root, home, worktree = _home_under_a_system_root(tmp_path)
-    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_ROOTS", frozenset({system_root}))
+    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_BINDS", ((system_root, system_root),))
     store = home / ".config" / "chrome_infra"
     token = store / "luci_context"
     token.write_text("{}\n")
@@ -571,6 +571,31 @@ def test_binding_one_file_inside_a_credential_store_is_refused(tmp_path, monkeyp
         worktree, egress=(b,), binds=(Bind(token, RO),), tmpfs=((str(home), 1 << 20),)
     )
     box = Box(spec, box_id=str(tmp_path / "j"))
+    with box.staged(), pytest.raises(ValueError, match="would expose the fake backend"):
+        box.wrapper()
+
+
+def test_the_check_models_the_system_surface_by_source_not_by_name(
+    tmp_path, monkeypatch
+):
+    """A system bind of one path at another still publishes its source.
+
+    Every entry in `_SYSTEM_ARGS` is an identity bind today, so nothing
+    currently distinguishes reading that list as (source, destination) pairs
+    from reading it as a set of names. Pinned anyway: the set reading is the
+    one that silently stops seeing a system bind the day one is added, and a
+    credential check that stops seeing a mount reads a smaller box than the one
+    that runs.
+    """
+    host = tmp_path / "hostsys"
+    (host / "creds").mkdir(parents=True)
+    box_side = tmp_path / "boxsys"
+    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_BINDS", ((host, box_side),))
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    b = _FakeBackend()
+    b.credentials = (host / "creds" / "k.json",)
+    box = Box(_spec(wt, egress=(b,)), box_id=str(tmp_path / "j"))
     with box.staged(), pytest.raises(ValueError, match="would expose the fake backend"):
         box.wrapper()
 
