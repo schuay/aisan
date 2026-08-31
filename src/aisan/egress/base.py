@@ -105,11 +105,11 @@ class Backend(abc.ABC):
     #: The in-box loopback port. Fixed per backend; see the module docstring.
     port: int
     #: Filesystem locations holding this backend's credential. The Box refuses
-    #: a spec bind whose source contains one of them, because the
-    #: credential-absence claim is subtraction -- a bind naming the credential
-    #: (or any ancestor of it) undoes that from inside the spec. Empty, the
-    #: default, for a backend whose credential never touches disk: one minted
-    #: in memory, or none at all.
+    #: a box whose finished mount list leaves one of them readable inside
+    #: (`sandbox.Sandbox.exposed_credential`), because the credential-absence
+    #: claim is subtraction and any mount publishing the file undoes it. Empty,
+    #: the default, for a backend whose credential never touches disk: one
+    #: minted in memory, or none at all.
     #:
     #: Note the file is the HOST's and may hold more than this route needs --
     #: opencode's `auth.json` carries every provider's key -- so exposing it
@@ -233,11 +233,18 @@ def credential_exposure(
     target -- the same rule `_strict_ancestor` applies in the sandbox, for the
     same reason.
 
-    A predicate rather than a check that raises, so each caller words its own
-    refusal in its own terms: the Box names the spec and the box id, the user
-    bind loader names the file and the key the path came from. What must NOT
-    be duplicated is the decision, and a predicate makes the decision the one
-    thing both callers share.
+    A rule about a bind LIST, and so about a user bind file, which is the one
+    caller left: a path a person wrote into a --binds file may not name a
+    credential, whether or not the finished box would go on to mask it. Whether
+    the BOX can read the file is a different question with a different answer,
+    and it is `sandbox.Sandbox.exposed_credential` that decides it, over the
+    resolved mounts. Deliberately the stricter of the two here: a mount that
+    survives only because something later covers it is not what anyone means to
+    write down.
+
+    A predicate rather than a check that raises, so the caller words its own
+    refusal in its own terms -- the loader names the file and the key the path
+    came from.
 
     `Bind.path`, `BindOver.src` and `Overlay.path` are the sources; a `Seal`
     has none (it mounts nothing FROM the host, which is its point).

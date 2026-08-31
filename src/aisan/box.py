@@ -315,32 +315,6 @@ class Box:
         one seal's remount before the other's holes are punched. There is exactly
         one resolve() call per box and it is inside the Sandbox below.
         """
-        # The credential-absence invariant, over the SPEC's own binds: every
-        # other source in the list below is library-authored (launcher binds,
-        # the runtime dir, backend bind-overs), but a spec is caller input --
-        # and the one thing a spec must not be able to state is "and also mount
-        # the credential". Same class of rule as egress-requires-unshare_net:
-        # a library exporting an unsafe combination hands a caller an unsafe
-        # box, and one that refuses to build it cannot. Here rather than in
-        # BoxSpec.__post_init__ because the backends own the paths.
-        from .egress.base import credential_exposure
-
-        # `root` is also a host bind, even though Sandbox models it in its own
-        # field rather than in `binds`. Audit it through the same predicate so
-        # choosing $HOME (or another credential-containing ancestor) as the
-        # writable root cannot bypass the guard.
-        exposure = credential_exposure(
-            (Bind(self.spec.root, RW), *self.spec.binds), self.spec.egress
-        )
-        if exposure is not None:
-            src, backend, cred = exposure
-            raise ValueError(
-                f"box {self.box_id}: root or spec bind {src} would expose the"
-                f" {backend.name} backend's credential at {cred} -- the"
-                " credential stays out of the box by subtraction, and a bind"
-                " naming it (or an ancestor of it) undoes that"
-            )
-
         # Imported here, not at module scope: `launch` is executed in the box as
         # `python -m ...aisan.launch`, and runpy warns (and re-executes the
         # module) when the package __init__ has already imported it. __init__
@@ -375,7 +349,7 @@ class Box:
             binds.append(runtime_bind(self.box_id))
             for backend in self.spec.egress:
                 binds += backend.box_binds(self.runtime_dir)
-        return Sandbox(
+        sandbox = Sandbox(
             root=self.spec.root,
             binds=tuple(binds),
             tmpfs=self.spec.tmpfs,
@@ -387,6 +361,30 @@ class Box:
             use_cgroup=self.spec.limits.use_cgroup,
             unshare_net=self.spec.unshare_net,
         )
+
+        # The credential-absence invariant, at the same choke point as the
+        # mount-order leak check and asked the same way: of the finished mount
+        # list rather than of the spec that produced it. A spec is caller input
+        # and the one thing it must not be able to state is "and also mount the
+        # credential" -- but a spec is not the only way in, because the fixed
+        # system surface is mounted whether or not any spec names it, and on a
+        # host whose home sits under /usr that surface is the credential's own
+        # ancestor. Both halves are the same question about the box, so both are
+        # decided by `exposed_credential`. Here rather than in
+        # BoxSpec.__post_init__ because the backends own the paths, and after the
+        # composition above because the answer depends on the whole list, root
+        # and library-authored binds included.
+        for backend in self.spec.egress:
+            hit = sandbox.exposed_credential(backend.credentials)
+            if hit is not None:
+                src, cred = hit
+                raise ValueError(
+                    f"box {self.box_id}: mount {src} would expose the"
+                    f" {backend.name} backend's credential at {cred} -- the"
+                    " credential stays out of the box by subtraction, and this"
+                    " mount undoes that"
+                )
+        return sandbox
 
     def mounts(self) -> list[Mount]:
         """The resolved mount list, in the order bwrap will apply it."""

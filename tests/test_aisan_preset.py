@@ -607,8 +607,8 @@ def test_external_symlink_targets_confined_to_the_main_checkout(tmp_path, caplog
     # H4: the worktree is the box's rw root, so a symlink the agent plants there
     # points wherever it likes. A dep link points into the MAIN checkout (that
     # is the only shape v8-utils creates); anything else -- ~/.ssh, / -- is
-    # dropped with a warning rather than bound RO into an egress-less box that
-    # credential_exposure never inspects.
+    # dropped with a warning rather than bound RO into an egress-less box whose
+    # credential guard has no credential to look for.
     import logging
 
     from aisan.gitbinds import external_symlink_targets

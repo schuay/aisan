@@ -205,7 +205,7 @@ def test_no_launcher_bind_may_contain_a_backend_credential_store(tmp_path, monke
     """Structural, over every KNOWN backend credential rather than one box's
     egress: a root that passes the venv proof but contains a credential store
     is still refused, and the refusal names the file. The per-box
-    `credential_exposure` check cannot catch this -- the store belongs to a
+    `Sandbox.exposed_credential` check cannot catch this -- the store belongs to a
     backend the box does not carry."""
     home = tmp_path / "home"
     shim_dir = home / ".local" / "bin"

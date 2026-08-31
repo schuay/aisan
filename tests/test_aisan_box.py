@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from aisan import Box, PreflightError
+from aisan import sandbox as sandbox_mod
 from aisan.egress.base import Backend, BackendActivation
 from aisan.runtime import (
     CLIENT_ENV_NAME,
@@ -438,7 +439,9 @@ def test_a_spec_bind_containing_a_credential_is_refused(tmp_path):
     wt.mkdir()
     spec = _spec(wt, egress=(b,), binds=(Bind(creds_dir, RO),))
     box = Box(spec, box_id=str(tmp_path / "j"))
-    with pytest.raises(ValueError, match="would expose the fake backend"):
+    # Staged, because the rule is now decided over the RESOLVED mounts and
+    # resolution needs the backend's bind-over source on disk.
+    with box.staged(), pytest.raises(ValueError, match="would expose the fake backend"):
         box.wrapper()
 
 
@@ -450,7 +453,125 @@ def test_a_root_containing_a_credential_is_refused(tmp_path):
     root = tmp_path / "home"
     root.mkdir()
     box = Box(_spec(root, egress=(b,)), box_id=str(tmp_path / "j"))
-    with pytest.raises(ValueError, match="root or spec bind"):
+    with box.staged(), pytest.raises(ValueError, match="would expose the fake backend"):
+        box.wrapper()
+
+
+def _home_under_a_system_root(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A host with $HOME inside a system root, and a credential under it.
+
+    Some enterprise Linux images put home directories under `/usr/local`, which
+    places a credential store at `~/.config/<name>` INSIDE `/usr` -- and
+    `_SYSTEM_ARGS` binds `/usr` ro into every box unconditionally. That single
+    fact is what the tests below pin down, and it is worth building rather than
+    mocking: the layout has now broken this library three times (the RO-ancestor
+    hoisting and the system-root dedup in `sandbox.resolve` are the other two).
+
+    Returns (system root, home, worktree).
+    """
+    system_root = tmp_path / "usr"
+    home = system_root / "local" / "google" / "home" / "u"
+    worktree = home / "src" / "wt"
+    (home / ".config" / "chrome_infra").mkdir(parents=True)
+    worktree.mkdir(parents=True)
+    return system_root, home, worktree
+
+
+def test_binding_a_system_root_that_holds_home_is_not_an_exposure(
+    tmp_path, monkeypatch
+):
+    """A bind of `/usr` on a host whose home is under it must build.
+
+    It reads like an exposure and is not one: the box already has `/usr` ro from
+    the fixed system surface, so `resolve()` drops the duplicate and the bind
+    compiles to NO mount -- while the tmpfs over $HOME, mounted after that
+    surface, is what actually keeps the credential out. The old rule asked
+    whether a bind's source contained the credential, answered yes, and refused
+    a box that mounts nothing extra; this is the prod failure that produced.
+
+    `/usr` gets into a spec honestly: an interpreter root resolved for a system
+    Python is exactly it (see `launch.interpreter_roots`).
+    """
+    system_root, home, worktree = _home_under_a_system_root(tmp_path)
+    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_ROOTS", frozenset({system_root}))
+    b = _FakeBackend()
+    b.credentials = (home / ".config" / "chrome_infra",)
+    spec = _spec(
+        worktree,
+        egress=(b,),
+        binds=(Bind(system_root, RO),),
+        tmpfs=((str(home), 1 << 20),),
+    )
+    box = Box(spec, box_id=str(tmp_path / "j"))
+    with box.staged():
+        mounts = box.mounts()
+        box.wrapper()
+    assert not [m for m in mounts if m.dst == system_root]
+
+
+def test_a_credential_reachable_through_the_system_surface_is_refused(
+    tmp_path, monkeypatch
+):
+    """The same layout with the $HOME tmpfs removed, which is a real leak.
+
+    Nothing in the spec names the credential, so a check over bind sources
+    cannot see this -- and on this host the credential is nonetheless readable
+    in the box, through the unconditional `--ro-bind /usr /usr`. Asking the
+    finished mount list instead is what turns the invariant from a claim about
+    the spec into one about the box.
+    """
+    system_root, home, worktree = _home_under_a_system_root(tmp_path)
+    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_ROOTS", frozenset({system_root}))
+    b = _FakeBackend()
+    b.credentials = (home / ".config" / "chrome_infra",)
+    box = Box(_spec(worktree, egress=(b,)), box_id=str(tmp_path / "j"))
+    with box.staged(), pytest.raises(ValueError, match="would expose the fake backend"):
+        box.wrapper()
+
+
+def test_a_home_tmpfs_does_not_excuse_a_spec_bind_of_the_credential(
+    tmp_path, monkeypatch
+):
+    """Masking is not a loophole: spec binds land AFTER the tmpfs.
+
+    The check reads the list in order, so a bind naming the credential is the
+    last word on that path and the box is refused -- the same answer the old
+    containment rule gave, kept for the case it was right about.
+    """
+    system_root, home, worktree = _home_under_a_system_root(tmp_path)
+    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_ROOTS", frozenset({system_root}))
+    cred = home / ".config" / "chrome_infra"
+    b = _FakeBackend()
+    b.credentials = (cred,)
+    spec = _spec(
+        worktree, egress=(b,), binds=(Bind(cred, RO),), tmpfs=((str(home), 1 << 20),)
+    )
+    box = Box(spec, box_id=str(tmp_path / "j"))
+    with box.staged(), pytest.raises(ValueError, match="would expose the fake backend"):
+        box.wrapper()
+
+
+def test_binding_one_file_inside_a_credential_store_is_refused(tmp_path, monkeypatch):
+    """Overlap, not containment one way round.
+
+    A credential is a store, and the bind that hands the box the token file
+    under it names a path the store CONTAINS rather than one containing the
+    store. The box can read the token either way, so the guard has to look both
+    directions -- a rule reading only "does this bind's source hold the
+    credential" answers no here.
+    """
+    system_root, home, worktree = _home_under_a_system_root(tmp_path)
+    monkeypatch.setattr(sandbox_mod, "_SYSTEM_RO_ROOTS", frozenset({system_root}))
+    store = home / ".config" / "chrome_infra"
+    token = store / "luci_context"
+    token.write_text("{}\n")
+    b = _FakeBackend()
+    b.credentials = (store,)
+    spec = _spec(
+        worktree, egress=(b,), binds=(Bind(token, RO),), tmpfs=((str(home), 1 << 20),)
+    )
+    box = Box(spec, box_id=str(tmp_path / "j"))
+    with box.staged(), pytest.raises(ValueError, match="would expose the fake backend"):
         box.wrapper()
 
 
@@ -465,14 +586,15 @@ def test_a_root_beside_a_credential_is_allowed(tmp_path):
         box.wrapper()
 
 
-async def test_backend_binds_and_launcher_binds_are_exempt_from_the_guard(tmp_path):
-    # The guard is over the SPEC's binds only. The runtime dir, aisan's
-    # launcher binds and a backend's own bind-overs are library-authored --
-    # checking them would be re-auditing code against its own output, and the
-    # launcher binds (the interpreter under ~/.local) routinely sit BESIDE
-    # credentials without containing one. Asserted by a full bracket that
-    # does not raise while the backend declares a credential that no spec
-    # bind names.
+async def test_backend_binds_and_launcher_binds_do_not_trip_the_guard(tmp_path):
+    # The guard is over the whole finished mount list, library-authored entries
+    # included -- the runtime dir, aisan's launcher binds, a backend's own
+    # bind-overs -- because what it decides is whether the BOX can read the
+    # file, and the box cannot tell who wrote the mount. They pass because none
+    # of them publishes a credential: the launcher binds (the interpreter under
+    # ~/.local) routinely sit BESIDE one without containing it. Asserted by a
+    # full bracket that does not raise while the backend declares a credential
+    # that nothing mounts.
     b = _FakeBackend()
     b.credentials = (Path("/definitely/not/mounted/anywhere"),)
     wt = tmp_path / "wt"

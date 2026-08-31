@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import enum
 import shutil
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -249,6 +250,77 @@ _SYSTEM_RO_ROOTS = frozenset(
 )
 
 
+def _system_mounts() -> list[Mount]:
+    """The fixed system surface as mounts, for checks that must reason about
+    what the box gets rather than only about what the caller asked for.
+
+    Read from `_SYSTEM_RO_ROOTS` (and so from `_SYSTEM_ARGS`) at call time, for
+    the same reason that set is parsed rather than written out: two spellings of
+    the system surface drift, and a credential check reading the stale one would
+    pass a box that mounts the credential.
+    """
+    return [Mount("ro", p, p) for p in sorted(_SYSTEM_RO_ROOTS)]
+
+
+def _resolved(p: Path) -> Path:
+    """`p` canonicalised, or `p` itself when the host cannot say. Comparisons
+    here are between real locations: a symlinked home and its target are one
+    directory, and treating them as two is how a check misses."""
+    try:
+        return p.resolve()
+    except OSError:
+        return p
+
+
+def _reachable_through(mounts: list[Mount], path: Path) -> Path | None:
+    """The source of the mount that leaves `path` readable in the box after
+    `mounts` have been applied in order, or None.
+
+    Reachability, not containment, and the difference is the whole point. A
+    mount whose SOURCE overlaps the path publishes it, at the mount's
+    destination. Anything landing over that destination afterwards -- a tmpfs, a
+    seal, a bind from somewhere else -- takes it away again. So the answer is a
+    fact about the finished box, not about any one entry in the list, and it has
+    to be computed the way bwrap computes it: in order, later winning.
+
+    Tracked as box-side paths rather than a boolean because one host path can be
+    published at several destinations (a bind-over mounts a source somewhere its
+    own name does not appear), and a tmpfs over one of them says nothing about
+    the others.
+
+    Overlap in EITHER direction. A mount above the credential publishes it
+    whole; a mount of one file INSIDE a credential store publishes that file,
+    which for a store whose point is the token it holds is the same answer.
+
+    Sources are resolved and destinations are not, because they are facts about
+    two different filesystems. A source is a host path, where a symlinked home
+    and its target are one directory. A destination is a location in the box,
+    which bwrap creates as given -- and if the destination IS a symlink there,
+    bwrap refuses the mount outright ("Can't mount on symlink destination", 0.11.2),
+    so there is no case where following one host-side describes the box. Resolving
+    them would let a symlink invent a mask that the box does not have, and a mask
+    that is not there is a credential this returns None for.
+    """
+    target = _resolved(path)
+    visible: dict[Path, Path] = {}
+    for m in mounts:
+        if not m.covers:
+            continue
+        for shadowed in [p for p in visible if p.is_relative_to(m.dst)]:
+            del visible[shadowed]
+        if m.src is None:
+            continue
+        src = _resolved(m.src)
+        if target.is_relative_to(src):
+            visible[m.dst / target.relative_to(src)] = m.src
+        elif src.is_relative_to(target):
+            visible[m.dst] = m.src
+    # The LAST source to publish a given box path, because re-publishing the
+    # same path overwrites the value while keeping its position: what the
+    # operator has to remove is the mount that won, not the one it covered.
+    return next(iter(visible.values()), None)
+
+
 def _strict_ancestor(a: Path, b: Path) -> bool:
     """Is `a` a strict ancestor of `b` (a covers b, a != b)? Both resolved, so a
     symlinked home still compares against its real target."""
@@ -404,6 +476,44 @@ class Sandbox:
                         raise FileNotFoundError(f"bind-over source missing: {src}")
                     emit(Mount("ro", dst, src))
         return [*mounts, *seal_ro]
+
+    def exposed_credential(
+        self, credentials: Iterable[Path]
+    ) -> tuple[Path, Path] | None:
+        """The first (mount source, credential) this profile leaves readable in
+        the box, or None. The credential-absence invariant, asked of the box.
+
+        Over the resolved mounts, with the fixed system surface in front of them,
+        for the same reason `_assert_no_leak` runs over that list: it is what the
+        box gets. The question a caller needs answered is "can the payload read
+        this file", and no reading of the bind list alone answers it -- in either
+        direction.
+
+        Not, in particular, "does a bind name a path containing the credential".
+        That proxy fails on a host whose home lives UNDER a system root. Some
+        enterprise Linux images place home directories inside `/usr/local`, and
+        there a credential store at `~/.config/<name>` is a path inside `/usr`:
+
+        - every box already has the credential's directory in reach through the
+          unconditional `--ro-bind /usr /usr`, which no bind list mentions and
+          the proxy therefore never audits. What actually keeps the credential
+          out is the tmpfs over $HOME landing on top of it, and that is a
+          property of the mount ORDER;
+        - meanwhile a spec that names `/usr` (an interpreter root under it, say
+          -- see launch.interpreter_roots) reads as an exposure while compiling
+          to no mount at all, because resolve() drops an RO bind of a system root
+          as already in effect. The same layout is why that dedup and the
+          RO-ancestor hoisting above exist; this is the third symptom of it.
+
+        So a bind naming `/usr` here is ordinary rather than alarming, and the
+        thing worth refusing is a box that can actually read the file.
+        """
+        mounts = [*_system_mounts(), *self.resolve()]
+        for cred in credentials:
+            source = _reachable_through(mounts, cred)
+            if source is not None:
+                return source, cred
+        return None
 
     def wrapper(self) -> list[str]:
         """The argv prefix: [systemd-run ...] bwrap ... -- ready to have the
