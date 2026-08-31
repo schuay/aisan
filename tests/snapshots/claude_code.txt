@@ -64,7 +64,7 @@
   -q
   --collect
   -p
-  MemoryMax=8G
+  MemoryMax=32G
   -p
   TasksMax=4096
   --

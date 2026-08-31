@@ -139,7 +139,7 @@ def claude_code(
     cgroup_slice: str = "",
     tmp_size_mb: int = 2048,
     home_size_mb: int = 1024,
-    memory_max: str = "8G",
+    memory_max: str = "32G",
     cpu_quota: str = "",
     tasks_max: int = 4096,
 ) -> BoxSpec:
