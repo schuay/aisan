@@ -3,7 +3,7 @@
 
 """The V8 job preset and the git bind policy under it.
 
-`v8_job` is a pure function from arguments to a `BoxSpec`, so most of this reads
+`depot_tools_job` is a pure function from arguments to a `BoxSpec`, so most of this reads
 the spec directly. Where the claim is about what the box ENDS UP with (a pin that
 wins over the rw mount under it, a tmpfs that is not shadowed) the question is
 about mount ORDER, and the only honest answer comes from the resolved list --
@@ -25,15 +25,15 @@ from aisan import Box
 from aisan.gitbinds import external_symlink_targets, git_binds, git_host_files
 from aisan.presets.claude_code import claude_code
 from aisan.presets.codex import codex
+from aisan.presets.depot_tools_job import depot_tools_grant, depot_tools_job
 from aisan.presets.opencode import opencode
-from aisan.presets.v8_job import depot_tools_grant, v8_job
 from aisan.sandbox import RO, RW, Bind, Overlay, Seal
 from aisan.spec import Grant
 
-# Not `import aisan.presets.v8_job as ...`: the package re-exports the v8_job
+# Not `import aisan.presets.depot_tools_job as ...`: the package re-exports the depot_tools_job
 # FUNCTION under that name, so attribute-based module import hands back the
 # function. import_module reads sys.modules and gets the module.
-v8_job_module = importlib.import_module("aisan.presets.v8_job")
+depot_tools_job_module = importlib.import_module("aisan.presets.depot_tools_job")
 
 
 def _fake_checkout(tmp_path) -> tuple[Path, Path]:
@@ -154,7 +154,7 @@ def test_git_binds_is_the_policy_read_top_to_bottom(tmp_path):
     assert absent in {e.path for e in git_host_files(wt, pin_packs=True)}
     # Inside a staged box the declared sources exist and every non-optional bind
     # resolves; outside it, the host is left exactly as it was.
-    box = Box(v8_job(wt, depot_tools=None), box_id="t")
+    box = Box(depot_tools_job(wt, depot_tools=None), box_id="t")
     with box.staged():
         assert absent.exists()
         box.mounts()  # resolves without raising
@@ -234,7 +234,7 @@ def test_git_binds_plain_repo_is_noop(tmp_path):
     assert git_binds(tmp_path) == []
 
 
-def test_v8_job_profile(tmp_path):
+def test_depot_tools_job_profile(tmp_path):
     main, wt = _fake_checkout(tmp_path)
     # A realistic layout: the control dir is the consumer's own bind, appended
     # to the preset's result rather than passed into it -- the preset knows
@@ -245,7 +245,7 @@ def test_v8_job_profile(tmp_path):
     # optional bind whose source does not exist is dropped, so a fixture that
     # skips it would leave every claim about it vacuously unmounted.
     (tmp_path / "depot_tools").mkdir()
-    spec = v8_job(
+    spec = depot_tools_job(
         wt,
         depot_tools=tmp_path / "depot_tools",
         memory_max="8G",
@@ -277,7 +277,7 @@ def test_v8_job_profile(tmp_path):
     assert spec.limits.memory_max == "8G"
 
 
-def test_v8_job_binds_no_credential_at_all(tmp_path):
+def test_depot_tools_job_binds_no_credential_at_all(tmp_path):
     """The box holds nothing a credential could be read out of, in any mode.
 
     This guards the trap the legacy path used to be: it bound the chrome_infra
@@ -288,7 +288,7 @@ def test_v8_job_binds_no_credential_at_all(tmp_path):
     behaviour change.
     """
     _, wt = _fake_checkout(tmp_path)
-    spec = v8_job(wt, depot_tools=tmp_path / "depot_tools")
+    spec = depot_tools_job(wt, depot_tools=tmp_path / "depot_tools")
     env = dict(spec.env)
     # No credential-bearing env of any kind: no credshelper for siso, reclient,
     # or bb, and nothing pointing luci-auth at an in-box login.
@@ -301,19 +301,19 @@ def test_v8_job_binds_no_credential_at_all(tmp_path):
     assert all(tmp_path in p.parents for p in ro), ro
 
 
-def test_v8_job_skips_presubmit_network(tmp_path):
+def test_depot_tools_job_skips_presubmit_network(tmp_path):
     # `git cl presubmit` reaches Gerrit over authenticated /a/ endpoints for the
     # CL description and OWNERS. The box has no SSO cookie by design, so those
     # fail on git-remote-sso ("SSO login required") -- which reads as a
     # broken tree and burns revise rounds. depot_tools' own switch drops exactly
     # the network half and keeps the local checks.
     _, wt = _fake_checkout(tmp_path)
-    assert dict(v8_job(wt).env)["PRESUBMIT_SKIP_NETWORK"] == "1"
+    assert dict(depot_tools_job(wt).env)["PRESUBMIT_SKIP_NETWORK"] == "1"
 
 
-def test_v8_job_extra_path_lands_between_depot_tools_and_usr(tmp_path):
+def test_depot_tools_job_extra_path_lands_between_depot_tools_and_usr(tmp_path):
     _main, wt = _fake_checkout(tmp_path)
-    spec = v8_job(
+    spec = depot_tools_job(
         wt,
         extra_path=("/venv/bin", "/home/u/.local/bin"),
         depot_tools=tmp_path / "depot_tools",
@@ -341,7 +341,7 @@ async def test_a_job_cannot_plant_a_worktree_config_end_to_end(tmp_path):
     main, wt = _fake_checkout(tmp_path)
     # cgroup off: a transient systemd scope is not available in every test env,
     # and what is under test is the mount policy.
-    spec = v8_job(wt, depot_tools=None)
+    spec = depot_tools_job(wt, depot_tools=None)
     spec = dataclasses.replace(
         spec, limits=dataclasses.replace(spec.limits, use_cgroup=False)
     )
@@ -386,17 +386,17 @@ def test_the_vpython_cache_is_an_overlay_not_a_bind(tmp_path, monkeypatch):
     other box -- and the host -- then executes. Only the overlay is both warm and
     contained, so the FIELD is asserted, not merely the path.
     """
-    # The MODULE, not the function of the same name: `presets.v8_job` is the
+    # The MODULE, not the function of the same name: `presets.depot_tools_job` is the
     # function (the package re-exports it), so reaching the module it lives in
     # takes an explicit import.
-    preset = importlib.import_module("aisan.presets.v8_job")
+    preset = importlib.import_module("aisan.presets.depot_tools_job")
 
     cache = tmp_path / "vpython-root.999"
     cache.mkdir()
     monkeypatch.setattr(preset, "_vpython_cache", lambda: cache)
     _, wt = _fake_checkout(tmp_path)
 
-    spec = v8_job(wt)
+    spec = depot_tools_job(wt)
     # The OP is asserted, not merely the path: rw and ro are both present in the
     # same list now, so "the cache is bound" says nothing -- three of the four
     # ways to bind it are bugs, and two of them shipped.
@@ -408,11 +408,11 @@ def test_a_host_without_vpython_still_builds_a_profile(tmp_path, monkeypatch):
     # A missing cache is skipped rather than raising: the box then behaves as it
     # did before the overlay existed, which is the honest degradation for a host
     # that has never run vpython.
-    preset = importlib.import_module("aisan.presets.v8_job")
+    preset = importlib.import_module("aisan.presets.depot_tools_job")
 
     monkeypatch.setattr(preset, "_vpython_cache", lambda: tmp_path / "nope")
     _, wt = _fake_checkout(tmp_path)
-    assert not [b for b in v8_job(wt).binds if isinstance(b, Overlay)]
+    assert not [b for b in depot_tools_job(wt).binds if isinstance(b, Overlay)]
 
 
 # --- the shared .git of a linked worktree ------------------------------------
@@ -506,7 +506,7 @@ def test_a_plain_checkout_gets_no_git_policy_at_all(tmp_path):
         lambda wt, st: claude_code(wt, state=st, unshare_net=True),
         lambda wt, st: codex(wt, state=st, unshare_net=True),
         lambda wt, st: opencode(wt, state=st, unshare_net=True),
-        lambda wt, st: v8_job(wt, unshare_net=True),
+        lambda wt, st: depot_tools_job(wt, unshare_net=True),
     ],
 )
 def test_every_preset_disables_git_gc_in_the_box(tmp_path, preset):
@@ -583,7 +583,7 @@ def test_a_planted_symlink_guard_source_is_not_followed(tmp_path):
     planted = main / ".git" / "config.worktree"
     planted.symlink_to(target)  # dangling: touch() would create `target`
 
-    spec = v8_job(wt, depot_tools=None, unshare_net=True)
+    spec = depot_tools_job(wt, depot_tools=None, unshare_net=True)
     spec = dataclasses.replace(
         spec, limits=dataclasses.replace(spec.limits, use_cgroup=False)
     )
@@ -642,7 +642,7 @@ def test_external_symlink_targets_confined_to_the_main_checkout(tmp_path, caplog
 def test_the_depot_tools_grant_is_the_tree_its_cache_its_path_and_its_env(
     tmp_path, monkeypatch
 ):
-    """One definition of what depot_tools needs, so `v8_job` and `--grant` cannot
+    """One definition of what depot_tools needs, so `depot_tools_job` and `--grant` cannot
     disagree about it -- and so an operator composing the mounts by hand cannot
     get the environment wrong, which is the half that fails in depot_tools'
     vocabulary rather than the box's."""
@@ -650,7 +650,7 @@ def test_the_depot_tools_grant_is_the_tree_its_cache_its_path_and_its_env(
     depot_tools.mkdir()
     cache = tmp_path / "vpython-root.1000"
     cache.mkdir()
-    monkeypatch.setattr(v8_job_module, "_vpython_cache", lambda: cache)
+    monkeypatch.setattr(depot_tools_job_module, "_vpython_cache", lambda: cache)
 
     grant = depot_tools_grant(depot_tools)
 
@@ -665,7 +665,7 @@ def test_a_host_without_depot_tools_has_an_empty_grant(monkeypatch):
     """Empty rather than env-only: the variables earn their place because the
     tree is mounted, and an empty grant is what lets the launcher say the tree
     was not found instead of building a box with two inert variables."""
-    monkeypatch.setattr(v8_job_module.shutil, "which", lambda _: None)
+    monkeypatch.setattr(depot_tools_job_module.shutil, "which", lambda _: None)
 
     grant = depot_tools_grant()
 
@@ -673,7 +673,7 @@ def test_a_host_without_depot_tools_has_an_empty_grant(monkeypatch):
     assert grant.binds == () and grant.path == () and grant.env == ()
 
 
-def test_v8_job_still_carries_the_depot_tools_environment(tmp_path):
+def test_depot_tools_job_still_carries_the_depot_tools_environment(tmp_path):
     """The preset consumes the same grant the flag does. Named here as well as
     in the snapshot, because the snapshot says what the environment IS and this
     says which two variables must not go missing from it."""
@@ -682,7 +682,7 @@ def test_v8_job_still_carries_the_depot_tools_environment(tmp_path):
     depot_tools = tmp_path / "depot_tools"
     depot_tools.mkdir()
 
-    env = dict(v8_job(worktree, depot_tools=depot_tools).env)
+    env = dict(depot_tools_job(worktree, depot_tools=depot_tools).env)
 
     assert env["DEPOT_TOOLS_UPDATE"] == "0"
     assert env["PRESUBMIT_SKIP_NETWORK"] == "1"

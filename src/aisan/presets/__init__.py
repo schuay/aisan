@@ -24,20 +24,20 @@ from ..egress.base import EgressProfile
 from ..spec import BoxSpec, Grant
 from .claude_code import claude_code, claude_code_default
 from .codex import codex, codex_default
-from .opencode import opencode, opencode_default
-from .v8_job import (
+from .depot_tools_job import (
     depot_tools_grant,
-    v8_job,
-    v8_job_default,
+    depot_tools_job,
+    depot_tools_job_default,
     v8_rbe,
     v8_rbe_shared_net,
 )
+from .opencode import opencode, opencode_default
 
 PRESETS: dict[str, Callable[[Path], BoxSpec]] = {
     "claude_code": claude_code_default,
     "codex": codex_default,
     "opencode": opencode_default,
-    "v8_job": v8_job_default,
+    "depot_tools_job": depot_tools_job_default,
 }
 
 # What `--egress NAME` resolves through. A profile is a function from the box's
@@ -70,10 +70,10 @@ __all__ = [
     "codex",
     "codex_default",
     "depot_tools_grant",
+    "depot_tools_job",
+    "depot_tools_job_default",
     "opencode",
     "opencode_default",
-    "v8_job",
-    "v8_job_default",
     "v8_rbe",
     "v8_rbe_shared_net",
 ]

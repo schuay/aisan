@@ -70,7 +70,7 @@ def external_symlink_targets(
     a dep link: the worktree is the box's rw root, which the agent writes and
     which persists between turns, so `<wt>/x -> ~/.ssh` or `-> /` would
     otherwise hand the box a host path it was never meant to see (and the
-    per-box credential guard does not fire on the egress-less v8_job box). Such a
+    per-box credential guard does not fire on the egress-less depot_tools_job box). Such a
     target is DROPPED with a warning rather than bound.
 
     When `root` is not a linked worktree there is no main checkout to bind into,

@@ -38,7 +38,7 @@ import pytest
 from aisan import Box
 from aisan.explain import explain, normalise
 from aisan.presets import PRESETS
-from aisan.presets.v8_job import v8_job
+from aisan.presets.depot_tools_job import depot_tools_job
 
 SNAPSHOTS = Path(__file__).parent / "snapshots"
 
@@ -97,10 +97,10 @@ def pinned_host(tmp_path, monkeypatch):
     and vanish with the machine -- and the case that matters is the one where
     they are PRESENT, since that is the complete profile.
     """
-    # import_module, not `from ... import v8_job`: the presets package re-exports
+    # import_module, not `from ... import depot_tools_job`: the presets package re-exports
     # the FUNCTION under its module's name, so the plain import binds a callable
     # with no module attributes to patch.
-    preset = importlib.import_module("aisan.presets.v8_job")
+    preset = importlib.import_module("aisan.presets.depot_tools_job")
 
     cache = tmp_path / "vpython-cache" / "vpython-root"
     cache.mkdir(parents=True)
@@ -125,7 +125,7 @@ def _report(
     wt: Path,
     depot: Path,
     spec,
-    preset: str = "v8_job",
+    preset: str = "depot_tools_job",
     extra_paths: tuple[tuple[Path, str], ...] = (),
 ) -> str:
     """The normalised report for `spec`, with this run's own paths named.
@@ -138,7 +138,7 @@ def _report(
 
     `preset` is the name the report leads with. A parameter rather than a
     constant since the registry loop covers more than one: hardcoded, every
-    snapshot claimed to be v8_job, and an audit artifact that misnames its own
+    snapshot claimed to be depot_tools_job, and an audit artifact that misnames its own
     subject is worse than one that omits it.
     """
     box = Box(spec, box_id="snapshot")
@@ -157,17 +157,17 @@ def _report(
     )
 
 
-def test_v8_job_profile_snapshot(tmp_path, pinned_host):
+def test_depot_tools_job_profile_snapshot(tmp_path, pinned_host):
     """The preset as the app runs it: worktree, depot_tools, no egress.
 
-    The registry entry (`v8_job_default`) is deliberately egress-less so it can
+    The registry entry (`depot_tools_job_default`) is deliberately egress-less so it can
     be described on a host with no deployment; this calls the preset directly
     with the arguments the app passes, so the snapshot covers the arguments that
     exercise the complete profile rather than the dry-run defaults.
     """
     wt = _checkout(tmp_path)
-    spec = v8_job(wt, depot_tools=pinned_host, unshare_net=True)
-    _check("v8_job", _report(wt, pinned_host, spec))
+    spec = depot_tools_job(wt, depot_tools=pinned_host, unshare_net=True)
+    _check("depot_tools_job", _report(wt, pinned_host, spec))
 
 
 def test_claude_code_profile_snapshot(tmp_path, pinned_host):

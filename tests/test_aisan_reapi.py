@@ -29,10 +29,10 @@ import pytest
 
 from aisan import Box
 from aisan.egress.reapi import ReapiBackend
-from aisan.presets.v8_job import (
+from aisan.presets.depot_tools_job import (
+    depot_tools_job,
     sisoenv_path,
     sisoenv_paths,
-    v8_job,
     v8_rbe,
     v8_rbe_shared_net,
 )
@@ -68,7 +68,9 @@ def _box(wt: Path, tmp_path: Path) -> Box:
     preset argument because the preset takes the individual caps, not the Limits
     object -- and turning the scope off is not a cap.
     """
-    spec = v8_job(wt, egress=(_backend(wt),), unshare_net=True, depot_tools=None)
+    spec = depot_tools_job(
+        wt, egress=(_backend(wt),), unshare_net=True, depot_tools=None
+    )
     spec = dataclasses.replace(
         spec, limits=dataclasses.replace(spec.limits, use_cgroup=False)
     )

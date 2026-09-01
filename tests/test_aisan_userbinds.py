@@ -164,7 +164,7 @@ def test_the_same_path_in_two_spellings_is_one_bind(tmp_path, monkeypatch):
 def test_order_is_overlays_then_ro_then_rw(tmp_path):
     """One stable order, so the same file always produces the same spec --
     the property that makes a merged profile diffable. Warm caches first,
-    then what the box may read, then what it may write: the order v8_job
+    then what the box may read, then what it may write: the order depot_tools_job
     writes by hand, since a user file has no way to say where a bind goes."""
     f = _spec_file(tmp_path, 'ro = ["/a", "/b"]\nrw = ["/c"]\noverlay = ["/d"]\n')
     binds = load(f, egress=()).binds

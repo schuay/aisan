@@ -1,6 +1,6 @@
 
 == inputs ==
-  preset    v8_job
+  preset    depot_tools_job
   network   own namespace (no route off the machine)
   box_id    snapshot
   HOME(env) <HOME>

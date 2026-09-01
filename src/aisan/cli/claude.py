@@ -14,7 +14,7 @@ so the box's job is to keep the agent out of the rest of the machine, and the
 worktree it was pointed at is the session's to write. On a plain checkout that
 includes `.git`: it sits inside the rw root, and `gitbinds.git_binds` returns
 nothing for it. A LINKED worktree gets that policy in full, the same as the
-unattended `v8_job` profile does: its `.git` is a store shared with the host and
+unattended `depot_tools_job` profile does: its `.git` is a store shared with the host and
 the sibling worktrees, so the files that steer host-side git (hooks, configs,
 object pointers) are pinned ro and the siblings are sealed away. Otherwise a
 planted hook runs the next time host git touches the shared repo, and an in-box

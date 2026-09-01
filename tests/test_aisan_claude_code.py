@@ -59,7 +59,7 @@ def _spec(tmp_path, **kw):
 
     A transient systemd scope is not available in every test env and what is
     under test is the mount policy, so `use_cgroup=False` throughout -- the same
-    reason the v8_job boxed tests do it.
+    reason the depot_tools_job boxed tests do it.
     """
     import dataclasses
 
@@ -143,7 +143,7 @@ def test_the_state_dir_has_no_default(tmp_path):
 
 
 def test_egress_requires_the_network_namespace(tmp_path):
-    """`unshare_net` defaults to True here, unlike v8_job.
+    """`unshare_net` defaults to True here, unlike depot_tools_job.
 
     An agent CLI with a route off the machine has no use for a relay: the box
     would reach the API directly, with whatever the environment gave it, and the

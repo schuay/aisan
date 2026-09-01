@@ -1,26 +1,37 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The V8 job profile: what a sandboxed agent turn on a V8 worktree may touch.
+"""The depot_tools job profile: what a sandboxed agent turn on a source
+workspace of a depot_tools project may touch.
 
-This is the preset the whole app runs on, and the reference for what a preset
-is: it names binds, an environment and limits, and returns a `BoxSpec`. It
-starts nothing, reads no config file, and holds no state -- so a caller whose
-case differs by one mount adjusts the result (`with_binds`) instead of forking
-the function.
+Named for what it actually is. It was `v8_job`, and read as V8-specific, but
+nothing in it is: it derives depot_tools from `which(autoninja)`, binds gclient
+dep-symlink targets and the vpython cache, applies the git binds, and sets
+`PRESUBMIT_SKIP_NETWORK`. Every one of those is true of any depot_tools
+checkout -- Chromium and DevTools included -- and a second preset copied from
+this one would have differed by nothing.
 
-The profile: the worktree rw at its real absolute path (remote-exec resolves
+The genuinely V8-specific pieces in this module are the REMOTE-EXECUTION
+helpers below (`sisoenv_path`, `v8_rbe`, `v8_rbe_shared_net`), which the preset
+does not call. A project whose build is local passes no egress and uses none of
+them.
+
+This is the reference for what a preset is: it names binds, an environment and
+limits, and returns a `BoxSpec`. It starts nothing, reads no config file, and
+holds no state -- so a caller whose case differs by one mount adjusts the result
+(`with_binds`) instead of forking the function.
+
+The profile: the workspace rw at its real absolute path (remote-exec resolves
 inputs by absolute path), the dep symlink TARGETS ro (binding the symlinks alone
 would either break the build or hand the agent the writable main tree), a
-restricted slice of the main checkout's .git so in-worktree git keeps working,
+restricted slice of the main checkout's .git so in-workspace git keeps working,
 depot_tools ro, and whatever the consumer adds.
 
 The box holds no credential of its own. Both egress routes -- the model and the
 remote build -- run through host-side backends that mint from the host's own
 durable credential and attach it to requests the box never sees. What the box
 gets is an endpoint. When the RBE backend is absent the build degrades to the
-offline fallback (autoninja -o), so remote execution is a fast path, not a
-requirement.
+offline fallback, so remote execution is a fast path, not a requirement.
 
 Network is the box's own (`unshare_net`): no route off the machine, and a
 loopback that is not the host's. The backends stay reachable because each listens
@@ -124,7 +135,7 @@ def depot_tools_grant(depot_tools: Path | None = None) -> Grant:
     entry, and the two variables that stop it reaching for a network it has not
     got.
 
-    One definition, used by `v8_job` and by `--grant depot_tools` on the
+    One definition, used by `depot_tools_job` and by `--grant depot_tools` on the
     interactive launchers, because an operator composing this by hand gets the
     mounts right and the environment wrong -- the mounts fail loudly and the
     environment fails as a depot_tools error about a git remote.
@@ -227,7 +238,7 @@ def v8_rbe_shared_net(_root: Path) -> EgressProfile:
     )
 
 
-def v8_job(
+def depot_tools_job(
     worktree: Path,
     *,
     egress: tuple[Backend, ...] = (),
@@ -303,7 +314,7 @@ def v8_job(
     )
 
 
-def v8_job_default(worktree: Path) -> BoxSpec:
+def depot_tools_job_default(worktree: Path) -> BoxSpec:
     """The preset as `explain --dry-run` invokes it: a worktree and nothing else.
 
     Deliberately without egress. A registry entry has to be describable on a
@@ -313,4 +324,4 @@ def v8_job_default(worktree: Path) -> BoxSpec:
     egress half is two extra bind-overs and a socket bind, and `probe` is where
     those get exercised for real.
     """
-    return v8_job(worktree)
+    return depot_tools_job(worktree)

@@ -315,7 +315,7 @@ def test_explaining_a_worktree_does_not_mutate_the_host_git(tmp_path):
     # so a review leaves the host exactly as it found it.
     from aisan import Box
     from aisan.explain import explain
-    from aisan.presets.v8_job import v8_job
+    from aisan.presets.depot_tools_job import depot_tools_job
 
     main = tmp_path / "main"
     wt = tmp_path / "wt"
@@ -336,7 +336,7 @@ def test_explaining_a_worktree_does_not_mutate_the_host_git(tmp_path):
     assert not any(before.values()), "fixture should start without the guard files"
 
     # Building the spec must not mutate: git_binds is pure now.
-    spec = v8_job(wt, depot_tools=None, unshare_net=True)
+    spec = depot_tools_job(wt, depot_tools=None, unshare_net=True)
     assert not any(g.exists() for g in guards), "spec build mutated the host .git"
 
     box = Box(spec, box_id="explain-purity")
@@ -376,7 +376,15 @@ def test_explain_cli_applies_egress_and_user_binds(tmp_path, capsys):
     binds.write_text(f'ro = ["{tool}"]\n')
 
     rc = explain_main(
-        ["v8_job", str(wt), "--egress", "v8-rbe", "--binds", str(binds), "--no-argv"]
+        [
+            "depot_tools_job",
+            str(wt),
+            "--egress",
+            "v8-rbe",
+            "--binds",
+            str(binds),
+            "--no-argv",
+        ]
     )
     out = capsys.readouterr().out
     assert rc == 0
@@ -398,6 +406,8 @@ def test_explain_cli_routes_a_bad_egress_or_binds_to_a_clean_refusal(tmp_path, c
     from aisan.explain import main as explain_main
 
     wt = _linked_worktree(tmp_path)
-    rc = explain_main(["v8_job", str(wt), "--binds", str(tmp_path / "absent.toml")])
+    rc = explain_main(
+        ["depot_tools_job", str(wt), "--binds", str(tmp_path / "absent.toml")]
+    )
     assert rc == 2
     assert "cannot read" in capsys.readouterr().err

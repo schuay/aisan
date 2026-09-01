@@ -19,7 +19,7 @@
 # `update_depot_tools` on every invocation, which is a `git fetch` the box
 # cannot make, and `gclient --version` then exits 255 with "Couldn't fetch main
 # branch". Turning that off is a value rather than a mount, so it lives in the
-# grant (see `aisan.presets.v8_job.depot_tools_grant`) and not here.
+# grant (see `aisan.presets.depot_tools_job.depot_tools_grant`) and not here.
 #
 # This file remains the example of composing your OWN paths, and of what to
 # write when a tree has no grant.

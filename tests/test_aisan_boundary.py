@@ -50,7 +50,7 @@ _DOMAIN_OK = {
     # of pure functions rather than an `if project == "v8"` inside the spec:
     # the knowledge is concentrated where it can be read, replaced, or left
     # behind. This one ships as the worked example.
-    "presets/v8_job.py": "the preset is the designated home for domain knowledge",
+    "presets/depot_tools_job.py": "the preset is the designated home for domain knowledge",
     "presets/__init__.py": "the registry names its presets",
     # A backend knows its own upstream by construction -- the vertex one knows
     # what a Vertex endpoint is, this one knows siso reads a .sisoenv. Neither

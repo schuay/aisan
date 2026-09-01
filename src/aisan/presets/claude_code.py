@@ -215,7 +215,7 @@ def claude_code(
 def claude_code_default(worktree: Path) -> BoxSpec:
     """The preset as `explain --dry-run` invokes it: a worktree and nothing else.
 
-    Egress-less, like `v8_job_default`, and for the same reason -- a registry
+    Egress-less, like `depot_tools_job_default`, and for the same reason -- a registry
     entry has to be describable on a host with no deployment. The state dir
     defaults to one INSIDE the worktree here, which a real caller should not do:
     it puts the agent's session history in the tree the agent is editing. A dry

@@ -32,7 +32,8 @@ from .sandbox import BindSpec, EnsurePath
 # and not a mount, so nothing here enforces it: a spec's `env` is the box's WHOLE
 # environment (--clearenv, then --setenv per entry), which means a default not
 # named in a spec is a default that box does not have. Merged in by whoever
-# builds the spec -- see presets/v8_job.py -- rather than added on the way to the
+# builds the spec -- see presets/depot_tools_job.py -- rather than added on the
+# way to the
 # box, because a profile that states its environment and then silently receives
 # more of it is a profile nobody can read.
 #
