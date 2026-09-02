@@ -203,12 +203,77 @@ def test_seed_state_preserves_unrelated_valid_state(tmp_path):
     assert config["projects"]["/repo"]["hasTrustDialogAccepted"] is True
 
 
+def test_seed_state_lends_the_box_the_hosts_model_menu(tmp_path):
+    """The /model picker's row for a model outside the CLI's compiled-in catalog
+    comes from `additionalModelOptionsCache`, which the CLI fills from a fetch
+    the box cannot make: it goes to the compiled-in api.anthropic.com rather than
+    through ANTHROPIC_BASE_URL, so no proxy allowlist reaches it. Without the
+    host's copy the picker is short those rows while `--model <alias>` still
+    works, which is exactly the reported asymmetry."""
+    import json
+
+    from aisan.cli.claude import seed_state
+
+    state = tmp_path / "state"
+    state.mkdir()
+    host = tmp_path / ".claude.json"
+    options = [
+        {"value": "claude-fable-5", "label": "Fable", "description": "Fable 5"},
+        {
+            "value": "claude-mythos-5",
+            "label": "Mythos",
+            "description": "",
+            "disabled": True,
+        },
+    ]
+    host.write_text(json.dumps({"additionalModelOptionsCache": options}))
+
+    seed_state(state, Path("/repo"), host)
+
+    config = json.loads((state / ".claude.json").read_text())
+    # Verbatim, the disabled entry included: an entitlement the host does not
+    # have must not become one the box appears to.
+    assert config["additionalModelOptionsCache"] == options
+
+
+@pytest.mark.parametrize(
+    "host_state",
+    ["absent", "not json at all", "[1, 2, 3]", '{"additionalModelOptionsCache": "no"}'],
+)
+def test_seed_state_keeps_the_boxs_model_menu_when_the_host_lends_none(
+    tmp_path, host_state
+):
+    """A host that has never run Claude Code, or whose config is unreadable or
+    wrong-shaped, leaves the cached menu alone rather than clearing it: a stale
+    menu is a worse failure than none only if it is wrong, and an emptied one is
+    wrong every time."""
+    import json
+
+    from aisan.cli.claude import seed_state
+
+    state = tmp_path / "state"
+    state.mkdir()
+    kept = [{"value": "claude-fable-5", "label": "Fable", "description": "Fable 5"}]
+    (state / ".claude.json").write_text(
+        json.dumps({"additionalModelOptionsCache": kept})
+    )
+    host = tmp_path / ".claude.json"
+    if host_state != "absent":
+        host.write_text(host_state)
+
+    seed_state(state, Path("/repo"), host)
+
+    config = json.loads((state / ".claude.json").read_text())
+    assert config["additionalModelOptionsCache"] == kept
+
+
 def test_the_seeded_sources_are_the_hosts_own_user_memory():
     """The constants the launchers seed FROM, named once so a rename of either
     host file does not silently turn seeding into a no-op."""
     claude = importlib.import_module("aisan.cli.claude")
     codex = importlib.import_module("aisan.cli.codex")
     assert Path.home() / ".claude" / "CLAUDE.md" == claude.USER_MEMORY
+    assert Path.home() / ".claude.json" == claude.HOST_CONFIG
     assert Path.home() / ".codex" / "AGENTS.md" == codex.USER_MEMORY
 
 

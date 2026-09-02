@@ -71,8 +71,14 @@ from aisan.statedir import read_sealed_text, write_sealed
 
 USER_MEMORY = Path.home() / ".claude" / "CLAUDE.md"
 
+# The host's own Claude Code config. Read for exactly one key -- see
+# `mirror_model_options` -- and never bound into the box: the CLI itself counts
+# this file among the sensitive ones, and it holds the whole of the operator's
+# project history besides.
+HOST_CONFIG = Path.home() / ".claude.json"
 
-def seed_state(state: Path, repo: Path) -> None:
+
+def seed_state(state: Path, repo: Path, host_config: Path = HOST_CONFIG) -> None:
     """Answer the CLI's first-run gates, because one of them cannot be answered.
 
     Onboarding's first step is a connectivity check that fetches
@@ -92,6 +98,10 @@ def seed_state(state: Path, repo: Path) -> None:
     seeding them only saves answering them the first time: the folder-trust
     prompt, "Detected a custom API key" (the placeholder trips it, defaulting to
     No), and the bypassPermissions disclaimer.
+
+    The same file carries the model menu the box cannot fetch for itself, which
+    is not a gate at all -- see `mirror_model_options`; it is merged here because
+    this is the one writer of the seeded config.
 
     The file lives in the box-writable state dir, so its contents are attacker-
     reachable between sessions and this must never propagate a crash: a
@@ -126,7 +136,43 @@ def seed_state(state: Path, repo: Path) -> None:
     _object_at(_object_at(config, "projects"), str(repo))["hasTrustDialogAccepted"] = (
         True
     )
+    mirror_model_options(config, host_config)
     write_sealed(path, json.dumps(config, indent=2))
+
+
+def mirror_model_options(config: dict, source: Path) -> None:
+    """Carry the host's model menu in, because the box cannot fetch its own.
+
+    The /model picker's row for a model outside the CLI's compiled-in catalog --
+    Fable is one -- comes from `additionalModelOptionsCache`, which the CLI fills
+    from `GET https://api.anthropic.com/api/claude_cli/bootstrap`. That URL is
+    compiled in and ANTHROPIC_BASE_URL does not redirect it: measured, with the
+    base URL pointed at a local stub the CLI still dialled api.anthropic.com. So the relay cannot carry that request and
+    permitting the path on the proxy would change nothing -- under `unshare_net`
+    the fetch simply fails, the cache stays empty, and the picker is short the
+    row. `--model fable` still works throughout, because resolving the alias is
+    local and validating it is a `POST /v1/messages` the relay does permit.
+
+    The host's cache is the answer: it was filled by the same account the relay
+    bills to. Copied verbatim, entries the server marked disabled included -- an
+    entitlement the host does not have must not become one the box appears to.
+    Whether a row is then offered stays the CLI's decision; this only puts the
+    menu where a box with no route to the API can read it.
+
+    Absent, unreadable or wrong-shaped leaves whatever is already there. As with
+    user memory, of the two ways to be wrong, clearing a cache the box is using
+    is worse than leaving a stale one -- and a host that has never run Claude
+    Code has no menu to lend.
+    """
+    try:
+        parsed = json.loads(source.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(parsed, dict):
+        return
+    options = parsed.get("additionalModelOptionsCache")
+    if isinstance(options, list):
+        config["additionalModelOptionsCache"] = options
 
 
 def _object_at(config: dict, key: str) -> dict:
