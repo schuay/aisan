@@ -13,7 +13,14 @@ own Claude Code credential (0600), which Claude owns and replaces during OAuth
 refresh. When the access token is near expiry, aisan delegates that operation to
 the host Claude executable. Its inference URL is an ephemeral loopback sink, so
 the process can run Claude's supported, lock-aware refresh path without a model
-request reaching Anthropic. Success is determined only by rereading the file.
+request reaching Anthropic. Success is determined only by rereading the file --
+a refresh that overran its timeout still refreshed, and a child that exited
+cleanly may have authenticated some other way and written nothing.
+
+That last case is the known limit: the CLI reaches for an `apiKeyHelper` setting
+and an `ant` profile ahead of the claude.ai credential, and neither can be
+cleared out of a subprocess environment. On such a host refresh is a no-op that
+looks like a success, so it is reported as what it is rather than repaired.
 
 What the box gets instead of the credential is a per-box relay token, in the
 environment variable that matches the credential kind the proxy will attach --
@@ -93,6 +100,8 @@ DEFAULT_UPSTREAM = "https://api.anthropic.com"
 # terminal to read it on, and failing three turns in with an opaque 401.
 _EXPIRY_MARGIN_S = 300
 _REFRESH_TIMEOUT_S = 30
+# Enough of the child's stderr to name a failure, in the host's log.
+_STDERR_TAIL = 800
 
 _FIX_EXPIRED = "claude auth login   (on the HOST -- Claude owns this file)"
 _FIX_MISSING = "claude auth login   (no readable credential at that path)"
@@ -127,14 +136,38 @@ def _read_subscription(path: Path) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+class _Flight:
+    """The one in-flight refresh, shared by every request that waits on it.
+
+    A lock alone dedupes the successful case only: a waiter that queues behind a
+    FAILED refresh rereads the same stale file and runs its own, so a wave of
+    requests caught inside the expiry margin costs one subprocess EACH, serially,
+    at `_REFRESH_TIMEOUT_S` apiece. Sharing the attempt itself dedupes both
+    outcomes, and unlike a cooldown it needs no retry interval to invent.
+
+    What it does not dedupe is successive waves: a request arriving after the
+    attempt finished starts the next one. The bound is one refresh in flight,
+    not one refresh per stale credential.
+
+    A Task, not a bare coroutine, because the waiters are request handlers -- the
+    box hanging up cancels the awaiter, and a refresh rewriting the host's
+    credential has to outlive that. It returns its failure rather than raising,
+    so a wave that is cancelled in full leaves no unretrieved exception behind.
+    """
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.task: asyncio.Task[Exception | None] | None = None
+
+
 @dataclass(frozen=True)
 class _PlanCredential:
     """The host's Claude Code subscription login."""
 
     path: Path
     claude_command: tuple[str, ...]
-    _refresh_lock: asyncio.Lock = field(
-        default_factory=asyncio.Lock, init=False, repr=False, compare=False
+    _flight: _Flight = field(
+        default_factory=_Flight, init=False, repr=False, compare=False
     )
 
     @property
@@ -142,43 +175,84 @@ class _PlanCredential:
         return (self.path,)
 
     async def upstream(self) -> dict[str, str]:
-        """Return a bearer that has enough life for the next model request."""
-        token, _ = await self._ensure_fresh()
+        """Return a bearer that still works, refreshing one that is nearly out.
+
+        Accepts any token not yet expired, with none of preflight's margin: that
+        margin exists to fail before bwrap owns the terminal, and mid-session
+        there is nothing to gain by refusing a token that still works -- least of
+        all when the refresh it would have to wait for is what just failed.
+        """
+        token, _ = await self._ensure_fresh(floor=0.0)
         return {"authorization": f"Bearer {token}"}
 
-    async def _ensure_fresh(self) -> tuple[str, int]:
-        """Ask host Claude to refresh, while leaving it sole writer of the file."""
+    async def _ensure_fresh(self, *, floor: float) -> tuple[str, int]:
+        """Refresh a near-expired token, then let the FILE decide the outcome.
+
+        `floor` is the life the caller needs left on it: preflight wants the
+        whole margin, a mid-session request only wants a token that still works.
+        Refreshing is triggered by the margin either way -- the two differ in
+        what they will settle for when it did not help.
+
+        The reread happens whatever the attempt did, a timeout included. Host
+        Claude refreshes before its first model request and can then spend time
+        on work of its own, so a run that overran `_REFRESH_TIMEOUT_S` may have
+        written the new token already -- and this module's contract is that
+        success is determined by rereading the file, not by the child's fate.
+        """
         credential = _read_plan_credential(self.path)
         if _remaining_seconds(credential) >= _EXPIRY_MARGIN_S:
             return credential
 
-        # The first read avoids serialising the normal request path. Always
-        # reread after taking the lock: another request may have refreshed while
-        # this one waited.
-        async with self._refresh_lock:
-            credential = _read_plan_credential(self.path)
-            if _remaining_seconds(credential) >= _EXPIRY_MARGIN_S:
-                return credential
+        failure = await self._refresh()
 
-            try:
-                await _refresh_claude_login(self.claude_command, self.path.parent)
-            except (OSError, TimeoutError) as e:
-                raise CredentialRefreshError(
-                    f"could not run host Claude's refresh path: {e}"
-                ) from e
-            credential = _read_plan_credential(self.path)
-            remaining = _remaining_seconds(credential)
-            if remaining < _EXPIRY_MARGIN_S:
-                expiry = (
-                    f"expired {int(-remaining)}s ago"
-                    if remaining < 0
-                    else f"expires in {int(remaining)}s"
-                )
-                raise CredentialRefreshError(
-                    f"host Claude ran but the access token in {self.path}"
-                    f" {expiry}. Fix: {_FIX_EXPIRED}"
-                )
+        credential = _read_plan_credential(self.path)
+        remaining = _remaining_seconds(credential)
+        if remaining >= floor:
             return credential
+        raise CredentialRefreshError(self._refusal(remaining, failure))
+
+    async def _refresh(self) -> Exception | None:
+        """Join this wave's refresh, or start it. See `_Flight`."""
+        async with self._flight.lock:
+            task = self._flight.task
+            if task is None or task.done():
+                task = asyncio.create_task(self._attempt())
+                self._flight.task = task
+        return await task
+
+    async def _attempt(self) -> Exception | None:
+        try:
+            await _refresh_claude_login(self.claude_command, self.path.parent)
+        except (OSError, TimeoutError) as e:
+            return e
+        return None
+
+    def _refusal(self, remaining: float, failure: Exception | None) -> str:
+        """Why the credential is unusable. The number, never the token.
+
+        The no-failure arm names the case aisan cannot fix: Claude Code will
+        authenticate from an `apiKeyHelper` setting or an `ant` profile ahead of
+        the claude.ai credential, and neither is reachable by clearing the
+        child's environment (see `_refresh_claude_login`). The child then runs,
+        succeeds, and refreshes nothing. Saying only "run claude auth login"
+        there sends the operator after a login that is already fine.
+        """
+        expiry = (
+            f"expired {int(-remaining)}s ago"
+            if remaining < 0
+            else f"expires in {int(remaining)}s"
+        )
+        if failure is not None:
+            return (
+                f"could not run host Claude's refresh path: {failure}."
+                f" The access token in {self.path} {expiry}. Fix: {_FIX_EXPIRED}"
+            )
+        return (
+            f"host Claude ran but did not refresh {self.path}, whose access token"
+            f" {expiry}. It may have authenticated from a source aisan cannot"
+            " clear from its environment -- an apiKeyHelper setting, or an `ant`"
+            f" profile. Fix: {_FIX_EXPIRED}"
+        )
 
     def dress(self, token: str) -> dict[str, str]:
         env = {OAUTH_TOKEN_ENV: token}
@@ -189,7 +263,7 @@ class _PlanCredential:
 
     async def check(self, backend: str) -> None:
         try:
-            await self._ensure_fresh()
+            await self._ensure_fresh(floor=_EXPIRY_MARGIN_S)
         except OSError as e:
             raise PreflightError(
                 backend, f"cannot read {self.path}: {e}", _FIX_MISSING
@@ -449,6 +523,17 @@ def _remaining_seconds(credential: tuple[str, int]) -> float:
     return credential[1] / 1000.0 - time.time()
 
 
+def _merge_proxy_bypass(*values: str) -> list[str]:
+    """The union of several comma-separated no-proxy lists, order preserved."""
+    merged: list[str] = []
+    for value in values:
+        for entry in value.split(","):
+            host = entry.strip()
+            if host and host not in merged:
+                merged.append(host)
+    return merged
+
+
 async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> None:
     """Drive Claude's supported OAuth refresh while trapping its model call."""
 
@@ -468,18 +553,39 @@ async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> N
     process: asyncio.subprocess.Process | None = None
     try:
         env = os.environ.copy()
+        # Read out of claude-cli 2.1.246: these are the auth sources it consults
+        # AHEAD of the claude.ai credential, so any one of them left set is a way
+        # for the child to succeed without refreshing the file this exists to
+        # refresh. The two that are not environment variables -- an apiKeyHelper
+        # setting and an `ant` profile under ~/.config/anthropic/configs -- cannot
+        # be cleared from here at all; on a host using either, refresh does not
+        # work and `_refusal` says so rather than blaming the login.
+        #
+        # ANTHROPIC_UNIX_SOCKET is not auth: it is a transport override (the CLI
+        # calls it "claude ssh remote"), and it would route the child PAST the
+        # loopback sink -- the one thing the sink exists to prevent.
         for name in (
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_UNIX_SOCKET",
+            "CCR_OAUTH_TOKEN_FILE",
             "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
             "CLAUDE_CODE_USE_BEDROCK",
             "CLAUDE_CODE_USE_FOUNDRY",
             "CLAUDE_CODE_USE_VERTEX",
         ):
             env.pop(name, None)
-        no_proxy = env.get("NO_PROXY", env.get("no_proxy", ""))
+        # Both spellings, because either may hold the operator's exclusions and
+        # a set-but-empty NO_PROXY must not shadow a populated no_proxy: losing
+        # them sends this child's real traffic through a proxy the host excluded.
         bypass = ",".join(
-            value for value in (no_proxy, "127.0.0.1", "localhost") if value
+            _merge_proxy_bypass(
+                env.get("NO_PROXY", ""),
+                env.get("no_proxy", ""),
+                "127.0.0.1",
+                "localhost",
+            )
         )
         env.update(
             {
@@ -501,15 +607,27 @@ async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> N
             "Reply with exactly hello.",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
         )
         try:
             # The sink makes a nonzero status expected. The credential reread,
             # not this status, decides whether refresh succeeded.
-            await asyncio.wait_for(process.wait(), _REFRESH_TIMEOUT_S)
+            _, stderr = await asyncio.wait_for(
+                process.communicate(), _REFRESH_TIMEOUT_S
+            )
         except TimeoutError as e:
             raise TimeoutError("host Claude token refresh timed out") from e
+        if stderr:
+            # Logged on the host, never folded into the refusal: that string is
+            # answered INTO the box, and what another process writes to stderr is
+            # not something this can promise is fit to send there. Without it, a
+            # rejected flag, an onboarding gate and a revoked refresh token are
+            # one indistinguishable "ran but did not refresh".
+            log.warning(
+                "anthropic: host Claude refresh wrote to stderr: %s",
+                stderr.decode("utf-8", "replace").strip()[-_STDERR_TAIL:],
+            )
     finally:
         if process is not None and process.returncode is None:
             process.terminate()

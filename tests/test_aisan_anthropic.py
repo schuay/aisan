@@ -650,6 +650,145 @@ async def test_concurrent_requests_launch_one_refresh(tmp_path, monkeypatch):
     assert headers == [{"authorization": "Bearer fresh-after-one-refresh"}] * 8
 
 
+async def test_a_still_valid_token_survives_a_failed_refresh(tmp_path, monkeypatch):
+    """Inside the margin the token is refreshed, but a refresh that CANNOT run
+    must not take a working token down with it. Preflight's margin exists to
+    fail before bwrap owns the terminal; mid-session, refusing a bearer that has
+    minutes of life left turns a transient failure into a dead session."""
+    import aisan.egress.anthropic as backend_module
+
+    credentials = _credentials(tmp_path / "c.json", token="still-good", ttl_s=240)
+
+    async def refresh(command, config_dir):
+        raise OSError("no such file or directory: 'claude'")
+
+    monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
+    backend = AnthropicBackend(credentials=credentials)
+
+    assert await backend._upstream_auth() == {"authorization": "Bearer still-good"}
+
+
+async def test_an_expired_token_is_still_refused_when_refresh_fails(
+    tmp_path, monkeypatch
+):
+    """The other side of the same rule: once there is no life left there is
+    nothing to fall back to, and the refusal names the failure."""
+    import aisan.egress.anthropic as backend_module
+
+    credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
+
+    async def refresh(command, config_dir):
+        raise OSError("boom")
+
+    monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
+    backend = AnthropicBackend(credentials=credentials)
+
+    with pytest.raises(backend_module.CredentialRefreshError, match="boom"):
+        await backend._upstream_auth()
+
+
+async def test_preflight_still_demands_the_whole_margin(tmp_path, monkeypatch):
+    """`upstream` settling for a token that merely works must not relax the
+    check that runs before the terminal is handed over."""
+    import aisan.egress.anthropic as backend_module
+
+    credentials = _credentials(tmp_path / "c.json", token="short", ttl_s=240)
+
+    async def refresh(command, config_dir):
+        raise OSError("boom")
+
+    monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
+    backend = AnthropicBackend(credentials=credentials)
+
+    # The credential kind's own check, not `preflight`: the dead-upstream arm is
+    # a separate question and needs a server this test has no use for.
+    with pytest.raises(PreflightError):
+        await backend._credential.check("anthropic")
+
+
+async def test_a_refresh_that_wrote_the_token_then_timed_out_counts(
+    tmp_path, monkeypatch
+):
+    """Success is decided by rereading the file, so a child that refreshed and
+    then overran its timeout has refreshed. Host Claude renews the token before
+    its first model request and can spend time afterwards on work of its own."""
+    import aisan.egress.anthropic as backend_module
+
+    credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
+
+    async def refresh(command, config_dir):
+        _credentials(credentials, token="written-before-the-timeout")
+        raise TimeoutError("host Claude token refresh timed out")
+
+    monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
+    backend = AnthropicBackend(credentials=credentials)
+
+    assert await backend._upstream_auth() == {
+        "authorization": "Bearer written-before-the-timeout"
+    }
+
+
+async def test_a_failing_refresh_is_shared_by_the_whole_wave(tmp_path, monkeypatch):
+    """A lock that only short-circuits on success gives every queued request its
+    own subprocess when refresh fails -- eight requests, eight sequential
+    `_REFRESH_TIMEOUT_S` waits. The attempt itself is what has to be shared."""
+    import aisan.egress.anthropic as backend_module
+
+    credentials = _credentials(tmp_path / "c.json", token="still-good", ttl_s=240)
+    calls = 0
+
+    async def refresh(command, config_dir):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)
+        raise OSError("host claude is not answering")
+
+    monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
+    backend = AnthropicBackend(credentials=credentials)
+    headers = await asyncio.gather(*(backend._upstream_auth() for _ in range(8)))
+
+    assert calls == 1
+    assert headers == [{"authorization": "Bearer still-good"}] * 8
+
+
+async def test_a_refresh_that_changed_nothing_does_not_blame_the_login(
+    tmp_path, monkeypatch
+):
+    """Claude Code authenticates from an apiKeyHelper setting or an `ant` profile
+    ahead of the claude.ai credential, and neither can be cleared out of a child
+    environment. The child then succeeds and refreshes nothing; telling the
+    operator to log in again sends them after a login that is already fine."""
+    import aisan.egress.anthropic as backend_module
+
+    credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
+
+    async def refresh(command, config_dir):
+        return None
+
+    monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
+    backend = AnthropicBackend(credentials=credentials)
+
+    with pytest.raises(backend_module.CredentialRefreshError) as caught:
+        await backend._upstream_auth()
+    assert "apiKeyHelper" in str(caught.value)
+
+
+def test_proxy_bypass_keeps_both_spellings_of_no_proxy():
+    """A set-but-empty NO_PROXY must not shadow a populated no_proxy: the child
+    makes real requests, and losing the host's exclusions routes them through a
+    proxy the operator excluded."""
+    from aisan.egress.anthropic import _merge_proxy_bypass
+
+    assert _merge_proxy_bypass("", "corp.example,10.0.0.1", "127.0.0.1") == [
+        "corp.example",
+        "10.0.0.1",
+        "127.0.0.1",
+    ]
+    # Deduped and order-preserving, so the sink's own entries are never dropped
+    # and never repeated.
+    assert _merge_proxy_bypass("a, b", "b", "a") == ["a", "b"]
+
+
 async def test_nonzero_claude_status_is_accepted_after_refresh_and_trapped_locally(
     tmp_path, monkeypatch
 ):
