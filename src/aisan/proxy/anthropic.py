@@ -437,7 +437,8 @@ def _error(status: int, kind: str, message: str) -> web.Response:
 
 # Returns the bearer to attach. Called PER REQUEST, never captured: the host's
 # own Claude Code owns that credential and may rewrite the file at any moment, so
-# a value read once goes stale in a way this process must not try to repair.
+# a value captured once would miss either its refresh or the backend's delegated
+# host-side refresh.
 TokenSource = Callable[[], Awaitable[str]]
 # The headers that authenticate ONE request upstream. A callable rather than a
 # value for the same reason `TokenSource` is: the credential is re-read per
@@ -519,11 +520,10 @@ def make_app(
                 else {"authorization": f"Bearer {await token()}"}
             )
         except Exception as e:
-            # The credential went away mid-session -- the file was rewritten,
-            # or its token expired past what preflight checked. Answered as an
-            # error the agent can read rather than a traceback, and the reason
-            # never carries the credential: `e` here is a file or a parse
-            # failure, both of which name a path, not a value.
+            # The credential went away mid-session, or host Claude could not
+            # refresh it. Answered as an error the agent can read rather than a
+            # traceback. Credential failures name paths and expiry, never token
+            # values.
             log.error("anthropic proxy: no usable credential to attach: %s", e)
             return _error(
                 503,

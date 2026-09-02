@@ -8,13 +8,12 @@ credential injection, forwarding); this owns the backend -- where the credential
 is read from, which upstream is dialled, and what the box's client has to be told
 to find the relay.
 
-**This backend reads a credential. It never writes one, and it never refreshes.**
-The file is the HOST's own Claude Code credential (0600), which that process
-owns and rewrites on its own schedule. A refresh from here would race it over a
-file neither side locks, and losing that race logs the USER out -- a sandbox that
-breaks the thing it is sandboxing. So an expired token is a REFUSAL with the
-command to fix it, not something aisan repairs. That is a settled decision, not
-a shortcut.
+**This backend reads a credential. It never writes one.** The file is the HOST's
+own Claude Code credential (0600), which Claude owns and replaces during OAuth
+refresh. When the access token is near expiry, aisan delegates that operation to
+the host Claude executable. Its inference URL is an ephemeral loopback sink, so
+the process can run Claude's supported, lock-aware refresh path without a model
+request reaching Anthropic. Success is determined only by rereading the file.
 
 What the box gets instead of the credential is a per-box relay token, in the
 environment variable that matches the credential kind the proxy will attach --
@@ -34,12 +33,16 @@ by dress, and the proxy forwards that header.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from aiohttp import web
 
 from ..proxy.anthropic import BodyPolicy, make_app
 from ..proxy.http import RateLimit, serve_tcp
@@ -65,15 +68,8 @@ PORT = 8713
 __all__ = ["PLACEHOLDER_KEY", "AnthropicBackend"]
 
 
-class ExpiredCredential(Exception):
-    """The credential file is readable and its token is past `expiresAt`.
-
-    Its own type because it is the one credential failure that is nobody's
-    mistake: the file is intact, the login is valid, and the access token simply
-    aged out of a session that ran longer than one. What it is NOT is a reason
-    to refresh -- see the module docstring on why that race is not aisan's to
-    lose.
-    """
+class CredentialRefreshError(Exception):
+    """Host Claude could not leave behind a sufficiently fresh credential."""
 
 
 # The default credential location, which is also where the host's Claude Code
@@ -96,8 +92,9 @@ DEFAULT_UPSTREAM = "https://api.anthropic.com"
 # the difference between failing at preflight, where there is a fix command and a
 # terminal to read it on, and failing three turns in with an opaque 401.
 _EXPIRY_MARGIN_S = 300
+_REFRESH_TIMEOUT_S = 30
 
-_FIX_EXPIRED = "claude auth login   (on the HOST -- aisan never writes this file)"
+_FIX_EXPIRED = "claude auth login   (on the HOST -- Claude owns this file)"
 _FIX_MISSING = "claude auth login   (no readable credential at that path)"
 _FIX_NO_KEY = "pass a non-empty key, or drop --api-key to use the plan login"
 
@@ -135,45 +132,53 @@ class _PlanCredential:
     """The host's Claude Code subscription login."""
 
     path: Path
+    claude_command: tuple[str, ...]
+    _refresh_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False, compare=False
+    )
 
     @property
     def files(self) -> tuple[Path, ...]:
         return (self.path,)
 
     async def upstream(self) -> dict[str, str]:
-        """The bearer to attach, refused once it has expired.
-
-        Preflight checks the same file, but a session outlives the token it
-        launched with -- and nothing refreshes that token while the only Claude
-        Code on this machine is the one inside the box, reading a placeholder.
-        Forwarding the stale bearer got the agent Anthropic's own 401, which its
-        client renders as "Please run /login": advice that cannot work in a box
-        with no credential file and no route to the OAuth endpoints. Refused
-        here instead, with the reason and the host-side fix, which is what the
-        proxy's caller already documents this path as doing.
-
-        Expired means expired, with none of preflight's margin: that margin
-        exists to fail before bwrap owns the terminal, and mid-session there is
-        nothing to gain by refusing a token that still works.
-
-        One read for both values. Two would let the host rewrite the file in
-        between and pair a fresh expiry with a stale token.
-        """
-        data = _read_oauth(self.path)
-        token = data.get("accessToken")
-        if not isinstance(token, str) or not token:
-            raise KeyError(f"{self.path} has no claudeAiOauth.accessToken")
-        expires_ms = data.get("expiresAt")
-        if not isinstance(expires_ms, int):
-            raise KeyError(f"{self.path} has no integer claudeAiOauth.expiresAt")
-        expired_for = time.time() - expires_ms / 1000.0
-        if expired_for > 0:
-            # The number, never the token -- the same rule `check` follows.
-            raise ExpiredCredential(
-                f"the access token in {self.path} expired {int(expired_for)}s"
-                f" ago and aisan never refreshes it. Fix: {_FIX_EXPIRED}"
-            )
+        """Return a bearer that has enough life for the next model request."""
+        token, _ = await self._ensure_fresh()
         return {"authorization": f"Bearer {token}"}
+
+    async def _ensure_fresh(self) -> tuple[str, int]:
+        """Ask host Claude to refresh, while leaving it sole writer of the file."""
+        credential = _read_plan_credential(self.path)
+        if _remaining_seconds(credential) >= _EXPIRY_MARGIN_S:
+            return credential
+
+        # The first read avoids serialising the normal request path. Always
+        # reread after taking the lock: another request may have refreshed while
+        # this one waited.
+        async with self._refresh_lock:
+            credential = _read_plan_credential(self.path)
+            if _remaining_seconds(credential) >= _EXPIRY_MARGIN_S:
+                return credential
+
+            try:
+                await _refresh_claude_login(self.claude_command, self.path.parent)
+            except (OSError, TimeoutError) as e:
+                raise CredentialRefreshError(
+                    f"could not run host Claude's refresh path: {e}"
+                ) from e
+            credential = _read_plan_credential(self.path)
+            remaining = _remaining_seconds(credential)
+            if remaining < _EXPIRY_MARGIN_S:
+                expiry = (
+                    f"expired {int(-remaining)}s ago"
+                    if remaining < 0
+                    else f"expires in {int(remaining)}s"
+                )
+                raise CredentialRefreshError(
+                    f"host Claude ran but the access token in {self.path}"
+                    f" {expiry}. Fix: {_FIX_EXPIRED}"
+                )
+            return credential
 
     def dress(self, token: str) -> dict[str, str]:
         env = {OAUTH_TOKEN_ENV: token}
@@ -182,10 +187,9 @@ class _PlanCredential:
             env[SUBSCRIPTION_ENV] = plan
         return env
 
-    def check(self, backend: str) -> None:
+    async def check(self, backend: str) -> None:
         try:
-            _read_bearer(self.path)
-            expires_ms = _read_expiry_ms(self.path)
+            await self._ensure_fresh()
         except OSError as e:
             raise PreflightError(
                 backend, f"cannot read {self.path}: {e}", _FIX_MISSING
@@ -194,18 +198,12 @@ class _PlanCredential:
             raise PreflightError(
                 backend, f"credential file is not usable: {e}", _FIX_MISSING
             ) from e
-
-        remaining = expires_ms / 1000.0 - time.time()
-        if remaining < _EXPIRY_MARGIN_S:
-            # The number, never the token. How long is left is diagnostic; what
-            # is left is the secret.
+        except CredentialRefreshError as e:
             raise PreflightError(
                 backend,
-                f"the access token in {self.path} expires in"
-                f" {int(remaining)}s -- aisan reads this file and never refreshes"
-                " it, so the host has to",
+                f"host Claude could not refresh its login: {e}",
                 _FIX_EXPIRED,
-            )
+            ) from e
 
 
 @dataclass(frozen=True)
@@ -234,7 +232,7 @@ class _ApiKeyCredential:
     def dress(self, token: str) -> dict[str, str]:
         return {API_KEY_ENV: token}
 
-    def check(self, backend: str) -> None:
+    async def check(self, backend: str) -> None:
         if not self.key:
             raise PreflightError(
                 backend, "the API key given to this backend is empty", _FIX_NO_KEY
@@ -269,6 +267,7 @@ class AnthropicBackend(Backend):
         credentials: Path | None = None,
         api_key: str | None = None,
         upstream: str = DEFAULT_UPSTREAM,
+        claude_command: tuple[str, ...] = ("claude",),
         rpm: int = 120,
     ) -> None:
         """One credential kind, the subscription unless a key is given.
@@ -287,7 +286,9 @@ class AnthropicBackend(Backend):
         self._credential: _Credential = (
             _ApiKeyCredential(api_key)
             if api_key is not None
-            else _PlanCredential(credentials or default_credentials())
+            else _PlanCredential(
+                credentials or default_credentials(), claude_command=claude_command
+            )
         )
         # For the Box's credential-exposure refusal: the files this backend
         # reads are the ones the box's mounts must leave unreadable inside it.
@@ -351,10 +352,11 @@ class AnthropicBackend(Backend):
         means depends on what it is -- so the kind checks itself and the dead
         upstream is checked here, where the route lives.
 
-        No mint, by construction. This checks what is on disk and what answers;
-        it does not perform an OAuth refresh -- see the module docstring.
+        Claude remains the only process that mints or writes the credential.
+        This check can ask a host Claude subprocess to refresh it through the
+        supported request path, with inference trapped on loopback.
         """
-        self._credential.check(self.name)
+        await self._credential.check(self.name)
         await self._check_upstream()
 
     async def _check_upstream(self) -> None:
@@ -431,27 +433,92 @@ class AnthropicBackend(Backend):
             await runner.cleanup()
 
 
-def _read_bearer(path: Path) -> str:
-    """The OAuth access token out of a Claude Code credential file.
-
-    Raises KeyError/ValueError/OSError naming the PATH and never the contents:
-    everything under `claudeAiOauth` is either a secret or a timestamp, and a
-    message that quoted the document to explain a missing key would put the
-    secret wherever that message is logged.
-    """
+def _read_plan_credential(path: Path) -> tuple[str, int]:
+    """Read a mutually consistent access token and expiry from one snapshot."""
     data = _read_oauth(path)
     token = data.get("accessToken")
     if not isinstance(token, str) or not token:
         raise KeyError(f"{path} has no claudeAiOauth.accessToken")
-    return token
-
-
-def _read_expiry_ms(path: Path) -> int:
-    """`claudeAiOauth.expiresAt`, epoch milliseconds. Same rules on messages."""
-    value = _read_oauth(path).get("expiresAt")
-    if not isinstance(value, int):
+    expires_ms = data.get("expiresAt")
+    if not isinstance(expires_ms, int):
         raise KeyError(f"{path} has no integer claudeAiOauth.expiresAt")
-    return value
+    return token, expires_ms
+
+
+def _remaining_seconds(credential: tuple[str, int]) -> float:
+    return credential[1] / 1000.0 - time.time()
+
+
+async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> None:
+    """Drive Claude's supported OAuth refresh while trapping its model call."""
+
+    async def sink(request: web.Request) -> web.Response:
+        # Never read or log the body or headers. An HTTP answer is enough to end
+        # Claude's attempt, and this server has no forwarding client at all.
+        if request.path == "/api/hello":
+            return web.json_response({"ok": True})
+        return web.json_response(
+            {"error": {"type": "api_error", "message": "local refresh sink"}},
+            status=502,
+        )
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", sink)
+    runner, port = await serve_tcp(app)
+    process: asyncio.subprocess.Process | None = None
+    try:
+        env = os.environ.copy()
+        for name in (
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "CLAUDE_CODE_USE_VERTEX",
+        ):
+            env.pop(name, None)
+        no_proxy = env.get("NO_PROXY", env.get("no_proxy", ""))
+        bypass = ",".join(
+            value for value in (no_proxy, "127.0.0.1", "localhost") if value
+        )
+        env.update(
+            {
+                "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
+                "CLAUDE_CODE_MAX_RETRIES": "0",
+                "CLAUDE_CONFIG_DIR": str(config_dir),
+                "DISABLE_AUTOUPDATER": "1",
+                "NO_PROXY": bypass,
+                "no_proxy": bypass,
+            }
+        )
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            "--safe-mode",
+            "--no-session-persistence",
+            "--model",
+            "haiku",
+            "-p",
+            "Reply with exactly hello.",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+        )
+        try:
+            # The sink makes a nonzero status expected. The credential reread,
+            # not this status, decides whether refresh succeeded.
+            await asyncio.wait_for(process.wait(), _REFRESH_TIMEOUT_S)
+        except TimeoutError as e:
+            raise TimeoutError("host Claude token refresh timed out") from e
+    finally:
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), 5)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        await runner.cleanup()
 
 
 def _read_oauth(path: Path) -> dict:

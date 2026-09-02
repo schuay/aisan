@@ -1,20 +1,18 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The Anthropic backend: what it reads, what it refuses, and what it never does.
+"""The Anthropic backend: credential isolation, refresh, and request forwarding.
 
 `test_proxy_anthropic.py` covers the transport (the two allowlists, the injected
 bearer). This covers the backend -- the credential file, the preflight decisions,
-and the one thing the whole design rests on: **aisan reads this file and never
-writes it.**
+and the thing the whole design rests on: **aisan reads this file and never
+writes it itself.**
 
 That last claim needs a test rather than a docstring, because the failure it
 guards against is silent and expensive. The host's own Claude Code owns
-`~/.credentials.json`, rewrites it on refresh, and holds no lock; an aisan that
-refreshed would race it, and losing that race logs the user out of the tool aisan
-exists to sandbox. So `test_the_backend_never_writes_the_credential` runs a real
-box lifecycle against a real file and asserts the bytes and the mtime are
-untouched.
+`~/.credentials.json` and atomically replaces it on refresh. Aisan delegates
+near-expiry refresh to that executable through a local inference sink; it never
+handles the refresh token or writes the file itself.
 
 Every fixture credential here is fake by construction -- a literal token string
 with no upstream that would accept it. Nothing in this file reads the host's own.
@@ -22,7 +20,9 @@ with no upstream that would accept it. Nothing in this file reads the host's own
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -43,9 +43,16 @@ from aisan.egress.base import PreflightError
 # upstream that is a local aiohttp handler. Named so a reader does not have to
 # work that out.
 FAKE_TOKEN = "fake-access-token-for-tests"
+FAKE_REFRESH_TOKEN = "fake-refresh-token-for-tests"
 
 
-def _credentials(path: Path, *, token: str = FAKE_TOKEN, ttl_s: float = 3600) -> Path:
+def _credentials(
+    path: Path,
+    *,
+    token: str = FAKE_TOKEN,
+    refresh_token: str | None = None,
+    ttl_s: float = 3600,
+) -> Path:
     """A credential file in the real shape, with an expiry `ttl_s` from now.
 
     Epoch MILLISECONDS, which is what Claude Code writes -- a test that used
@@ -57,7 +64,7 @@ def _credentials(path: Path, *, token: str = FAKE_TOKEN, ttl_s: float = 3600) ->
             {
                 "claudeAiOauth": {
                     "accessToken": token,
-                    "refreshToken": "fake-refresh-token",
+                    "refreshToken": refresh_token or FAKE_REFRESH_TOKEN,
                     "expiresAt": int((time.time() + ttl_s) * 1000),
                     "subscriptionType": "max",
                 }
@@ -195,36 +202,50 @@ async def test_a_missing_credential_refuses_with_the_login_command(tmp_path):
     assert "absent.json" in e.value.reason
 
 
-async def test_an_expired_token_says_expired_rather_than_missing(tmp_path):
-    """Same command, different reason -- and the reason is the point.
+async def test_preflight_refreshes_an_expired_token_with_host_claude(
+    tmp_path, monkeypatch
+):
+    import aisan.egress.anthropic as backend_module
 
-    An operator who IS logged in, reading "no credential", goes looking for a
-    file that exists. So the expiry case names the expiry, and says that aisan
-    does not refresh, which is why the host has to.
-    """
+    credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
+    calls = []
+
+    async def refresh(command, config_dir):
+        calls.append((command, config_dir))
+        _credentials(
+            credentials,
+            token="refreshed-access-token",
+            refresh_token="rotated-refresh-token",
+        )
+
+    monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
     up, runner = await _upstream_server(_hello)
     try:
-        with pytest.raises(PreflightError) as e:
-            await AnthropicBackend(
-                credentials=_credentials(tmp_path / "c.json", ttl_s=-60), upstream=up
-            ).preflight()
+        await AnthropicBackend(
+            credentials=credentials,
+            upstream=up,
+            claude_command=("host-claude",),
+        ).preflight()
     finally:
         await runner.cleanup()
-    assert "expires in" in e.value.reason
-    assert "never refreshes" in e.value.reason
-    assert "claude auth login" in e.value.fix
+    assert calls == [(("host-claude",), tmp_path)]
+    data = json.loads(credentials.read_text())["claudeAiOauth"]
+    assert data["accessToken"] == "refreshed-access-token"
+    assert data["refreshToken"] == "rotated-refresh-token"
 
 
-async def test_a_token_expiring_inside_the_margin_is_refused_too(tmp_path):
-    """Still valid, and refused anyway. The margin is the difference between
-    failing at preflight -- where there is a terminal and a fix command -- and
-    failing three turns in with an opaque 401."""
+async def test_a_token_expiring_inside_the_margin_is_refreshed(tmp_path, monkeypatch):
+    import aisan.egress.anthropic as backend_module
+
+    credentials = _credentials(tmp_path / "c.json", ttl_s=60)
+
+    async def refresh(command, config_dir):
+        _credentials(credentials, token="fresh-before-startup")
+
+    monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
     up, runner = await _upstream_server(_hello)
     try:
-        with pytest.raises(PreflightError):
-            await AnthropicBackend(
-                credentials=_credentials(tmp_path / "c.json", ttl_s=60), upstream=up
-            ).preflight()
+        await AnthropicBackend(credentials=credentials, upstream=up).preflight()
     finally:
         await runner.cleanup()
 
@@ -375,13 +396,11 @@ async def test_one_backend_can_hold_two_shared_activations(tmp_path):
 
 
 async def test_the_backend_never_writes_the_credential(tmp_path):
-    """The settled decision, asserted rather than intended.
+    """Aisan reads the file but leaves all writes to the host Claude executable.
 
-    A writeback would race the host's own Claude Code over a 0600 file neither
-    side locks, and losing that race logs the user out. Checked over a full
-    serve-and-request cycle -- the moment a refresh would plausibly be attempted
-    -- by bytes and mtime, because a rewrite with identical content is still a
-    rewrite and still a race.
+    Checked over a fresh credential's full serve-and-request cycle by bytes and
+    mtime. The expiry tests separately replace the file from their fake refresh
+    delegate, which stands in for the one process authorized to write it.
     """
     up, up_runner = await _upstream_server(_hello)
     creds = _credentials(tmp_path / "c.json")
@@ -557,21 +576,13 @@ async def test_the_transport_decides_the_body_policy(tmp_path):
         await up_runner.cleanup()
 
 
-async def test_a_token_that_expires_mid_session_is_refused_with_the_host_fix(tmp_path):
-    """The failure this exists for: a session outliving the token it launched
-    with, on a machine where the only Claude Code running is the one in the box,
-    reading a placeholder. Nothing refreshes the file, so the bearer goes stale
-    under a session preflight passed.
+async def test_a_token_that_expires_mid_session_is_refreshed(tmp_path, monkeypatch):
+    import aisan.egress.anthropic as backend_module
 
-    Forwarding it got the agent Anthropic's own 401, which its client renders as
-    "Please run /login" -- impossible in a box with no credential file and no
-    route to the OAuth endpoints. The refusal has to name the HOST-side fix, and
-    it has to happen here rather than upstream.
-    """
     reached = []
 
     async def upstream(request: web.Request) -> web.Response:
-        reached.append(request.path)
+        reached.append((request.path, request.headers.get("authorization")))
         return web.json_response({"ok": True})
 
     up, up_runner = await _upstream_server(upstream)
@@ -579,6 +590,15 @@ async def test_a_token_that_expires_mid_session_is_refused_with_the_host_fix(tmp
     runtime.mkdir()
     credentials = _credentials(tmp_path / "c.json")
     backend = AnthropicBackend(credentials=credentials, upstream=up)
+
+    async def refresh(command, config_dir):
+        _credentials(
+            credentials,
+            token="fresh-mid-session",
+            refresh_token="rotated-mid-session",
+        )
+
+    monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
     try:
         async with backend.serve(runtime):
             sock = backend.socket_path(runtime)
@@ -596,21 +616,182 @@ async def test_a_token_that_expires_mid_session_is_refused_with_the_host_fix(tmp
                 async with s.post(
                     "http://anthropic.invalid/v1/messages", data=b"{}", headers=headers
                 ) as r:
-                    assert r.status == 503
-                    body = await r.json()
+                    assert r.status == 200
     finally:
         await up_runner.cleanup()
 
-    # Only the first request was worth forwarding: a bearer aisan knows is
-    # expired buys an upstream round trip and a worse message.
-    assert reached == ["/v1/messages"]
-    assert body["error"]["type"] == "authentication_error"
-    message = body["error"]["message"]
-    assert "expired" in message
-    assert "claude auth login" in message and "HOST" in message
-    assert str(credentials) in message
-    # The number, never the token -- this message reaches the agent's transcript.
-    assert FAKE_TOKEN not in message
+    assert reached == [
+        ("/v1/messages", f"Bearer {FAKE_TOKEN}"),
+        ("/v1/messages", "Bearer fresh-mid-session"),
+    ]
+    assert (
+        json.loads(credentials.read_text())["claudeAiOauth"]["refreshToken"]
+        == "rotated-mid-session"
+    )
+
+
+async def test_concurrent_requests_launch_one_refresh(tmp_path, monkeypatch):
+    import aisan.egress.anthropic as backend_module
+
+    credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
+    calls = 0
+
+    async def refresh(command, config_dir):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)
+        _credentials(credentials, token="fresh-after-one-refresh")
+
+    monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
+    backend = AnthropicBackend(credentials=credentials)
+    headers = await asyncio.gather(*(backend._upstream_auth() for _ in range(8)))
+
+    assert calls == 1
+    assert headers == [{"authorization": "Bearer fresh-after-one-refresh"}] * 8
+
+
+async def test_nonzero_claude_status_is_accepted_after_refresh_and_trapped_locally(
+    tmp_path, monkeypatch
+):
+    """Exercise the real subprocess and sink boundary with a fake host Claude."""
+    credentials = _credentials(tmp_path / ".credentials.json", ttl_s=-60)
+    marker = tmp_path / "refresh-result.json"
+    script = tmp_path / "fake-claude.py"
+    script.write_text(
+        """\
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+credential = Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".credentials.json"
+data = json.loads(credential.read_text())
+data["claudeAiOauth"]["accessToken"] = "subprocess-access-token"
+data["claudeAiOauth"]["refreshToken"] = "subprocess-refresh-token"
+data["claudeAiOauth"]["expiresAt"] = int((time.time() + 3600) * 1000)
+replacement = credential.with_suffix(".new")
+replacement.write_text(json.dumps(data))
+replacement.replace(credential)
+
+request = urllib.request.Request(
+    os.environ["ANTHROPIC_BASE_URL"] + "/v1/messages",
+    data=b"not a real model request",
+    method="POST",
+)
+try:
+    urllib.request.urlopen(request, timeout=3)
+    status = 200
+except urllib.error.HTTPError as error:
+    status = error.code
+
+Path(os.environ["AISAN_REFRESH_TEST_MARKER"]).write_text(json.dumps({
+    "argv": sys.argv[1:],
+    "base_url": os.environ["ANTHROPIC_BASE_URL"],
+    "config_dir": os.environ["CLAUDE_CONFIG_DIR"],
+    "status": status,
+    "api_key_present": "ANTHROPIC_API_KEY" in os.environ,
+    "oauth_token_present": "CLAUDE_CODE_OAUTH_TOKEN" in os.environ,
+}))
+raise SystemExit(23)
+"""
+    )
+    monkeypatch.setenv("AISAN_REFRESH_TEST_MARKER", str(marker))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-host-claude")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "must-not-reach-host-claude")
+
+    reached = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        reached.append(request.path)
+        return web.json_response({"ok": True})
+
+    up, runner = await _upstream_server(upstream)
+    try:
+        await AnthropicBackend(
+            credentials=credentials,
+            upstream=up,
+            claude_command=(sys.executable, str(script)),
+        ).preflight()
+    finally:
+        await runner.cleanup()
+
+    result = json.loads(marker.read_text())
+    assert result == {
+        "argv": [
+            "--safe-mode",
+            "--no-session-persistence",
+            "--model",
+            "haiku",
+            "-p",
+            "Reply with exactly hello.",
+        ],
+        "base_url": result["base_url"],
+        "config_dir": str(tmp_path),
+        "status": 502,
+        "api_key_present": False,
+        "oauth_token_present": False,
+    }
+    assert result["base_url"].startswith("http://127.0.0.1:")
+    assert reached == ["/api/hello"]
+    oauth = json.loads(credentials.read_text())["claudeAiOauth"]
+    assert oauth["accessToken"] == "subprocess-access-token"
+    assert oauth["refreshToken"] == "subprocess-refresh-token"
+
+
+async def test_nonzero_claude_status_with_a_stale_credential_fails(tmp_path):
+    up, runner = await _upstream_server(_hello)
+    try:
+        with pytest.raises(PreflightError) as error:
+            await AnthropicBackend(
+                credentials=_credentials(tmp_path / "c.json", ttl_s=-60),
+                upstream=up,
+                claude_command=(sys.executable, "-c", "raise SystemExit(9)"),
+            ).preflight()
+    finally:
+        await runner.cleanup()
+    assert "host Claude ran" in error.value.reason
+    assert "expired" in error.value.reason
+    assert FAKE_TOKEN not in str(error.value)
+
+
+async def test_missing_claude_executable_has_a_host_login_fix(tmp_path):
+    up, runner = await _upstream_server(_hello)
+    try:
+        with pytest.raises(PreflightError) as error:
+            await AnthropicBackend(
+                credentials=_credentials(tmp_path / "c.json", ttl_s=-60),
+                upstream=up,
+                claude_command=("aisan-test-no-such-claude",),
+            ).preflight()
+    finally:
+        await runner.cleanup()
+    assert "could not run host Claude" in error.value.reason
+    assert "claude auth login" in error.value.fix
+
+
+async def test_claude_refresh_timeout_has_a_host_login_fix(tmp_path, monkeypatch):
+    import aisan.egress.anthropic as backend_module
+
+    monkeypatch.setattr(backend_module, "_REFRESH_TIMEOUT_S", 0.01)
+    up, runner = await _upstream_server(_hello)
+    try:
+        with pytest.raises(PreflightError) as error:
+            await AnthropicBackend(
+                credentials=_credentials(tmp_path / "c.json", ttl_s=-60),
+                upstream=up,
+                claude_command=(
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(60)",
+                ),
+            ).preflight()
+    finally:
+        await runner.cleanup()
+    assert "timed out" in error.value.reason
+    assert "claude auth login" in error.value.fix
 
 
 async def test_one_request_reads_the_credential_file_exactly_once(
