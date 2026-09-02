@@ -3,7 +3,7 @@
 
 [project]
 name = "aisan"
-version = "0.1.0"
+version = "0.1.1"
 description = "Linux confinement and credential-aware egress for build and coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
