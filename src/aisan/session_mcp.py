@@ -80,7 +80,7 @@ def codex_host_mcp(path: Path | None = None) -> SessionMCP:
 
 
 def claude_host_mcp(path: Path | None = None) -> SessionMCP:
-    source = path or _claude_config_file()
+    source = path or claude_config_file()
     data = _read_json(source)
     servers = _table(data.get("mcpServers"), source, "mcpServers")
     kept = {
@@ -238,7 +238,13 @@ def _codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 
 
-def _claude_config_file() -> Path:
+def claude_config_file() -> Path:
+    """The host's own `.claude.json`, wherever CLAUDE_CONFIG_DIR puts it.
+
+    Public because `cli.claude` seeds from the same file: a second copy of this
+    rule is a second chance to forget the redirect, and forgetting it is silent
+    -- the file is simply not where the copy looks.
+    """
     configured = os.environ.get("CLAUDE_CONFIG_DIR")
     return (
         Path(configured) / ".claude.json"

@@ -267,13 +267,39 @@ def test_seed_state_keeps_the_boxs_model_menu_when_the_host_lends_none(
     assert config["additionalModelOptionsCache"] == kept
 
 
+def test_the_model_menu_is_read_from_the_hosts_real_config_dir(tmp_path, monkeypatch):
+    """CLAUDE_CONFIG_DIR moves `.claude.json` off the home directory, and a copy
+    of the resolution rule that forgets it fails silently -- the file is simply
+    not where the mirror looks. `session_mcp` owns the rule; this pins that
+    `cli.claude` uses it rather than a second one."""
+    import json
+
+    from aisan.cli.claude import host_config, seed_state
+
+    configured = tmp_path / "elsewhere"
+    configured.mkdir()
+    options = [{"value": "claude-fable-5", "label": "Fable", "description": "Fable 5"}]
+    (configured / ".claude.json").write_text(
+        json.dumps({"additionalModelOptionsCache": options})
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(configured))
+
+    assert host_config() == configured / ".claude.json"
+
+    state = tmp_path / "state"
+    state.mkdir()
+    seed_state(state, Path("/repo"))
+
+    config = json.loads((state / ".claude.json").read_text())
+    assert config["additionalModelOptionsCache"] == options
+
+
 def test_the_seeded_sources_are_the_hosts_own_user_memory():
     """The constants the launchers seed FROM, named once so a rename of either
     host file does not silently turn seeding into a no-op."""
     claude = importlib.import_module("aisan.cli.claude")
     codex = importlib.import_module("aisan.cli.codex")
     assert Path.home() / ".claude" / "CLAUDE.md" == claude.USER_MEMORY
-    assert Path.home() / ".claude.json" == claude.HOST_CONFIG
     assert Path.home() / ".codex" / "AGENTS.md" == codex.USER_MEMORY
 
 

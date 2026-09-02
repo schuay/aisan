@@ -66,19 +66,27 @@ from aisan.session import (
     state_dir,
     terminal_env,
 )
-from aisan.session_mcp import claude_host_mcp, mcp_search_path
+from aisan.session_mcp import claude_config_file, claude_host_mcp, mcp_search_path
 from aisan.statedir import read_sealed_text, write_sealed
 
 USER_MEMORY = Path.home() / ".claude" / "CLAUDE.md"
 
-# The host's own Claude Code config. Read for exactly one key -- see
-# `mirror_model_options` -- and never bound into the box: the CLI itself counts
-# this file among the sensitive ones, and it holds the whole of the operator's
-# project history besides.
-HOST_CONFIG = Path.home() / ".claude.json"
+
+def host_config() -> Path:
+    """The host's own Claude Code config, read for exactly one key.
+
+    A function, not a constant, for the reason `default_credentials` is one: the
+    answer depends on CLAUDE_CONFIG_DIR and has to track the environment rather
+    than whatever it held at import. `session_mcp` owns the rule -- it seeds the
+    MCP servers out of this same file.
+
+    Never bound into the box. The CLI counts this file among the sensitive ones,
+    and it holds the whole of the operator's project history besides.
+    """
+    return claude_config_file()
 
 
-def seed_state(state: Path, repo: Path, host_config: Path = HOST_CONFIG) -> None:
+def seed_state(state: Path, repo: Path, host_config_path: Path | None = None) -> None:
     """Answer the CLI's first-run gates, because one of them cannot be answered.
 
     Onboarding's first step is a connectivity check that fetches
@@ -136,7 +144,7 @@ def seed_state(state: Path, repo: Path, host_config: Path = HOST_CONFIG) -> None
     _object_at(_object_at(config, "projects"), str(repo))["hasTrustDialogAccepted"] = (
         True
     )
-    mirror_model_options(config, host_config)
+    mirror_model_options(config, host_config_path or host_config())
     write_sealed(path, json.dumps(config, indent=2))
 
 
