@@ -34,6 +34,33 @@ async def test_rbe_token_gives_luci_auth_no_inherited_stdin(monkeypatch):
     assert captured.get("stdin") is asyncio.subprocess.DEVNULL
 
 
+async def test_rbe_token_starts_luci_auth_in_an_empty_directory(monkeypatch, tmp_path):
+    """Same rule as the credential-refresh children: a host process holding the
+    durable login does not start in a directory a box has written to."""
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"a-token\n", b""
+
+    async def fake_exec(*args, **kwargs):
+        captured.update(kwargs)
+        captured["entries"] = sorted(os.listdir(kwargs["cwd"]))
+        return _Proc()
+
+    monkeypatch.setattr(mint.asyncio, "create_subprocess_exec", fake_exec)
+    launcher_cwd = tmp_path / "the-repo-the-agent-edited"
+    launcher_cwd.mkdir()
+    (launcher_cwd / ".netrc").write_text("machine example.com\n")
+    monkeypatch.chdir(launcher_cwd)
+
+    assert await mint.rbe_token() == "a-token"
+    assert captured["cwd"] != str(launcher_cwd)
+    assert captured["entries"] == []
+
+
 async def test_rbe_token_survives_non_utf8_output(monkeypatch):
     """The output is decoded best-effort: a luci-auth that emits a non-UTF-8
     byte must not turn a mint into an opaque UnicodeDecodeError on the request

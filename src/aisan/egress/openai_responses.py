@@ -35,6 +35,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..hostproc import neutral_cwd
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
 from ..proxy.openai_responses import make_app
@@ -262,6 +263,18 @@ def _jwt_expiration(token: str, path: Path) -> int:
 
 
 async def _refresh_chatgpt_login(command: tuple[str, ...], codex_home: Path) -> None:
+    # `codex` reads project configuration from the directory it starts in and
+    # has no flag to stop it, and the directory this would otherwise inherit is
+    # the repository the boxed agent has been editing. The child is given an
+    # empty one instead, kept alive for as long as it runs; its real
+    # configuration comes from CODEX_HOME.
+    with neutral_cwd() as cwd:
+        await _drive_account_read(command, codex_home, cwd)
+
+
+async def _drive_account_read(
+    command: tuple[str, ...], codex_home: Path, cwd: str
+) -> None:
     process = await asyncio.create_subprocess_exec(
         *command,
         "app-server",
@@ -274,6 +287,7 @@ async def _refresh_chatgpt_login(command: tuple[str, ...], codex_home: Path) -> 
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
         env={**os.environ, "CODEX_HOME": str(codex_home)},
+        cwd=cwd,
     )
     assert process.stdin is not None
     assert process.stdout is not None

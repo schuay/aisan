@@ -22,6 +22,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
+from .hostproc import neutral_cwd
+
 # Returns (access_token, aware-UTC expiry). Tests plug in here rather than
 # reaching for a real cloud credential, which is exactly the dependency the
 # proxies exist to keep out of the loop.
@@ -87,6 +89,14 @@ async def rbe_token(lifetime_s: int = 1800) -> str:
     bearer and resolves it to the full user account (verified), so this token is
     Gerrit-capable while it lives. That is why it stays in this process.
     """
+    # An empty cwd, like the credential-refresh children get: this runs as the
+    # operator with the durable login in reach, so it should not start in the
+    # repository a box has been writing to.
+    with neutral_cwd() as cwd:
+        return await _luci_token(lifetime_s, cwd)
+
+
+async def _luci_token(lifetime_s: int, cwd: str) -> str:
     proc = await asyncio.create_subprocess_exec(
         "luci-auth",
         "token",
@@ -101,6 +111,7 @@ async def rbe_token(lifetime_s: int = 1800) -> str:
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), _TOKEN_TIMEOUT_S)

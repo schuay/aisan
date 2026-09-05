@@ -139,6 +139,36 @@ async def test_near_expiry_login_is_refreshed_by_host_codex(tmp_path, monkeypatc
     assert calls == [(("host-codex",), auth.parent)]
 
 
+async def test_host_codex_refresh_starts_in_an_empty_directory(tmp_path, monkeypatch):
+    """`codex` reads project configuration from its cwd and has no flag against
+    it, so the refresh child must not inherit the repository the boxed agent has
+    been editing."""
+    script = tmp_path / "fake-codex.py"
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    script.write_text(
+        "import json, os, pathlib, sys\n"
+        "for line in sys.stdin:\n"
+        "    message = json.loads(line)\n"
+        "    if message.get('id') == 1:\n"
+        "        pathlib.Path(os.environ['CODEX_HOME'], 'cwd.json').write_text(\n"
+        "            json.dumps({'cwd': os.getcwd(),\n"
+        "                        'entries': sorted(os.listdir('.'))}))\n"
+        "        print(json.dumps({'id': 1, 'result': {\n"
+        "            'account': {'type': 'chatgpt'}}}), flush=True)\n"
+    )
+    launcher_cwd = tmp_path / "the-repo-the-agent-edited"
+    launcher_cwd.mkdir()
+    (launcher_cwd / "AGENTS.md").write_text("steering the agent wrote\n")
+    monkeypatch.chdir(launcher_cwd)
+
+    await _refresh_chatgpt_login((sys.executable, str(script)), home)
+
+    seen = json.loads((home / "cwd.json").read_text())
+    assert seen["entries"] == []
+    assert seen["cwd"] != str(launcher_cwd)
+
+
 async def test_host_codex_refresh_uses_the_managed_account_rpc(tmp_path):
     script = tmp_path / "fake-codex.py"
     capture = tmp_path / "codex-home" / "capture.json"

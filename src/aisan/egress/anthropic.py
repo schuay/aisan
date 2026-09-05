@@ -51,6 +51,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+from ..hostproc import neutral_cwd
 from ..proxy.anthropic import BodyPolicy, make_app
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
@@ -602,37 +603,42 @@ async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> N
                 "no_proxy": bypass,
             }
         )
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            "--safe-mode",
-            "--no-session-persistence",
-            "--model",
-            "haiku",
-            "-p",
-            "Reply with exactly hello.",
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        try:
-            # The sink makes a nonzero status expected. The credential reread,
-            # not this status, decides whether refresh succeeded.
-            _, stderr = await asyncio.wait_for(
-                process.communicate(), _REFRESH_TIMEOUT_S
+        # The directory outlives the child, not just the spawn: a cwd unlinked
+        # under a running process is a `getcwd` failure waiting to happen.
+        with neutral_cwd() as cwd:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                "--safe-mode",
+                "--no-session-persistence",
+                "--model",
+                "haiku",
+                "-p",
+                "Reply with exactly hello.",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                cwd=cwd,
             )
-        except TimeoutError as e:
-            raise TimeoutError("host Claude token refresh timed out") from e
-        if stderr:
-            # Logged on the host, never folded into the refusal: that string is
-            # answered INTO the box, and what another process writes to stderr is
-            # not something this can promise is fit to send there. Without it, a
-            # rejected flag, an onboarding gate and a revoked refresh token are
-            # one indistinguishable "ran but did not refresh".
-            log.warning(
-                "anthropic: host Claude refresh wrote to stderr: %s",
-                stderr.decode("utf-8", "replace").strip()[-_STDERR_TAIL:],
-            )
+            try:
+                # The sink makes a nonzero status expected. The credential
+                # reread, not this status, decides whether refresh succeeded.
+                _, stderr = await asyncio.wait_for(
+                    process.communicate(), _REFRESH_TIMEOUT_S
+                )
+            except TimeoutError as e:
+                raise TimeoutError("host Claude token refresh timed out") from e
+            if stderr:
+                # Logged on the host, never folded into the refusal: that string
+                # is answered INTO the box, and what another process writes to
+                # stderr is not something this can promise is fit to send there.
+                # Without it, a rejected flag, an onboarding gate and a revoked
+                # refresh token are one indistinguishable "ran but did not
+                # refresh".
+                log.warning(
+                    "anthropic: host Claude refresh wrote to stderr: %s",
+                    stderr.decode("utf-8", "replace").strip()[-_STDERR_TAIL:],
+                )
     finally:
         if process is not None and process.returncode is None:
             process.terminate()

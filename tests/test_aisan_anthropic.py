@@ -833,6 +833,8 @@ Path(os.environ["AISAN_REFRESH_TEST_MARKER"]).write_text(json.dumps({
     "status": status,
     "api_key_present": "ANTHROPIC_API_KEY" in os.environ,
     "oauth_token_present": "CLAUDE_CODE_OAUTH_TOKEN" in os.environ,
+    "cwd": os.getcwd(),
+    "cwd_entries": sorted(os.listdir(os.getcwd())),
 }))
 raise SystemExit(23)
 """
@@ -840,6 +842,10 @@ raise SystemExit(23)
     monkeypatch.setenv("AISAN_REFRESH_TEST_MARKER", str(marker))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-host-claude")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "must-not-reach-host-claude")
+    launcher_cwd = tmp_path / "the-repo-the-agent-edited"
+    (launcher_cwd / ".claude").mkdir(parents=True)
+    (launcher_cwd / "CLAUDE.md").write_text("steering the agent wrote\n")
+    monkeypatch.chdir(launcher_cwd)
 
     reached = []
 
@@ -872,7 +878,13 @@ raise SystemExit(23)
         "status": 502,
         "api_key_present": False,
         "oauth_token_present": False,
+        "cwd": result["cwd"],
+        "cwd_entries": [],
     }
+    # Not the launcher's cwd -- normally the repository the boxed agent has been
+    # editing, where a planted CLAUDE.md or settings file would be read by a host
+    # process holding the real credential.
+    assert result["cwd"] != str(launcher_cwd)
     assert result["base_url"].startswith("http://127.0.0.1:")
     assert reached == ["/api/hello"]
     oauth = json.loads(credentials.read_text())["claudeAiOauth"]
