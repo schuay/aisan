@@ -450,6 +450,45 @@ async def test_a_dead_upstream_is_502_not_a_torn_connection(tmp_path):
     assert "cannot reach its upstream" in body["error"]["message"]
 
 
+async def test_an_upstream_redirect_is_refused_not_followed(tmp_path):
+    """The credential goes to the upstream the operator named, and nowhere else.
+
+    aiohttp drops `authorization` when a redirect crosses origins but keeps
+    `x-api-key`, so a followed 307 hands a key-dressed credential -- and the
+    body -- to a host nobody approved. The named upstream is not always
+    Anthropic: `--upstream` points at local gateways.
+    """
+    second_hits: list[dict[str, str]] = []
+
+    async def second(request: web.Request) -> web.Response:
+        second_hits.append({k.lower(): v for k, v in request.headers.items()})
+        return web.json_response({"ok": True})
+
+    elsewhere, second_runner = await _upstream_server(second)
+
+    async def upstream(request: web.Request) -> web.Response:
+        raise web.HTTPTemporaryRedirect(location=f"{elsewhere}/v1/messages")
+
+    up, up_runner = await _upstream_server(upstream)
+    try:
+        async with (
+            _Proxy(tmp_path, authorization=_api_key_headers, upstream=up) as s,
+            s.post(f"{URL}/v1/messages", data=b"{}") as r,
+        ):
+            assert r.status == 502
+            body = await r.json()
+    finally:
+        await up_runner.cleanup()
+        await second_runner.cleanup()
+
+    assert second_hits == []
+    assert "does not follow redirects" in body["error"]["message"]
+
+
+async def _api_key_headers() -> dict[str, str]:
+    return {"x-api-key": "real-key"}
+
+
 async def test_the_rate_limit_refuses_in_the_apis_own_shape(tmp_path):
     async def upstream(request: web.Request) -> web.Response:
         return web.json_response({"ok": True})

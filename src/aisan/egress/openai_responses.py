@@ -161,12 +161,14 @@ class CodexBackend(Backend):
         await self._check_upstream()
 
     async def _check_upstream(self) -> None:
+        # Any HTTP answer proves the hop is up. A redirect is one, but it is not
+        # followed: the hop under test is the one the operator named.
         from aiohttp import ClientError, ClientSession, ClientTimeout
 
         try:
             async with (
                 ClientSession(timeout=ClientTimeout(total=10)) as session,
-                session.get(self._upstream),
+                session.get(self._upstream, allow_redirects=False),
             ):
                 pass
         except ClientError as e:

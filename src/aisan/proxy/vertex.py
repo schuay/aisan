@@ -45,6 +45,7 @@ from .http import (
     AmbiguousBody,
     LogGate,
     RateLimit,
+    is_redirect,
     load_json_unambiguous,
     relayed_response_headers,
     request_path,
@@ -329,8 +330,23 @@ def make_app(
         url = f"{upstream}{request.path_qs}"
         try:
             async with session.request(
-                request.method, url, data=body or None, headers=headers
+                request.method,
+                url,
+                data=body or None,
+                headers=headers,
+                allow_redirects=False,
             ) as up:
+                if is_redirect(up.status):
+                    log.warning(
+                        "vertex proxy: upstream %s answered %d, not followed",
+                        upstream,
+                        up.status,
+                    )
+                    return _error(
+                        502,
+                        "sandbox proxy does not follow redirects from its upstream",
+                        streaming=streaming,
+                    )
                 out = web.StreamResponse(
                     status=up.status, headers=relayed_response_headers(up.headers)
                 )

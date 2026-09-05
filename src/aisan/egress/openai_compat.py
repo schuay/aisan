@@ -219,14 +219,16 @@ class OpenAICompatBackend(Backend):
 
         `/models` because every member of the family serves it and no member
         requires a body to answer SOMETHING; the key is deliberately not
-        attached, so the check spends nothing and proves only reachability.
+        attached, so the check spends nothing and proves only reachability. A
+        redirect counts as an answer but is not followed: the hop under test is
+        the one the operator named.
         """
         from aiohttp import ClientError, ClientSession, ClientTimeout
 
         try:
             async with (
                 ClientSession(timeout=ClientTimeout(total=10)) as session,
-                session.get(f"{api.rstrip('/')}/models"),
+                session.get(f"{api.rstrip('/')}/models", allow_redirects=False),
             ):
                 pass
         except ClientError as e:

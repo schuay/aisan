@@ -111,6 +111,19 @@ def relayed_response_headers(
     return out
 
 
+# A 3xx from the upstream is the one answer no proxy here follows. The operator
+# named exactly one upstream, and the credential attached on the way out belongs
+# to that name only: aiohttp drops `authorization` when a redirect crosses
+# origins but keeps `x-api-key`, so a followed hop can carry a key -- and the
+# request body -- to a host nobody approved. Refusing is also no loss to a real
+# client, since the API this fronts does not redirect.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+def is_redirect(status: int) -> bool:
+    return status in _REDIRECT_STATUSES
+
+
 def request_path(request) -> str:
     """The request path as it will be FORWARDED -- the raw, still-encoded form,
     minus the query.

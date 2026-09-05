@@ -440,14 +440,19 @@ class AnthropicBackend(Backend):
         chain exists, and asking it anything real would spend a turn's quota to
         learn that. Any HTTP answer counts, including a 4xx -- an upstream
         refusing THIS request is still an upstream, and only a transport failure
-        means the hop is missing.
+        means the hop is missing. A redirect counts as an answer but is not
+        followed: what the check proves is that the named hop is up, not that
+        something it points at is.
         """
         from aiohttp import ClientError, ClientSession, ClientTimeout
 
         try:
             async with (
                 ClientSession(timeout=ClientTimeout(total=10)) as session,
-                session.get(f"{self._upstream.rstrip('/')}/api/hello"),
+                session.get(
+                    f"{self._upstream.rstrip('/')}/api/hello",
+                    allow_redirects=False,
+                ),
             ):
                 pass
         except ClientError as e:

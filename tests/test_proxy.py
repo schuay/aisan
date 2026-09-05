@@ -388,6 +388,56 @@ async def test_token_is_read_per_request_not_captured(tmp_path):
     assert seen == ["Bearer token-1", "Bearer token-2", "Bearer token-3"]
 
 
+async def test_an_upstream_redirect_is_refused_not_followed(tmp_path):
+    """The service-account bearer goes to the upstream this proxy names, and
+    nowhere else. Real Vertex does not redirect, which is the point: a 3xx here
+    means something is answering for it."""
+    from aiohttp import ClientSession
+
+    second_hits: list[str] = []
+
+    async def second(request: web.Request) -> web.Response:
+        second_hits.append(request.headers.get("Authorization", ""))
+        return web.json_response({"ok": True})
+
+    elsewhere, second_runner = await _upstream_server(second)
+
+    async def upstream(request: web.Request) -> web.Response:
+        raise web.HTTPTemporaryRedirect(location=f"{elsewhere}{request.path}")
+
+    up_url, up_runner = await _upstream_server(upstream)
+
+    import aisan.proxy.vertex as v
+
+    orig = v._upstream
+    v._upstream = lambda _loc: up_url
+    try:
+        app = make_app(allowlist=_allow(), token=lambda: _ready("t"), location=LOCATION)
+        sock = tmp_path / "vertex.sock"
+        runner = await serve_proxy(sock, app)
+        relay = await serve_relay(sock, 0)
+        port = relay.sockets[0].getsockname()[1]
+        try:
+            url = (
+                f"http://127.0.0.1:{port}{BASE}"
+                f"/publishers/google/models/{MODEL}:generateContent"
+            )
+            async with ClientSession() as s, s.post(url, data=b"{}") as r:
+                assert r.status == 502
+                body = await r.json()
+        finally:
+            relay.close()
+            await relay.wait_closed()
+            await runner.cleanup()
+    finally:
+        v._upstream = orig
+        await up_runner.cleanup()
+        await second_runner.cleanup()
+
+    assert second_hits == []
+    assert "does not follow redirects" in body["error"]["message"]
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_a_dead_upstream_is_502_not_a_torn_connection(tmp_path, streaming):
     """A route to Vertex that is down is one turn's failure with a legible

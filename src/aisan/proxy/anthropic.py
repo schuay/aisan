@@ -98,6 +98,7 @@ from .http import (
     LogGate,
     RateLimit,
     bearer_token,
+    is_redirect,
     load_json_unambiguous,
     relayed_response_headers,
     request_path,
@@ -549,8 +550,23 @@ def make_app(
         url = f"{base}{request.path_qs}"
         try:
             async with session.request(
-                request.method, url, data=body or None, headers=out
+                request.method,
+                url,
+                data=body or None,
+                headers=out,
+                allow_redirects=False,
             ) as up:
+                if is_redirect(up.status):
+                    log.warning(
+                        "anthropic proxy: upstream %s answered %d, not followed",
+                        base,
+                        up.status,
+                    )
+                    return _error(
+                        502,
+                        "api_error",
+                        "sandbox proxy does not follow redirects from its upstream",
+                    )
                 resp = web.StreamResponse(
                     status=up.status, headers=relayed_response_headers(up.headers)
                 )

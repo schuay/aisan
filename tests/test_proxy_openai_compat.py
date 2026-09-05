@@ -464,6 +464,39 @@ async def test_a_credential_that_cannot_be_read_is_an_error_not_a_traceback(
     assert "auth.json" in body["error"]["message"]
 
 
+async def test_an_upstream_redirect_is_refused_not_followed(tmp_path):
+    """The key goes to the upstream the operator named, and nowhere else.
+
+    This family is configured at a local or third-party gateway more often than
+    not, so "the upstream would never redirect" is not an argument available
+    here."""
+    second_hits: list[dict[str, str]] = []
+
+    async def second(request: web.Request) -> web.Response:
+        second_hits.append({k.lower(): v for k, v in request.headers.items()})
+        return web.json_response({"ok": True})
+
+    elsewhere, second_runner = await _upstream_server(second)
+
+    async def upstream(request: web.Request) -> web.Response:
+        raise web.HTTPTemporaryRedirect(location=f"{elsewhere}/chat/completions")
+
+    up, up_runner = await _upstream_server(upstream)
+    try:
+        async with (
+            _Proxy(tmp_path, token=_token, upstream=up) as s,
+            s.post(f"{URL}/chat/completions", data=b"{}") as r,
+        ):
+            assert r.status == 502
+            body = await r.json()
+    finally:
+        await up_runner.cleanup()
+        await second_runner.cleanup()
+
+    assert second_hits == []
+    assert "does not follow redirects" in body["error"]["message"]
+
+
 async def test_a_dead_upstream_is_502_not_a_torn_connection(tmp_path):
     """One turn fails with a legible reason; the client is not left retrying
     into a connection that was reset."""
