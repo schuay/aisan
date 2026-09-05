@@ -35,6 +35,8 @@
 
 == environment (the box's complete environment; --clearenv first) ==
   AI_AGENT=aisan
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+  CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF=1
   CLAUDE_CODE_MAX_RETRIES=0
   CLAUDE_CONFIG_DIR=<ROOT>/.aisan-claude-state
   DEBIAN_FRONTEND=noninteractive
@@ -193,6 +195,12 @@
   0
   --setenv
   DISABLE_AUTOUPDATER
+  1
+  --setenv
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+  1
+  --setenv
+  CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF
   1
   --chdir
   <ROOT>

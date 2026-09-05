@@ -99,6 +99,36 @@ _RETRY_ENV = (("CLAUDE_CODE_MAX_RETRIES", "0"),)
 # reported as one.
 _UPDATER_ENV = (("DISABLE_AUTOUPDATER", "1"),)
 
+# Stop the CLI dialling Anthropic behind the relay's back, and keep the feature
+# flags it would have fetched readable off disk while it cannot.
+#
+# The client reaches api.anthropic.com at that compiled-in address for work that
+# is not a model call -- feature-flag evaluation, telemetry, error reporting --
+# and ANTHROPIC_BASE_URL redirects none of it. Measured with strace, on a client
+# dressed exactly as the box's (placeholder bearer, base URL pointed elsewhere):
+# ten connect() calls to api.anthropic.com:443, four established, and none of
+# them through the proxy. Under `unshare_net` they all fail and cost only the
+# attempt; with `--net` they succeed, which is unaudited egress out of a box
+# whose whole model route is an allowlisted relay.
+#
+# They also achieve nothing. The bearer is the per-box relay token, which the
+# real API does not know, so the flag evaluation cannot come back as the
+# operator's account -- measured: a `--net` turn leaves the seeded flag cache
+# untouched, sentinel key and all.
+#
+# The variables come as a PAIR and the second one is not optional.
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC turns the traffic off, and on its own
+# it also stops the CLI reading the flags `cli.claude` seeded, dropping every one
+# to its compiled-in default. The second is the CLI's own switch for that case.
+# Measured, from its debug log, with a flag seeded off on disk:
+#
+#   both set   -- "off, from GrowthBook (the disk cache of an earlier session)"
+#   first only -- "off, from the default (GrowthBook is off for this session)"
+_FLAGS_ENV = (
+    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+    ("CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF", "1"),
+)
+
 
 def claude_code_binary() -> Path | None:
     """The `claude` entry point on this host, or None.
@@ -199,6 +229,7 @@ def claude_code(
             ("CLAUDE_CONFIG_DIR", str(state)),
             *_RETRY_ENV,
             *_UPDATER_ENV,
+            *_FLAGS_ENV,
             *extra_env,
         ),
         egress=egress,

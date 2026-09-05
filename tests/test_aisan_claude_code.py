@@ -135,6 +135,22 @@ def test_the_box_is_told_the_state_dir_through_claude_config_dir(tmp_path):
     assert env["HOME"] == str(Path.home())
 
 
+def test_the_box_keeps_its_flags_off_disk_with_the_traffic_off(tmp_path):
+    """The two variables are a pair and the pairing is the whole point.
+
+    The first stops the CLI dialling api.anthropic.com for flags, telemetry and
+    error reports -- traffic ANTHROPIC_BASE_URL does not redirect and the relay
+    therefore never sees, measured at ten connects per run on a client dressed
+    as the box's. On its own it also stops the CLI reading the flag cache
+    `cli.claude` seeds from the host, dropping every flag to its compiled-in
+    default; the second is the CLI's switch for exactly that combination. Either
+    one alone is a box whose flags do not match the account's.
+    """
+    env = dict(_spec(tmp_path).env)
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert env["CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF"] == "1"
+
+
 def test_the_state_dir_has_no_default(tmp_path):
     """It belongs to the JOB. A preset that picked one would have every box in a
     fleet writing its session history into the same directory."""
