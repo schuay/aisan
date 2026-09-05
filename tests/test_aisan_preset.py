@@ -229,9 +229,104 @@ def test_git_binds_refuses_a_pointer_into_an_unrelated_repo(tmp_path):
     assert sorted(p.name for p in (victim / ".git").iterdir()) == ["worktrees"]
 
 
-def test_git_binds_plain_repo_is_noop(tmp_path):
-    (tmp_path / ".git").mkdir()
+def test_git_binds_is_empty_without_a_git_dir(tmp_path):
     assert git_binds(tmp_path) == []
+    assert git_host_files(tmp_path) == ()
+
+
+def test_git_binds_pins_a_plain_checkouts_steering_files(tmp_path):
+    # The same host-exec vector as the linked case, one layout over: a plain
+    # checkout's .git is a directory inside the rw root, and a hook or a
+    # core.fsmonitor planted there runs as the operator on the next host-side
+    # git. Exact list, in order, for the same reason as the linked test.
+    git = tmp_path / ".git"
+    (git / "hooks").mkdir(parents=True)
+    (git / "config").write_text("[core]\n")
+    assert git_binds(tmp_path, pin_packs=True) == [
+        Bind(git, RW),  # a mount point: .git cannot be renamed out from under the pins
+        Bind(git / "config", RO),
+        Bind(git / "config.worktree", RO),
+        Bind(git / "objects" / "info" / "alternates", RO),
+        Bind(git / "hooks", RO),
+        Seal(git / "worktrees"),  # nothing creatable, so no commondir to plant
+        Bind(git / "objects" / "pack", RO),
+    ]
+    # Pure, like the linked case: the absent sources are declared, not created.
+    assert not (git / "worktrees").exists()
+    assert {e.path for e in git_host_files(tmp_path, pin_packs=True)} == {
+        git / "hooks",
+        git / "config",
+        git / "config.worktree",
+        git / "objects" / "info" / "alternates",
+        git / "worktrees",
+        git / "objects" / "pack",
+    }
+
+
+def test_git_binds_refuses_a_symlinked_git_dir(tmp_path):
+    # bwrap cannot mount over a symlink destination, so the pins could not
+    # land; and a .git pointing outside the root is a tree the box was never
+    # meant to write. Refused with a reason rather than left to bwrap's error.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo" / ".git").symlink_to(elsewhere)
+    with pytest.raises(ValueError, match="symlink"):
+        git_binds(tmp_path / "repo")
+
+
+@pytest.mark.skipif(
+    __import__("shutil").which("bwrap") is None
+    or __import__("shutil").which("git") is None,
+    reason="bubblewrap and git needed",
+)
+async def test_a_plain_checkouts_git_cannot_be_steered_or_replaced_end_to_end(
+    tmp_path,
+):
+    """Through the real interactive profile, on a real `git init` repo.
+
+    Before the pins, all three writes below succeeded from inside the box and
+    were on the host afterwards (measured). The rename is the one the file
+    pins alone do not stop: without .git itself being a mount point, `mv .git`
+    lands on the host and a fresh .git with the agent's config is what host
+    git reads next.
+    """
+    import dataclasses
+    import subprocess
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (tmp_path / "state").mkdir()
+    spec = claude_code(root, state=tmp_path / "state")
+    spec = dataclasses.replace(
+        spec, limits=dataclasses.replace(spec.limits, use_cgroup=False)
+    )
+    box = Box(spec, box_id="plain-test")
+    with box.staged():
+        out = await run_boxed(
+            f"cd {root} && "
+            "git config core.fsmonitor /tmp/x 2>&1 || echo config_refused; "
+            "echo x > .git/hooks/pre-commit 2>&1 || echo hook_refused; "
+            "mv .git .git.old 2>&1 || echo rename_refused; "
+            f"git worktree add -q {tmp_path}/wt 2>&1 || echo worktree_refused; "
+            "git -c user.name=a -c user.email=a@b commit -q --allow-empty -m m"
+            " && echo committed",
+            sandbox=_WrapperOnly(box),
+        )
+    assert "committed" in out  # ordinary git still works on the rw root
+    for refused in (
+        "config_refused",
+        "hook_refused",
+        "rename_refused",
+        "worktree_refused",
+    ):
+        assert refused in out, out
+    # And the host saw none of it.
+    assert (root / ".git").is_dir()
+    assert "fsmonitor" not in (root / ".git" / "config").read_text()
+    assert not (root / ".git" / "hooks" / "pre-commit").exists()
+    assert not (tmp_path / "wt").exists()
 
 
 def test_depot_tools_job_profile(tmp_path):
@@ -488,16 +583,17 @@ def test_the_pack_pin_follows_the_network_mode(tmp_path, unshare_net):
     assert pinned is unshare_net
 
 
-def test_a_plain_checkout_gets_no_git_policy_at_all(tmp_path):
-    """The hazard is a .git SHARED with worktrees the box cannot see. A plain
-    checkout's .git is inside the rw root and inside the session's perimeter,
-    so the policy is empty rather than merely harmless."""
+def test_a_plain_checkout_gets_the_git_policy_too(tmp_path):
+    """The steering files are a host-exec vector whichever layout holds them,
+    so the interactive profile pins them on a plain checkout the same way it
+    does on a linked worktree: the whole of `git_binds`, then the state dir."""
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     state = tmp_path / "state"
     state.mkdir()
     spec = claude_code(repo, state=state, unshare_net=True)
-    assert spec.binds == (Bind(state, RW),)  # the state dir, and nothing else
+    assert spec.binds == (*git_binds(repo, pin_packs=True), Bind(state, RW))
+    assert Bind(repo / ".git" / "hooks", RO) in spec.binds
 
 
 @pytest.mark.parametrize(

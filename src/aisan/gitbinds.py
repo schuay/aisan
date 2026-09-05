@@ -9,7 +9,9 @@ domain-specific was living in a module called `sandbox.py` next to the V8 job
 profile; the profile is now a preset, and this is a bind helper a preset calls.
 
 The hard part is that a worktree's `.git` is a POINTER, so confining the worktree
-confines nothing on its own -- see `git_binds` for the whole argument.
+confines nothing on its own -- see `git_binds` for the whole argument. A plain
+checkout's `.git` is a directory inside the rw root, and the same files inside
+it steer host-side git, so it gets the same pins.
 """
 
 from __future__ import annotations
@@ -111,7 +113,7 @@ def external_symlink_targets(
 
 
 def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
-    """The ordered binds for the main checkout's .git behind this worktree.
+    """The ordered binds for the .git behind `worktree`, whichever layout it has.
 
     A linked worktree's .git is a file pointing at <main>/.git/worktrees/<name>.
     The list reads as the policy, in mount order, later winning:
@@ -159,6 +161,28 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
     then pinned inside that hole -- which is simply what comes after it in the
     list, not a special case.
 
+    A plain checkout's .git is a directory inside the rw root. It gets the same
+    pins minus the two pointers it does not have, plus one bind that is not a
+    permission at all:
+
+        Bind(.git, RW)                a mount point, so the directory itself
+                                      cannot be renamed or unlinked from inside
+        Bind(.git/config, RO)         the same steering files as above
+        Bind(.git/config.worktree, RO)
+        Bind(.git/objects/info/alternates, RO)
+        Bind(.git/hooks, RO)
+        Seal(.git/worktrees)          nothing creatable
+        Bind(.git/objects/pack, RO)   with pin_packs
+
+    The self-bind is what makes the pins hold. Measured: with only the file
+    pins in place, `mv .git .git.old` inside the box succeeded and persisted on
+    the host, after which a fresh .git with agent-written config and hooks is
+    what host-side git reads. A mount point refuses the rename with EBUSY, and
+    so does every pin inside it. The seal is always applied here, because a
+    worktree the box creates carries a `commondir` pointer it wrote, and host
+    git run inside that worktree follows the pointer to a gitdir of the box's
+    choosing; the cost is that `git worktree add` fails inside the box.
+
     `pin_packs` is the one guard the seal above does not provide, and the seal
     is why it is needed. Sealing worktrees/ makes the siblings ABSENT, which
     also removes their HEAD and index as reachability roots -- so an in-box
@@ -177,31 +201,32 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
     pass `pin_packs=unshare_net` rather than always. Ordinary work is
     unaffected: a commit writes loose objects, and the host repacks them later.
 
-    Returns an empty list when the layout is not a linked worktree (a plain .git
-    dir is inside the rw root already) -- pin_packs included, since the hazard
-    is a .git SHARED with worktrees the box cannot see, and a plain checkout's
-    own .git is inside the session's perimeter. Raises when the pointer does not resolve
-    to a <main>/.git/worktrees/<name> layout: that means the file was already
-    poisoned before this profile was built, and failing assembly abandons the
-    turn rather than binding an attacker-named directory rw as if it were .git.
+    Returns an empty list when `worktree` has no .git at all. Raises when the
+    pointer does not resolve to a <main>/.git/worktrees/<name> layout: that
+    means the file was already poisoned before this profile was built, and
+    failing assembly abandons the turn rather than binding an attacker-named
+    directory rw as if it were .git.
     """
     layout = _git_layout(worktree)
     if layout is None:
-        return []
+        git = _plain_git(worktree)
+        if git is None:
+            return []
+        binds: list[BindSpec] = [
+            Bind(git, RW),
+            *_steering_pins(git),
+            Seal(git / "worktrees"),
+        ]
+        binds += [Bind(p, RO) for p, _is_dir in _submodule_steering(git)]
+        if pin_packs:
+            binds.append(Bind(git / "objects" / "pack", RO))
+        return binds
     gitfile, private, main_git = layout
-    alternates = main_git / "objects" / "info" / "alternates"
     # Pure: the guard sources this pins may not exist yet on a fresh checkout,
     # and creating them is a host mutation `git_host_files` declares for the Box
     # to do and undo. A bind is just a path here; resolution checks existence
     # once the ensure-paths are on disk.
-    binds: list[BindSpec] = [
-        Bind(main_git, RW),
-        Bind(gitfile, RO),
-        Bind(main_git / "config", RO),
-        Bind(main_git / "config.worktree", RO),
-        Bind(alternates, RO),
-        Bind(main_git / "hooks", RO),
-    ]
+    binds = [Bind(main_git, RW), Bind(gitfile, RO), *_steering_pins(main_git)]
     wts = main_git / "worktrees"
     if wts.is_dir():
         binds.append(Seal(wts))
@@ -216,6 +241,43 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
     if pin_packs:
         binds.append(Bind(main_git / "objects" / "pack", RO))
     return binds
+
+
+def _steering_pins(git: Path) -> list[BindSpec]:
+    """The files in a .git that steer host-side git, pinned ro in mount order:
+    the two configs, the object redirect, and the hooks."""
+    return [
+        Bind(git / "config", RO),
+        Bind(git / "config.worktree", RO),
+        Bind(git / "objects" / "info" / "alternates", RO),
+        Bind(git / "hooks", RO),
+    ]
+
+
+def _steering_host_files(git: Path) -> list[EnsurePath]:
+    """The `_steering_pins` sources a fresh checkout may lack, as ensure-paths."""
+    return [
+        EnsurePath(git / "hooks", is_dir=True),
+        EnsurePath(git / "config", is_dir=False),
+        EnsurePath(git / "config.worktree", is_dir=False),
+        # Its parent objects/info is created for it by the Box.
+        EnsurePath(git / "objects" / "info" / "alternates", is_dir=False),
+    ]
+
+
+def _plain_git(root: Path) -> Path | None:
+    """`<root>/.git` when it is a directory, None when there is none.
+
+    A symlink is refused rather than followed: bwrap will not mount over a
+    symlink destination, so the pins could not land, and a .git that points
+    outside the root is a tree the box was never meant to write.
+    """
+    git = root / ".git"
+    if git.is_symlink():
+        raise ValueError(
+            f"{git} is a symlink; refusing to pin steering files through it"
+        )
+    return git if git.is_dir() else None
 
 
 def _submodule_steering(main_git: Path) -> list[tuple[Path, bool]]:
@@ -295,18 +357,28 @@ def git_host_files(
     never repacked -- and an empty config contributes nothing while an empty
     hooks dir runs nothing, so the guard is bindable without the file having to
     pre-exist. Only these; commondir is deliberately NOT here (a missing one is
-    a refusal, not something to paper over). Empty for a plain checkout.
+    a refusal, not something to paper over). A plain checkout's list is the
+    same minus its own config.worktree, plus the worktrees/ directory the seal
+    needs to exist -- empty, git ignores it. Empty when there is no .git.
     """
     layout = _git_layout(worktree)
     if layout is None:
-        return ()
+        git = _plain_git(worktree)
+        if git is None:
+            return ()
+        ensure = [
+            *_steering_host_files(git),
+            EnsurePath(git / "worktrees", is_dir=True),
+        ]
+        ensure += [
+            EnsurePath(p, is_dir=is_dir) for p, is_dir in _submodule_steering(git)
+        ]
+        if pin_packs:
+            ensure.append(EnsurePath(git / "objects" / "pack", is_dir=True))
+        return tuple(ensure)
     _gitfile, private, main_git = layout
     ensure = [
-        EnsurePath(main_git / "hooks", is_dir=True),
-        EnsurePath(main_git / "config", is_dir=False),
-        EnsurePath(main_git / "config.worktree", is_dir=False),
-        # Its parent objects/info is created for it by the Box.
-        EnsurePath(main_git / "objects" / "info" / "alternates", is_dir=False),
+        *_steering_host_files(main_git),
         EnsurePath(private / "config.worktree", is_dir=False),
     ]
     ensure += [

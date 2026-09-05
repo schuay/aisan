@@ -11,15 +11,14 @@ path, and each one is noted where it is decided.
 **The boundary here is the perimeter, not the repo.** An interactive session is
 one the operator chose, on a tree the operator chose, sitting in front of it --
 so the box's job is to keep the agent out of the rest of the machine, and the
-worktree it was pointed at is the session's to write. On a plain checkout that
-includes `.git`: it sits inside the rw root, and `gitbinds.git_binds` returns
-nothing for it. A LINKED worktree gets that policy in full, the same as the
-unattended `depot_tools_job` profile does: its `.git` is a store shared with the host and
-the sibling worktrees, so the files that steer host-side git (hooks, configs,
-object pointers) are pinned ro and the siblings are sealed away. Otherwise a
-planted hook runs the next time host git touches the shared repo, and an in-box
-`git gc` or `git worktree prune` collects a sibling worktree out of the store
-they share.
+worktree it was pointed at is the session's to write. The one exception inside
+that tree is `.git`'s steering surface, which `gitbinds.git_binds` pins ro for a
+plain checkout and a linked worktree alike: the files that steer host-side git
+(hooks, configs, object pointers) are untracked, never show in a diff, and run
+as the operator the next time host git touches the repo. A LINKED worktree's
+`.git` is additionally a store shared with the host and the sibling worktrees,
+so the siblings are sealed away too; otherwise an in-box `git gc` or `git
+worktree prune` collects a sibling worktree out of the store they share.
 
 The CLI: launcher flags are parsed STRICTLY (no abbreviation -- `--bind` must
 not resolve to `--binds` in a tool whose flags gate mounts), and everything

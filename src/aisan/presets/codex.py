@@ -71,8 +71,9 @@ def codex(
         *(Bind(p, RO, optional=True) for p in extra_ro),
         # The .git policy for a linked worktree: the common dir rw so git works,
         # its steering files pinned ro, sibling worktrees sealed away, and this
-        # session's own dir punched back through. Empty for a plain checkout,
-        # whose .git is inside the rw root already.
+        # session's own dir punched back through. A plain checkout gets the
+        # same pins on the .git inside its root, made a mount point so it cannot
+        # be renamed out from under them.
         #
         # `pin_packs` under unshare_net: the seal removes the siblings' HEAD and
         # index as reachability roots, so an in-box `git gc` would prune objects
