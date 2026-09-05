@@ -219,6 +219,30 @@ def test_the_known_credential_list_covers_the_mint_from_disk_backends(monkeypatc
     assert set(adc()) <= known
 
 
+def test_the_claude_credential_follows_the_hosts_config_redirect(tmp_path, monkeypatch):
+    """CLAUDE_CONFIG_DIR moves the whole config directory, credential included
+    (read out of claude-cli 2.1.246). The model menu already followed it while
+    the credential path did not, which left `known_credential_paths` -- the list
+    the launcher refuses binds against -- naming a file the host does not use,
+    and the refresh child forcing the wrong directory on host Claude."""
+    from pathlib import Path
+
+    from aisan.egress import known_credential_paths
+    from aisan.egress.anthropic import default_credentials
+    from aisan.session_mcp import claude_config_file
+
+    configured = tmp_path / "elsewhere"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(configured))
+
+    assert default_credentials() == configured / ".credentials.json"
+    assert claude_config_file() == configured / ".claude.json"
+    assert default_credentials() in set(known_credential_paths())
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    assert default_credentials() == Path.home() / ".claude" / ".credentials.json"
+    assert claude_config_file() == Path.home() / ".claude.json"
+
+
 def test_no_launcher_bind_may_contain_a_backend_credential_store(tmp_path, monkeypatch):
     """Structural, over every KNOWN backend credential rather than one box's
     egress: a root that passes the venv proof but contains a credential store

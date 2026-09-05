@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Literal
 
 from .egress import known_credential_paths
+from .egress.anthropic import claude_config_dir
 from .egress.base import credential_overlap
 from .launch import interpreter_roots
 from .statedir import write_sealed
@@ -243,14 +244,11 @@ def claude_config_file() -> Path:
 
     Public because `cli.claude` seeds from the same file: a second copy of this
     rule is a second chance to forget the redirect, and forgetting it is silent
-    -- the file is simply not where the copy looks.
+    -- the file is simply not where the copy looks. The redirect itself comes
+    from `egress.anthropic`, which needs it for the credential in the same
+    directory.
     """
-    configured = os.environ.get("CLAUDE_CONFIG_DIR")
-    return (
-        Path(configured) / ".claude.json"
-        if configured
-        else Path.home() / ".claude.json"
-    )
+    return (claude_config_dir() or Path.home()) / ".claude.json"
 
 
 def _opencode_config_file() -> Path:

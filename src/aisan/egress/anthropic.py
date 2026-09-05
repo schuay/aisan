@@ -85,11 +85,30 @@ class CredentialRefreshError(Exception):
 # function is the source of truth: guards that enumerate every backend's
 # credential (`egress.known_credential_paths`) call it so the answer tracks
 # the environment rather than whatever HOME was at import.
+def claude_config_dir() -> Path | None:
+    """CLAUDE_CONFIG_DIR if the host sets it, else None for the default layout.
+
+    Shared with `session_mcp.claude_config_file` because the two callers want
+    different things out of the same redirect: read out of claude-cli 2.1.246,
+    the config DIRECTORY is `CLAUDE_CONFIG_DIR || ~/.claude` while the config
+    FILE is `CLAUDE_CONFIG_DIR/.claude.json || ~/.claude.json` -- one level
+    apart until the override collapses them. So each caller keeps its own
+    default and only the override is stated once.
+    """
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(configured) if configured else None
+
+
 def default_credentials() -> Path:
-    return Path.home() / ".claude" / ".credentials.json"
+    """Where host Claude keeps its credential, honoring the config redirect.
 
+    Not a module constant: a constant would snapshot the environment at import
+    and hand every later reader the wrong directory on a host that sets
+    CLAUDE_CONFIG_DIR -- including `known_credential_paths`, whose whole job is
+    to know where the real credential is before refusing a mount over it.
+    """
+    return (claude_config_dir() or Path.home() / ".claude") / ".credentials.json"
 
-DEFAULT_CREDENTIALS = default_credentials()
 
 # The standard Anthropic API endpoint. Callers can override it for a compatible
 # proxy without changing the route exposed inside the box.
