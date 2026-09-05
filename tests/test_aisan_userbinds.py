@@ -229,8 +229,28 @@ def test_a_backend_without_a_file_cannot_be_exposed(tmp_path):
         async def serve(self, runtime_dir):  # pragma: no cover - shape only
             yield
 
-    f = _spec_file(tmp_path, f'ro = ["{Path.home()}"]\n')
-    assert load(f, egress=(_Minted(),)).binds  # even ~ is fine: nothing to expose
+    f = _spec_file(tmp_path, f'ro = ["{tmp_path / "elsewhere"}"]\n')
+    assert load(f, egress=(_Minted(),)).binds
+
+
+def test_a_user_bind_may_not_name_another_clients_credential(tmp_path, monkeypatch):
+    """The per-backend guard only knows this box's own egress, so `aisan claude
+    --binds` naming ~/.codex was accepted -- a real credential in a box reviewed
+    as holding none. The MCP launcher-bind guard already checks the whole known
+    list; a user file is the less audited of the two inputs."""
+    from aisan.egress.anthropic import AnthropicBackend
+
+    home = tmp_path / "home"
+    codex = home / ".codex"
+    codex.mkdir(parents=True)
+    (codex / "auth.json").write_text("{}")
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    f = _spec_file(tmp_path, f'ro = ["{codex}"]\n')
+    with pytest.raises(ValueError, match=r"auth\.json"):
+        load(f, egress=(AnthropicBackend(credentials=tmp_path / "creds.json"),))
 
 
 def test_egress_is_required_so_the_guard_is_never_off_by_default(tmp_path):

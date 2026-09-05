@@ -88,6 +88,11 @@ caller can route around it. This one is deliberately the stricter of the two:
 a path a person wrote down may not name the credential even if some later
 mount would go on to cover it.
 
+The guard then asks the same question of every OTHER backend's credential
+(`known_credential_paths`), because this box's egress cannot name them: an
+`aisan claude --binds` file listing `~/.codex` is a real credential in a box
+whose review said it held none.
+
 Git-awareness is NOT applied here. For interactive sessions the perimeter
 model treats the whole root as the session's, and hook-pinning user repos
 would be a different model applied inconsistently; the one measured trap --
@@ -104,7 +109,8 @@ from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
 
-from .egress.base import Backend, credential_exposure
+from .egress import known_credential_paths
+from .egress.base import Backend, credential_exposure, credential_overlap
 from .sandbox import RO, RW, Bind, BindSpec, Overlay
 
 __all__ = ["UserSpec", "load"]
@@ -278,6 +284,25 @@ def _load(
             f"{path}: {src} would expose the {backend.name} backend's"
             f" credential at {cred} -- a user bind may not name it, nor"
             " anything containing it or inside it"
+        )
+    # Then every OTHER backend's credential, which this box's egress cannot
+    # name. `aisan claude --binds` handing a box ~/.codex is a real credential
+    # in a box that was reviewed as holding none, and the box's own backend list
+    # has no reason to mention it. The MCP launcher-bind guard already asks the
+    # question this way; a user file is the less audited of the two inputs.
+    sources = [
+        src
+        for spec in binds
+        if (src := getattr(spec, "path", None) or getattr(spec, "src", None))
+        is not None
+    ]
+    other = credential_overlap(sources, known_credential_paths())
+    if other is not None:
+        src, cred = other
+        raise ValueError(
+            f"{path}: {src} would expose the credential at {cred} -- it belongs"
+            " to a backend this box does not carry, but a box that can read it"
+            " can use it"
         )
     return UserSpec(binds, tuple(dirs))
 
