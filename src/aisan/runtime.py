@@ -21,16 +21,14 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import os
-import stat
-import tempfile
 from pathlib import Path
 
+from .private import prepare_private_dir, private_root
 from .sandbox import RO, Bind
 
-# Names the directory as ours, so an operator seeing it in the system temp dir
+# Names the directory as ours, so an operator seeing it in the private root
 # knows what left it there and a stale one is safe to remove.
-_DIR_PREFIX = "aisan-proxy-"
+_DIR_PREFIX = "proxy-"
 
 # The manifest file name. Read by the in-box launcher, written by the Box.
 MANIFEST_NAME = "relays.json"
@@ -38,44 +36,33 @@ CLIENT_ENV_NAME = "client-env.json"
 
 
 def runtime_dir(box_id: str) -> Path:
-    """This box's directory, under the system temp dir, named by a digest.
+    """This box's directory, under aisan's fixed private root, by digest.
 
     The digest is not obfuscation, it is a length bound. A UNIX socket path is
     capped at 108 bytes (sizeof sun_path), and the natural path -- an operator's
     control root plus a job id plus "vertex.sock" -- once reached 129 bytes, so
     bind() died "AF_UNIX path too long" and took the job with
     it. Both terms were unbounded and neither was ours to shorten. Hashing makes
-    the length independent of the caller's naming entirely: /tmp/aisan-proxy-XXXX
-    is 26 bytes and leaves ~80 for the file name on any sane system.
+    the length independent of the caller's naming entirely:
+    /tmp/aisan-UID/proxy-XXXX is short and leaves ample room for the file name.
 
     Truncated to 16 hex chars (64 bits). A collision means two live boxes share
     a socket directory, which needs a birthday pair among boxes alive at the
     same moment -- a population in the tens, not the billions.
     """
     digest = hashlib.sha256(box_id.encode()).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / f"{_DIR_PREFIX}{digest}"
+    return private_root() / f"{_DIR_PREFIX}{digest}"
 
 
 def prepare_runtime_dir(box_id: str) -> Path:
     """Create the directory, private to this user, and return it.
 
-    0o700 because on a shared host the system temp dir is world-writable and
-    these sockets are unauthenticated capabilities: the host halves behind them
-    hold the credentials, so anyone who can connect gets model calls and RBE
-    calls on somebody else's identity.
+    Both this directory and its parent are 0o700 because the system temp dir is
+    world-writable and these sockets are unauthenticated capabilities: the host
+    halves behind them hold the credentials, so anyone who can connect gets
+    model calls and RBE calls on somebody else's identity.
     """
-    d = runtime_dir(box_id)
-    d.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        info = d.lstat()
-    except OSError as e:
-        raise RuntimeError(f"cannot inspect runtime directory {d}: {e}") from e
-    if not stat.S_ISDIR(info.st_mode):
-        raise RuntimeError(f"runtime path is not a directory: {d}")
-    if info.st_uid != os.getuid():
-        raise PermissionError(f"runtime directory is not owned by this user: {d}")
-    if info.st_mode & 0o077:
-        raise PermissionError(f"runtime directory is too permissive: {d}")
+    d = prepare_private_dir(runtime_dir(box_id))
     # Clear the control files a prior run may have left. A --net run writes
     # client-env.json; a SIGKILL skips the cleanup that would remove it; and the
     # launcher checks client-env BEFORE the manifest -- so a stale one makes the

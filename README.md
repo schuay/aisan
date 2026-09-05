@@ -62,7 +62,7 @@ $ aisan claude /path/to/repo --explain
   network   own namespace (no route off the machine)
 
 == egress backends (host half on a socket, in-box on loopback) ==
-  anthropic 127.0.0.1:8713 -> /tmp/aisan-proxy-59d1d1bc/anthropic.sock
+  anthropic 127.0.0.1:8713 -> /tmp/aisan-1000/proxy-59d1d1bc/anthropic.sock
 
 == tmpfs mounts (mounted before binds; intended writable scratch) ==
   [ 39] /tmp  (2147483648)
@@ -73,7 +73,8 @@ $ aisan claude /path/to/repo --explain
   [ 45] rw-root   /path/to/repo
   [ 63] rw        /home/user/.cache/aisan-claude/aisan-4475d1c31168
   [ 66] ro        /home/user/.config/git/config
-  [ 69] ro        /tmp/aisan-proxy-59d1d1bc
+  [ 69] seal      /tmp/aisan-1000
+  [ 72] ro        /tmp/aisan-1000/proxy-59d1d1bc
 
 == environment (the box's complete environment; --clearenv first) ==
   CLAUDE_CONFIG_DIR=/path/to/repo/.aisan-claude-state

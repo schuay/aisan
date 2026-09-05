@@ -835,6 +835,8 @@ Path(os.environ["AISAN_REFRESH_TEST_MARKER"]).write_text(json.dumps({
     "oauth_token_present": "CLAUDE_CODE_OAUTH_TOKEN" in os.environ,
     "cwd": os.getcwd(),
     "cwd_entries": sorted(os.listdir(os.getcwd())),
+    "path_env": {name: os.environ.get(name) for name in
+                 ("PWD", "TMPDIR", "TMP", "TEMP", "OLDPWD", "INIT_CWD")},
 }))
 raise SystemExit(23)
 """
@@ -880,6 +882,14 @@ raise SystemExit(23)
         "oauth_token_present": False,
         "cwd": result["cwd"],
         "cwd_entries": [],
+        "path_env": {
+            "PWD": result["cwd"],
+            "TMPDIR": result["cwd"],
+            "TMP": result["cwd"],
+            "TEMP": result["cwd"],
+            "OLDPWD": None,
+            "INIT_CWD": None,
+        },
     }
     # Not the launcher's cwd -- normally the repository the boxed agent has been
     # editing, where a planted CLAUDE.md or settings file would be read by a host

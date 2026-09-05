@@ -17,7 +17,7 @@ confinement bug lives, and none of them is visible in the spec.
 
 The checkout is synthetic and the preset's host-dependent inputs are pinned
 (depot_tools, the vpython cache), so what is left in the file is policy. See
-`normalise` for the four host facts that are replaced and the reasoning for
+`normalise` for the five host facts that are replaced and the reasoning for
 each; the rest is verbatim on purpose.
 
 Regenerate with:

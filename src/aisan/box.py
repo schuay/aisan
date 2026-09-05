@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Self
 
 from .egress.base import Backend, BackendActivation
+from .private import private_root
 from .runtime import (
     cleanup_runtime_dir,
     prepare_runtime_dir,
@@ -41,7 +42,7 @@ from .runtime import (
     write_client_env,
     write_manifest,
 )
-from .sandbox import RO, RW, Bind, Mount, Sandbox
+from .sandbox import RO, RW, Bind, Mount, Sandbox, Seal
 from .spec import BoxSpec
 
 
@@ -281,7 +282,7 @@ class Box:
     def _sandbox(self) -> Sandbox:
         """The spec plus what egress costs, as a resolvable Sandbox.
 
-        Three additions, and each is exactly what the spec deliberately does not
+        Four additions, and each is exactly what the spec deliberately does not
         carry -- something derived from the box's IDENTITY, which does not exist
         until there is a box:
 
@@ -296,6 +297,8 @@ class Box:
           (a box rooted at aisan's own checkout is the case that forced this)
           keeps the spec's grant, and the launcher bind for it is dropped
           below -- a default does not downgrade an explicit grant.
+        - a seal over aisan's private host root, so no box can observe credential
+          children or another box's unauthenticated runtime capabilities;
         - the runtime dir, ro, so isolated relays can reach sockets and the
           shared-network launcher can read its protected client environment.
           The box has no business changing either control surface.
@@ -345,6 +348,11 @@ class Box:
                 and _rw_grant_covers(b.path, self.spec)
             )
         ]
+        # Hide the whole shared host-control namespace first. This box's own
+        # runtime directory is the one deliberate hole punched through it below.
+        # allow_missing is required before the first helper or runtime has
+        # created the root; bwrap can synthesize the box-side mountpoint.
+        binds.append(Seal(private_root(), allow_missing=True))
         if self.spec.egress:
             binds.append(runtime_bind(self.box_id))
             for backend in self.spec.egress:
@@ -362,6 +370,21 @@ class Box:
             unshare_net=self.spec.unshare_net,
         )
 
+        # The private-root invariant is broader than backend credentials: it
+        # protects host credential children and every other live box's runtime
+        # sockets and shared-network token. The current box's own runtime is the
+        # sole allowed source below that root. A bind-over of the root at another
+        # destination is still found because the check reads resolved mounts,
+        # not just the seal at the root's ordinary name.
+        allowed = (self.runtime_dir,) if self.spec.egress else ()
+        hit = sandbox.exposed_path((private_root(),), allowed_sources=allowed)
+        if hit is not None:
+            src, path = hit
+            raise ValueError(
+                f"box {self.box_id}: mount {src} would expose aisan's private"
+                f" host-control root at {path}"
+            )
+
         # The credential-absence invariant, at the same choke point as the
         # mount-order leak check and asked the same way: of the finished mount
         # list rather than of the spec that produced it. A spec is caller input
@@ -370,12 +393,12 @@ class Box:
         # system surface is mounted whether or not any spec names it, and on a
         # host whose home sits under /usr that surface is the credential's own
         # ancestor. Both halves are the same question about the box, so both are
-        # decided by `exposed_credential`. Here rather than in
+        # decided by `exposed_path`. Here rather than in
         # BoxSpec.__post_init__ because the backends own the paths, and after the
         # composition above because the answer depends on the whole list, root
         # and library-authored binds included.
         for backend in self.spec.egress:
-            hit = sandbox.exposed_credential(backend.credentials)
+            hit = sandbox.exposed_path(backend.credentials)
             if hit is not None:
                 src, cred = hit
                 raise ValueError(

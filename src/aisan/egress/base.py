@@ -106,7 +106,7 @@ class Backend(abc.ABC):
     port: int
     #: Filesystem locations holding this backend's credential. The Box refuses
     #: a box whose finished mount list leaves one of them readable inside
-    #: (`sandbox.Sandbox.exposed_credential`), because the credential-absence
+    #: (`sandbox.Sandbox.exposed_path`), because the credential-absence
     #: claim is subtraction and any mount publishing the file undoes it. Empty,
     #: the default, for a backend whose credential never touches disk: one
     #: minted in memory, or none at all.
@@ -236,7 +236,7 @@ def credential_exposure(
     caller left: a path a person wrote into a --binds file may not name a
     credential, whether or not the finished box would go on to mask it. Whether
     the BOX can read the file is a different question with a different answer,
-    and it is `sandbox.Sandbox.exposed_credential` that decides it, over the
+    and it is `sandbox.Sandbox.exposed_path` that decides it, over the
     resolved mounts. Deliberately the stricter of the two here: a mount that
     survives only because something later covers it is not what anyone means to
     write down.

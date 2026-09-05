@@ -22,7 +22,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
-from .hostproc import neutral_cwd
+from .hostproc import HostChild, neutral_child
 
 # Returns (access_token, aware-UTC expiry). Tests plug in here rather than
 # reaching for a real cloud credential, which is exactly the dependency the
@@ -92,11 +92,11 @@ async def rbe_token(lifetime_s: int = 1800) -> str:
     # An empty cwd, like the credential-refresh children get: this runs as the
     # operator with the durable login in reach, so it should not start in the
     # repository a box has been writing to.
-    with neutral_cwd() as cwd:
-        return await _luci_token(lifetime_s, cwd)
+    with neutral_child() as child:
+        return await _luci_token(lifetime_s, child)
 
 
-async def _luci_token(lifetime_s: int, cwd: str) -> str:
+async def _luci_token(lifetime_s: int, child: HostChild) -> str:
     proc = await asyncio.create_subprocess_exec(
         "luci-auth",
         "token",
@@ -111,7 +111,8 @@ async def _luci_token(lifetime_s: int, cwd: str) -> str:
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
+        env=child.env,
+        cwd=child.cwd,
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), _TOKEN_TIMEOUT_S)

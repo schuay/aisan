@@ -55,10 +55,17 @@ async def test_rbe_token_starts_luci_auth_in_an_empty_directory(monkeypatch, tmp
     launcher_cwd.mkdir()
     (launcher_cwd / ".netrc").write_text("machine example.com\n")
     monkeypatch.chdir(launcher_cwd)
+    monkeypatch.setenv("TMPDIR", str(launcher_cwd))
+    monkeypatch.setenv("OLDPWD", str(launcher_cwd))
+    monkeypatch.setenv("INIT_CWD", str(launcher_cwd))
 
     assert await mint.rbe_token() == "a-token"
     assert captured["cwd"] != str(launcher_cwd)
     assert captured["entries"] == []
+    for name in ("PWD", "TMPDIR", "TMP", "TEMP"):
+        assert captured["env"][name] == str(captured["cwd"])
+    assert "OLDPWD" not in captured["env"]
+    assert "INIT_CWD" not in captured["env"]
 
 
 async def test_rbe_token_survives_non_utf8_output(monkeypatch):

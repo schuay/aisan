@@ -13,6 +13,7 @@
   [..] <TMP>  (2147483648)
   [..] <HOME>  (1073741824  <- $HOME)
   [..] <MAIN>/.git/worktrees  (no size)
+  [..] <AISAN PRIVATE>  (no size)
 
 == binds in argv order (later shadows earlier on overlap) ==
   system    /usr /bin /lib /lib64 /sbin /etc /proc /dev /run/systemd/journal/stdout
@@ -30,9 +31,11 @@
   [..] ro-sub    <HOME>/.cache/opencode/models.json
   <AISAN RUNTIME>
   [..] seal-ro   <MAIN>/.git/worktrees
+  [..] seal-ro   <AISAN PRIVATE>
 
 == sealed directories (empty in the box; nothing creatable) ==
   <MAIN>/.git/worktrees
+  <AISAN PRIVATE>
 
 == environment (the box's complete environment; --clearenv first) ==
   AI_AGENT=aisan
@@ -139,8 +142,12 @@
   <OPENCODE_CACHE>/models.json
   <HOME>/.cache/opencode/models.json
   <AISAN RUNTIME>
+  --tmpfs
+  <AISAN PRIVATE>
   --remount-ro
   <MAIN>/.git/worktrees
+  --remount-ro
+  <AISAN PRIVATE>
   --unshare-pid
   --unshare-ipc
   --unshare-uts

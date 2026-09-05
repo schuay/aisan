@@ -29,6 +29,7 @@ from aisan.sandbox import (
     RW,
     Bind,
     BindOver,
+    Mount,
     Overlay,
     Sandbox,
     Seal,
@@ -543,6 +544,37 @@ def test_seal_source_must_exist(tmp_path):
     assert not (tmp_path / "gone").exists()
 
 
+def test_an_internal_seal_may_hide_a_path_before_it_exists(tmp_path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    absent = tmp_path / "reserved" / "future"
+    boxed = Sandbox(
+        root=root,
+        binds=(Seal(absent, allow_missing=True),),
+        use_cgroup=False,
+    )
+
+    mounts = boxed.resolve()
+    assert Mount("tmpfs", absent) in mounts
+    assert Mount("seal-ro", absent) in mounts
+    assert not absent.exists()
+
+
+def test_an_internal_seal_still_refuses_an_existing_non_directory(tmp_path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    invalid = tmp_path / "reserved"
+    invalid.write_text("not a directory\n")
+    boxed = Sandbox(
+        root=root,
+        binds=(Seal(invalid, allow_missing=True),),
+        use_cgroup=False,
+    )
+
+    with pytest.raises(NotADirectoryError, match="seal path is not a directory"):
+        boxed.resolve()
+
+
 def test_ro_ancestor_of_tmpfs_phases_before_it(tmp_path):
     # The motivating bug: a ro bind that is an ANCESTOR of a tmpfs mount must land
     # BEFORE the tmpfs, or it shadows the tmpfs read-only ($HOME/.cache, where
@@ -796,6 +828,34 @@ def test_bind_over_source_must_exist(tmp_path):
     box = Sandbox(root=root, binds=(BindOver(tmp_path / "gone", Path("/etc/x")),))
     with pytest.raises(FileNotFoundError, match="bind-over source missing"):
         box.wrapper()
+
+
+@pytest.mark.parametrize("destination", [Path("relative"), Path("/safe/../escape")])
+def test_mount_destinations_cannot_depend_on_cwd_or_parent_traversal(
+    tmp_path, destination
+):
+    src = tmp_path / "source"
+    src.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    box = Sandbox(root=root, binds=(BindOver(src, destination),))
+
+    with pytest.raises(
+        ValueError, match="mount destination must be absolute and contain no"
+    ):
+        box.resolve()
+
+
+def test_the_rw_root_cannot_contain_parent_traversal(tmp_path):
+    real_root = tmp_path / "wt"
+    real_root.mkdir()
+    written_root = real_root / ".." / "wt"
+    box = Sandbox(root=written_root)
+
+    with pytest.raises(
+        ValueError, match="mount destination must be absolute and contain no"
+    ):
+        box.resolve()
 
 
 def test_bind_over_cannot_shadow_the_rw_root(tmp_path):

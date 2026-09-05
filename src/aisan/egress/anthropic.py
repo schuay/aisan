@@ -51,7 +51,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from ..hostproc import neutral_cwd
+from ..hostproc import neutral_child
 from ..proxy.anthropic import BodyPolicy, make_app
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
@@ -624,7 +624,7 @@ async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> N
         )
         # The directory outlives the child, not just the spawn: a cwd unlinked
         # under a running process is a `getcwd` failure waiting to happen.
-        with neutral_cwd() as cwd:
+        with neutral_child(env) as child:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 "--safe-mode",
@@ -636,8 +636,8 @@ async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> N
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
-                env=env,
-                cwd=cwd,
+                env=child.env,
+                cwd=child.cwd,
             )
             try:
                 # The sink makes a nonzero status expected. The credential

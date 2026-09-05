@@ -153,7 +153,10 @@ async def test_host_codex_refresh_starts_in_an_empty_directory(tmp_path, monkeyp
         "    if message.get('id') == 1:\n"
         "        pathlib.Path(os.environ['CODEX_HOME'], 'cwd.json').write_text(\n"
         "            json.dumps({'cwd': os.getcwd(),\n"
-        "                        'entries': sorted(os.listdir('.'))}))\n"
+        "                        'entries': sorted(os.listdir('.')),\n"
+        "                        'env': {k: os.environ.get(k) for k in\n"
+        "                                ('PWD', 'TMPDIR', 'TMP', 'TEMP',\n"
+        "                                 'OLDPWD', 'INIT_CWD')}}))\n"
         "        print(json.dumps({'id': 1, 'result': {\n"
         "            'account': {'type': 'chatgpt'}}}), flush=True)\n"
     )
@@ -167,6 +170,10 @@ async def test_host_codex_refresh_starts_in_an_empty_directory(tmp_path, monkeyp
     seen = json.loads((home / "cwd.json").read_text())
     assert seen["entries"] == []
     assert seen["cwd"] != str(launcher_cwd)
+    for name in ("PWD", "TMPDIR", "TMP", "TEMP"):
+        assert seen["env"][name] == seen["cwd"]
+    assert seen["env"]["OLDPWD"] is None
+    assert seen["env"]["INIT_CWD"] is None
 
 
 async def test_host_codex_refresh_uses_the_managed_account_rpc(tmp_path):

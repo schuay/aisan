@@ -35,7 +35,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..hostproc import neutral_cwd
+from ..hostproc import HostChild, neutral_child
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
 from ..proxy.openai_responses import make_app
@@ -268,13 +268,11 @@ async def _refresh_chatgpt_login(command: tuple[str, ...], codex_home: Path) -> 
     # the repository the boxed agent has been editing. The child is given an
     # empty one instead, kept alive for as long as it runs; its real
     # configuration comes from CODEX_HOME.
-    with neutral_cwd() as cwd:
-        await _drive_account_read(command, codex_home, cwd)
+    with neutral_child({**os.environ, "CODEX_HOME": str(codex_home)}) as child:
+        await _drive_account_read(command, child)
 
 
-async def _drive_account_read(
-    command: tuple[str, ...], codex_home: Path, cwd: str
-) -> None:
+async def _drive_account_read(command: tuple[str, ...], child: HostChild) -> None:
     process = await asyncio.create_subprocess_exec(
         *command,
         "app-server",
@@ -286,8 +284,8 @@ async def _drive_account_read(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
-        env={**os.environ, "CODEX_HOME": str(codex_home)},
-        cwd=cwd,
+        env=child.env,
+        cwd=child.cwd,
     )
     assert process.stdin is not None
     assert process.stdout is not None

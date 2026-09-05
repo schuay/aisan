@@ -166,6 +166,11 @@ class Seal:
     """
 
     path: Path
+    # An absent destination is normally a caller mistake: bwrap may create it
+    # through a writable host bind as a side effect. Internal reserved paths are
+    # different. They must be hidden before their first user appears, so their
+    # seals explicitly opt into an absent destination.
+    allow_missing: bool = False
 
 
 BindSpec = Bind | BindOver | Overlay | Seal
@@ -301,9 +306,8 @@ def paths_overlap(a: Path, b: Path) -> bool:
     return ra.is_relative_to(rb) or rb.is_relative_to(ra)
 
 
-def _reachable_through(mounts: list[Mount], path: Path) -> Path | None:
-    """The source of the mount that leaves `path` readable in the box after
-    `mounts` have been applied in order, or None.
+def _reachable_through(mounts: list[Mount], path: Path) -> tuple[Path, ...]:
+    """Sources leaving any part of `path` readable after ordered mounts.
 
     Reachability, not containment, and the difference is the whole point. A
     mount whose SOURCE overlaps the path publishes it, at the mount's
@@ -346,7 +350,7 @@ def _reachable_through(mounts: list[Mount], path: Path) -> Path | None:
     # The LAST source to publish a given box path, because re-publishing the
     # same path overwrites the value while keeping its position: what the
     # operator has to remove is the mount that won, not the one it covered.
-    return next(iter(visible.values()), None)
+    return tuple(visible.values())
 
 
 def _strict_ancestor(a: Path, b: Path) -> bool:
@@ -357,6 +361,20 @@ def _strict_ancestor(a: Path, b: Path) -> bool:
     except OSError:
         return False
     return ra != rb and rb.is_relative_to(ra)
+
+
+def _validate_destination(path: Path) -> None:
+    """Require a box path whose kernel meaning matches its written shape.
+
+    Relative destinations depend on the launcher cwd. Parent traversal is more
+    subtle: normalizing it in Python is not sound when an earlier component is
+    a symlink, while leaving it literal makes the mount checks reason about a
+    different path from the one the kernel reaches. Refuse both forms instead.
+    """
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError(
+            f"mount destination must be absolute and contain no '..': {path}"
+        )
 
 
 @dataclass(frozen=True)
@@ -441,6 +459,7 @@ class Sandbox:
         in_effect: dict[Path, Mode] = {}
 
         def emit(m: Mount) -> None:
+            _validate_destination(m.dst)
             mounts.append(m)
             if not m.covers:
                 return
@@ -494,9 +513,11 @@ class Sandbox:
                     if not p.is_dir():
                         raise FileNotFoundError(f"tmp-overlay source missing: {p}")
                     emit(Mount("overlay", p, p))
-                case Seal(path=p):
-                    if not p.is_dir():
+                case Seal(path=p, allow_missing=allow_missing):
+                    if not allow_missing and not p.is_dir():
                         raise FileNotFoundError(f"seal source missing: {p}")
+                    if p.exists() and not p.is_dir():
+                        raise NotADirectoryError(f"seal path is not a directory: {p}")
                     emit(Mount("tmpfs", p))
                     seal_ro.append(Mount("seal-ro", p))
                 case BindOver(src=src, dst=dst):
@@ -505,17 +526,25 @@ class Sandbox:
                     emit(Mount("ro", dst, src))
         return [*mounts, *seal_ro]
 
-    def exposed_credential(
-        self, credentials: Iterable[Path]
+    def exposed_path(
+        self,
+        paths: Iterable[Path],
+        *,
+        allowed_sources: Iterable[Path] = (),
     ) -> tuple[Path, Path] | None:
-        """The first (mount source, credential) this profile leaves readable in
-        the box, or None. The credential-absence invariant, asked of the box.
+        """The first (mount source, protected path) left readable in the box.
 
         Over the resolved mounts, with the fixed system surface in front of them,
         for the same reason `_assert_no_leak` runs over that list: it is what the
         box gets. The question a caller needs answered is "can the payload read
         this file", and no reading of the bind list alone answers it -- in either
         direction.
+
+        `allowed_sources` names intentional holes inside a protected directory.
+        A source equal to or below one of those paths is ignored; an ancestor is
+        not, because binding the ancestor would publish protected siblings too.
+        Every surviving publication is examined, so one allowed hole cannot hide
+        another mount that exposes the same protected path through an alias.
 
         Not, in particular, "does a bind name a path containing the credential".
         That proxy fails on a host whose home lives UNDER a system root. Some
@@ -534,13 +563,16 @@ class Sandbox:
           RO-ancestor hoisting above exist; this is the third symptom of it.
 
         So a bind naming `/usr` here is ordinary rather than alarming, and the
-        thing worth refusing is a box that can actually read the file.
+        thing worth refusing is a box that can actually read the protected path.
         """
         mounts = [*_system_mounts(), *self.resolve()]
-        for cred in credentials:
-            source = _reachable_through(mounts, cred)
-            if source is not None:
-                return source, cred
+        allowed = tuple(_resolved(p) for p in allowed_sources)
+        for path in paths:
+            for source in _reachable_through(mounts, path):
+                resolved_source = _resolved(source)
+                if any(resolved_source.is_relative_to(p) for p in allowed):
+                    continue
+                return source, path
         return None
 
     def wrapper(self) -> list[str]:

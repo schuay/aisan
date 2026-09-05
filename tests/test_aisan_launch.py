@@ -34,6 +34,7 @@ from aisan.launch import (
 )
 from aisan.runtime import (
     CLIENT_ENV_NAME,
+    cleanup_runtime_dir,
     prepare_runtime_dir,
     write_client_env,
     write_manifest,
@@ -353,14 +354,13 @@ def test_prepare_runtime_dir_clears_a_stale_client_env(monkeypatch, tmp_path):
     # stale one makes the next isolated run take the shared branch and never
     # start relays. prepare_runtime_dir clears both control files so only this
     # run's fresh one survives.
-    monkeypatch.setenv("TMPDIR", str(tmp_path))
-    import aisan.runtime as rt
-
-    monkeypatch.setattr(rt.tempfile, "gettempdir", lambda: str(tmp_path))
     d = prepare_runtime_dir("box-l6")
-    write_client_env(d, {"AISAN_DEAD": "1"})
-    assert (d / CLIENT_ENV_NAME).exists()
-    # A second prepare (the next run reusing the same box_id) must clear it.
-    d2 = prepare_runtime_dir("box-l6")
-    assert d2 == d
-    assert not (d2 / CLIENT_ENV_NAME).exists()
+    try:
+        write_client_env(d, {"AISAN_DEAD": "1"})
+        assert (d / CLIENT_ENV_NAME).exists()
+        # A second prepare (the next run reusing the same box_id) must clear it.
+        d2 = prepare_runtime_dir("box-l6")
+        assert d2 == d
+        assert not (d2 / CLIENT_ENV_NAME).exists()
+    finally:
+        cleanup_runtime_dir("box-l6")

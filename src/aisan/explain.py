@@ -432,13 +432,13 @@ def normalise(
     """Replace this host's paths in an explain report with stable placeholders.
 
     For snapshot tests. The report describes one host in four ways and only
-    four: the home directory, the system temp dir (which the runtime dir's
-    digest hangs off), the checkout the caller passed as the root, and aisan's
-    own runtime binds. None of them is a property of the policy, and all of them
-    differ between a developer machine and CI, so a raw snapshot would fail
-    everywhere except where it was generated -- and a snapshot that fails for a
-    reason nobody caused is a snapshot people regenerate reflexively, which is
-    how a preset drifts behind a green test.
+    five: the home directory, the system temp dir, aisan's per-user private root,
+    the checkout the caller passed as the root, and aisan's own runtime binds.
+    None of them is a property of the policy, and all of them differ between a
+    developer machine and CI, so a raw snapshot would fail everywhere except
+    where it was generated -- and a snapshot that fails for a reason nobody
+    caused is a snapshot people regenerate reflexively, which is how a preset
+    drifts behind a green test.
 
     The mount indices go too. They are byte offsets into an argv whose first
     thirty-odd tokens are a fixed system preamble, so they carry no information
@@ -461,6 +461,8 @@ def normalise(
     import sys
     import tempfile
 
+    from .private import private_root
+
     subs = [
         *((str(Path(p).resolve()), name) for p, name in paths),
         # The launcher's interpreter, which appears in the argv of any box with
@@ -473,6 +475,7 @@ def normalise(
         (str(Path(sys.executable)), "<AISAN PYTHON>"),
         (str(root.resolve()), "<ROOT>") if root else None,
         (str(Path.home()), "<HOME>"),
+        (str(private_root()), "<AISAN PRIVATE>"),
         (tempfile.gettempdir(), "<TMP>"),
     ]
     text = _collapse_aisan_runtime(text)

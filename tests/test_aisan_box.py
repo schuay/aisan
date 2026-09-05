@@ -30,8 +30,10 @@ from pathlib import Path
 import pytest
 
 from aisan import Box, PreflightError
+from aisan import private as private_mod
 from aisan import sandbox as sandbox_mod
 from aisan.egress.base import Backend, BackendActivation
+from aisan.hostproc import neutral_child
 from aisan.runtime import (
     CLIENT_ENV_NAME,
     MANIFEST_NAME,
@@ -41,7 +43,7 @@ from aisan.runtime import (
     read_manifest,
     runtime_dir,
 )
-from aisan.sandbox import RO, RW, Bind, BindOver, BindSpec
+from aisan.sandbox import RO, RW, Bind, BindOver, BindSpec, Mount
 from aisan.spec import BoxSpec, Limits
 
 # sizeof(struct sockaddr_un.sun_path) on Linux, minus the NUL.
@@ -297,7 +299,9 @@ async def test_shared_network_activation_uses_a_private_environment_file(tmp_pat
 
 
 @needs_bwrap
-async def test_shared_client_environment_reaches_a_real_box_without_argv_leak(tmp_path):
+async def test_shared_client_environment_reaches_a_real_box_without_argv_leak(
+    tmp_path, monkeypatch
+):
     class _NoFilesShared(_SharedFakeBackend):
         def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
             return []
@@ -305,8 +309,13 @@ async def test_shared_client_environment_reaches_a_real_box_without_argv_leak(tm
         def prepare(self, runtime_dir: Path) -> None:
             self.order.append("prepare")
 
-    root = tmp_path / "root"
-    root.mkdir()
+    private = tmp_path / "private"
+    sibling = private / "another-box" / "client-env.json"
+    private.mkdir(mode=0o700)
+    sibling.parent.mkdir(mode=0o700)
+    sibling.write_text("must stay hidden\n")
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", private)
+    root = tmp_path
     backend = _NoFilesShared()
     listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
@@ -323,7 +332,8 @@ async def test_shared_client_environment_reaches_a_real_box_without_argv_leak(tm
                 sys.executable,
                 "-c",
                 (
-                    "import os, socket; "
+                    "import os, pathlib, socket; "
+                    f"assert not pathlib.Path({str(sibling)!r}).exists(); "
                     f"s = socket.create_connection(('127.0.0.1', {port})); "
                     "s.sendall(b'from-box'); print(os.environ['FAKE_TOKEN'])"
                 ),
@@ -668,6 +678,95 @@ def test_a_root_beside_a_credential_is_allowed(tmp_path):
     # Staging supplies the optional runtime bind needed by wrapper().
     with box.staged():
         box.wrapper()
+
+
+def test_every_box_seals_the_private_host_root_before_its_runtime(
+    tmp_path, monkeypatch
+):
+    private = tmp_path / "private"
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", private)
+    _launcher(monkeypatch)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    box = Box(_spec(wt, egress=(_FakeBackend(),)), box_id="private-order")
+
+    with box.staged():
+        mounts = box.mounts()
+
+    seal = mounts.index(Mount("tmpfs", private))
+    own_runtime = mounts.index(Mount("ro", box.runtime_dir, box.runtime_dir))
+    assert seal < own_runtime
+    assert Mount("seal-ro", private) == mounts[-1]
+
+
+def test_private_root_alias_is_refused_even_when_own_runtime_is_allowed(
+    tmp_path, monkeypatch
+):
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", private)
+    _launcher(monkeypatch)
+    alias = tmp_path / "alias"
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    spec = _spec(
+        wt,
+        egress=(_FakeBackend(),),
+        binds=(BindOver(private, alias),),
+    )
+    box = Box(spec, box_id="private-alias")
+
+    with box.staged(), pytest.raises(ValueError, match="private host-control root"):
+        box.wrapper()
+
+
+def test_private_root_at_its_normal_name_is_hidden_by_the_seal(tmp_path, monkeypatch):
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", private)
+    _launcher(monkeypatch)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    box = Box(
+        _spec(wt, binds=(Bind(private, RW),)),
+        box_id="private-canonical",
+    )
+
+    box.wrapper()
+
+
+def test_runtime_paths_ignore_ambient_tmpdir(tmp_path, monkeypatch):
+    private = tmp_path / "private"
+    hostile_tmp = tmp_path / "box-writable"
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", private)
+    monkeypatch.setenv("TMPDIR", str(hostile_tmp))
+
+    path = runtime_dir("not-in-ambient-tmpdir")
+    assert path.parent == private
+    assert not path.is_relative_to(hostile_tmp)
+
+
+@needs_bwrap
+def test_a_live_host_child_directory_is_absent_from_a_real_box(tmp_path, monkeypatch):
+    private = tmp_path / "private"
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", private)
+    box = Box(_spec(tmp_path), box_id="live-host-child")
+
+    with neutral_child() as child:
+        marker = child.cwd / "agent-controlled.py"
+        marker.write_text("must not be visible in the box\n")
+        script = (
+            f"from pathlib import Path; assert not Path({str(child.cwd)!r}).exists()"
+        )
+        result = subprocess.run(
+            box.command([sys.executable, "-c", script]),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    assert result.returncode == 0, result.stderr
 
 
 async def test_backend_binds_and_launcher_binds_do_not_trip_the_guard(tmp_path):
