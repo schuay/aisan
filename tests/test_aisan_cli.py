@@ -236,6 +236,93 @@ def test_seed_state_lends_the_box_the_hosts_model_menu(tmp_path):
     assert config["additionalModelOptionsCache"] == options
 
 
+def test_seed_state_lends_the_box_the_hosts_feature_flags(tmp_path):
+    """Claude Code evaluates its feature flags per account, against a server it
+    dials at its compiled-in address, so a box gets no answer and keeps whatever
+    snapshot it last had. One of those flags gates the Fable usage-credit consent
+    dialog on a launch date: once the date passes, a box still holding the old
+    copy demands consent on every model switch while the host, evaluating the
+    flag as disabled, asks for none. The box cannot even remember an answer --
+    the CLI files consent under the account uuid it has no fetch to learn."""
+    import json
+
+    from aisan.cli.claude import seed_state
+
+    state = tmp_path / "state"
+    state.mkdir()
+    host = tmp_path / ".claude.json"
+    features = {"tengu_saffron_lattice": {"enabled": False}}
+    data = {"tengu_copper_fox": {"experimentId": "x", "variationId": 0}}
+    host.write_text(
+        json.dumps(
+            {
+                "cachedGrowthBookFeatures": features,
+                "cachedGrowthBookFeaturesAt": 1788580762611,
+                "cachedExperimentFeatures": ["tengu_copper_fox"],
+                "cachedExperimentData": data,
+            }
+        )
+    )
+    (state / ".claude.json").write_text(
+        json.dumps(
+            {
+                "cachedGrowthBookFeatures": {
+                    "tengu_saffron_lattice": {
+                        "enabled": True,
+                        "planLimitsEndDate": "2026-07-20T07:00:00Z",
+                    }
+                },
+                "cachedGrowthBookFeaturesAt": 1788079074316,
+            }
+        )
+    )
+
+    seed_state(state, Path("/repo"), host)
+
+    config = json.loads((state / ".claude.json").read_text())
+    assert config["cachedGrowthBookFeatures"] == features
+    assert config["cachedGrowthBookFeaturesAt"] == 1788580762611
+    assert config["cachedExperimentFeatures"] == ["tengu_copper_fox"]
+    # The four are written by the CLI as a unit; a copy that carried the flags
+    # but not the experiment rows would leave it logging exposures for
+    # variations the mirrored flags no longer hold.
+    assert config["cachedExperimentData"] == data
+
+
+def test_seed_state_mirrors_each_cache_on_its_own(tmp_path):
+    """A host mid-fetch, or one on a version that has retired a key, lends what
+    it has: a wrong-typed entry must not take the well-formed ones down with it,
+    and must not clear the box's own copy either."""
+    import json
+
+    from aisan.cli.claude import seed_state
+
+    state = tmp_path / "state"
+    state.mkdir()
+    kept = [{"value": "claude-fable-5", "label": "Fable", "description": ""}]
+    (state / ".claude.json").write_text(
+        json.dumps({"additionalModelOptionsCache": kept})
+    )
+    host = tmp_path / ".claude.json"
+    features = {"tengu_saffron_lattice": {"enabled": False}}
+    host.write_text(
+        json.dumps(
+            {
+                "additionalModelOptionsCache": "not a menu",
+                "cachedGrowthBookFeatures": features,
+                "cachedGrowthBookFeaturesAt": True,  # a bool is not a timestamp
+            }
+        )
+    )
+
+    seed_state(state, Path("/repo"), host)
+
+    config = json.loads((state / ".claude.json").read_text())
+    assert config["additionalModelOptionsCache"] == kept
+    assert config["cachedGrowthBookFeatures"] == features
+    assert "cachedGrowthBookFeaturesAt" not in config
+
+
 @pytest.mark.parametrize(
     "host_state",
     ["absent", "not json at all", "[1, 2, 3]", '{"additionalModelOptionsCache": "no"}'],

@@ -73,7 +73,7 @@ USER_MEMORY = Path.home() / ".claude" / "CLAUDE.md"
 
 
 def host_config() -> Path:
-    """The host's own Claude Code config, read for exactly one key.
+    """The host's own Claude Code config, read for the caches it holds.
 
     A function, not a constant, for the reason `default_credentials` is one: the
     answer depends on CLAUDE_CONFIG_DIR and has to track the environment rather
@@ -107,8 +107,8 @@ def seed_state(state: Path, repo: Path, host_config_path: Path | None = None) ->
     prompt, "Detected a custom API key" (the placeholder trips it, defaulting to
     No), and the bypassPermissions disclaimer.
 
-    The same file carries the model menu the box cannot fetch for itself, which
-    is not a gate at all -- see `mirror_model_options`; it is merged here because
+    The same file carries the caches the box cannot fill for itself, which are
+    not gates at all -- see `mirror_host_caches`; they are merged here because
     this is the one writer of the seeded config.
 
     The file lives in the box-writable state dir, so its contents are attacker-
@@ -144,33 +144,51 @@ def seed_state(state: Path, repo: Path, host_config_path: Path | None = None) ->
     _object_at(_object_at(config, "projects"), str(repo))["hasTrustDialogAccepted"] = (
         True
     )
-    mirror_model_options(config, host_config_path or host_config())
+    mirror_host_caches(config, host_config_path or host_config())
     write_sealed(path, json.dumps(config, indent=2))
 
 
-def mirror_model_options(config: dict, source: Path) -> None:
-    """Carry the host's model menu in, because the box cannot fetch its own.
+# The keys Claude Code fills from a server it dials at its compiled-in address,
+# with the type each has to have to be worth copying. Both fetches go to
+# api.anthropic.com directly -- ANTHROPIC_BASE_URL does not redirect either, so
+# no proxy allowlist reaches them and under `unshare_net` both simply fail.
+#
+#   additionalModelOptionsCache -- the /model picker's rows for models outside
+#     the CLI's compiled-in catalog, from GET /api/claude_cli/bootstrap.
+#   cachedGrowthBookFeatures and its three companions -- the feature flags, from
+#     a remote evaluation POSTed to /api/eval-authed. The CLI writes the four as
+#     a unit, so they are copied as one.
+#
+# The flags matter here because they are EVALUATED PER ACCOUNT: a box that gets
+# no answer keeps whatever snapshot it last had, and a date-gated flag whose
+# date has since passed then reads as live. Observed: with the host evaluating
+# `tengu_saffron_lattice` to {"enabled": false}, a box holding an older copy of
+# it announced "Fable 5.1 now uses usage credits" on every model switch. The
+# consent that dialog collects cannot be persisted in a box either -- the CLI
+# files it under the account uuid from `oauthAccount`, which the box has no
+# fetch to fill, and falls back to a latch that dies with the session.
+MIRRORED_CACHES = (
+    ("additionalModelOptionsCache", list),
+    ("cachedGrowthBookFeatures", dict),
+    ("cachedGrowthBookFeaturesAt", int),
+    ("cachedExperimentFeatures", list),
+    ("cachedExperimentData", dict),
+)
 
-    The /model picker's row for a model outside the CLI's compiled-in catalog --
-    Fable is one -- comes from `additionalModelOptionsCache`, which the CLI fills
-    from `GET https://api.anthropic.com/api/claude_cli/bootstrap`. That URL is
-    compiled in and ANTHROPIC_BASE_URL does not redirect it: measured, with the
-    base URL pointed at a local stub the CLI still dialled api.anthropic.com. So the relay cannot carry that request and
-    permitting the path on the proxy would change nothing -- under `unshare_net`
-    the fetch simply fails, the cache stays empty, and the picker is short the
-    row. `--model fable` still works throughout, because resolving the alias is
-    local and validating it is a `POST /v1/messages` the relay does permit.
 
-    The host's cache is the answer: it was filled by the same account the relay
-    bills to. Copied verbatim, entries the server marked disabled included -- an
-    entitlement the host does not have must not become one the box appears to.
-    Whether a row is then offered stays the CLI's decision; this only puts the
-    menu where a box with no route to the API can read it.
+def mirror_host_caches(config: dict, source: Path) -> None:
+    """Carry in the caches the box has no route to fill for itself.
 
-    Absent, unreadable or wrong-shaped leaves whatever is already there. As with
-    user memory, of the two ways to be wrong, clearing a cache the box is using
-    is worse than leaving a stale one -- and a host that has never run Claude
-    Code has no menu to lend.
+    The host's copies are the answer: they were filled by the same account the
+    relay bills to. Copied verbatim, entries the server marked disabled included
+    -- an entitlement the host does not have must not become one the box appears
+    to. What is then done with them stays the CLI's decision; this only puts
+    them where a box with no route to the API can read them.
+
+    Absent, unreadable or wrong-shaped leaves whatever is already there, per key.
+    As with user memory, of the two ways to be wrong, clearing a cache the box is
+    using is worse than leaving a stale one -- and a host that has never run
+    Claude Code has none to lend.
     """
     try:
         parsed = json.loads(source.read_text())
@@ -178,9 +196,12 @@ def mirror_model_options(config: dict, source: Path) -> None:
         return
     if not isinstance(parsed, dict):
         return
-    options = parsed.get("additionalModelOptionsCache")
-    if isinstance(options, list):
-        config["additionalModelOptionsCache"] = options
+    for key, kind in MIRRORED_CACHES:
+        value = parsed.get(key)
+        # bool passes an int check; no mirrored key is a number the CLI would
+        # accept a bool for, so the narrowing is worth the one line.
+        if isinstance(value, kind) and not isinstance(value, bool):
+            config[key] = value
 
 
 def _object_at(config: dict, key: str) -> dict:
