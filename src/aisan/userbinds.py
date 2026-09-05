@@ -91,7 +91,9 @@ mount would go on to cover it.
 The guard then asks the same question of every OTHER backend's credential
 (`known_credential_paths`), because this box's egress cannot name them: an
 `aisan claude --binds` file listing `~/.codex` is a real credential in a box
-whose review said it held none.
+whose review said it held none. `~/.ssh` and `~/.gnupg` are refused on the
+same terms though aisan uses neither -- see `_REFUSED_KEY_STORES` for why
+those two and not a longer list.
 
 Git-awareness is NOT applied here. For interactive sessions the perimeter
 model treats the whole root as the session's, and hook-pinning user repos
@@ -114,6 +116,21 @@ from .egress.base import Backend, credential_exposure, credential_overlap
 from .sandbox import RO, RW, Bind, BindSpec, Overlay
 
 __all__ = ["UserSpec", "load"]
+
+# Host key stores that are refused outright, though no backend of aisan's uses
+# them. Not a general list of sensitive directories: these two hold private keys
+# whose whole security model is that they never leave the machine, and neither
+# has a legitimate reason to be inside an agent box -- an agent that needs to
+# push runs `git` on the HOST, or gets a deploy key written for the purpose.
+# Everything else an operator might regret binding stays their call; drawing the
+# line further out would turn this guard into a taste list nobody can maintain.
+_REFUSED_KEY_STORES = (".ssh", ".gnupg")
+
+
+def _refused_key_stores() -> tuple[Path, ...]:
+    """Read per call, not at import: `Path.home` is what tests move."""
+    return tuple(Path.home() / name for name in _REFUSED_KEY_STORES)
+
 
 # Mount keys in the order their binds are emitted: warm caches, then what the
 # box may read, then what it may write. `path` is not one of them -- it grants
@@ -303,6 +320,14 @@ def _load(
             f"{path}: {src} would expose the credential at {cred} -- it belongs"
             " to a backend this box does not carry, but a box that can read it"
             " can use it"
+        )
+    keys = credential_overlap(sources, _refused_key_stores())
+    if keys is not None:
+        src, store = keys
+        raise ValueError(
+            f"{path}: {src} would expose the private key store at {store} --"
+            " a user bind may not name it, nor anything containing it or"
+            " inside it"
         )
     return UserSpec(binds, tuple(dirs))
 

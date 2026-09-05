@@ -253,6 +253,20 @@ def test_a_user_bind_may_not_name_another_clients_credential(tmp_path, monkeypat
         load(f, egress=(AnthropicBackend(credentials=tmp_path / "creds.json"),))
 
 
+@pytest.mark.parametrize("store", [".ssh", ".gnupg"])
+def test_a_user_bind_may_not_name_a_private_key_store(tmp_path, monkeypatch, store):
+    """Neither belongs to a backend, so no credential list names them, and both
+    hold keys whose whole model is that they never leave the machine. An agent
+    that needs to push runs git on the HOST."""
+    home = tmp_path / "home"
+    (home / store).mkdir(parents=True)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+
+    f = _spec_file(tmp_path, f'ro = ["{home / store}"]\n')
+    with pytest.raises(ValueError, match="private key store"):
+        load(f, egress=())
+
+
 def test_egress_is_required_so_the_guard_is_never_off_by_default(tmp_path):
     """The guard's only input has no default. A default of `()` would be a
     guard silently switched off for any caller that forgot it, which is the one
