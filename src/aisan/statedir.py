@@ -46,6 +46,41 @@ def prepare_state_dir(state: Path) -> Path:
     return state
 
 
+# Where each boxed client would write a credential of its OWN, relative to the
+# state dir. Each of these paths is the client's normal credential location once
+# the box redirects its config directory there -- CLAUDE_CONFIG_DIR, CODEX_HOME,
+# XDG_DATA_HOME -- so a `/login` completed inside a `--net` box lands here rather
+# than on the host. Measured: none of the three writes any of these during
+# ordinary boxed use, where the credential arrives by environment instead.
+BOXED_CREDENTIALS: dict[str, tuple[str, ...]] = {
+    "claude": (".credentials.json",),
+    "codex": ("auth.json",),
+    "opencode": ("opencode/auth.json",),
+}
+
+
+def planted_credentials(state: Path, client: str) -> list[Path]:
+    """Credential files a previous box left in `client`'s own state dir.
+
+    The dir is bound rw and is the same one every later session for the repo
+    gets, so one networked session that logged in inside the box would hand a
+    real token to every session after it -- exactly the thing the credential
+    guard checks the MOUNTS for, arriving by a route no mount describes.
+
+    `lstat`, so a planted symlink counts: what matters is that the name is
+    occupied by something the box put there, not what it resolves to.
+    """
+    found: list[Path] = []
+    for name in BOXED_CREDENTIALS.get(client, ()):
+        path = state / name
+        try:
+            os.lstat(path)
+        except OSError:
+            continue
+        found.append(path)
+    return found
+
+
 def write_sealed(path: Path, data: str | bytes, *, mode: int = 0o600) -> None:
     """Write `data` to `path` as a fresh regular file, never through a symlink.
 

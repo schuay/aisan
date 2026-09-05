@@ -26,7 +26,7 @@ from .presets import EGRESS_PROFILES, GRANTS
 from .sandbox import RO, Bind, BindOver, BindSpec
 from .session_mcp import SessionMCP, mcp_ro_binds
 from .spec import BoxSpec
-from .statedir import prepare_state_dir, write_sealed
+from .statedir import planted_credentials, prepare_state_dir, write_sealed
 
 _TERM_PASSTHROUGH = ("TERM", "COLORTERM", "LANG", "LC_ALL")
 
@@ -387,6 +387,22 @@ async def run_interactive(
     if binary() is None:
         print(
             f"no `{executable}` on PATH: this would be an exec failure inside bwrap",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Before anything is staged: a credential in the state dir is the box's own
+    # login, and it would be mounted rw into this box and every later one.
+    planted = planted_credentials(state, client)
+    if planted:
+        print(
+            "refused: the state directory holds a credential written inside a"
+            f" box: {', '.join(map(str, planted))}\n"
+            "aisan never writes these; a session with host networking logged in"
+            " from inside the box, and every later box for this repository"
+            " would get that credential rw.\n"
+            "delete the file, then log in on the HOST if the login is one you"
+            " want.",
             file=sys.stderr,
         )
         return 2

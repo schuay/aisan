@@ -497,6 +497,76 @@ async def test_the_run_path_normalizes_a_signal_death_to_shell_status(
     assert code == 143
 
 
+@pytest.mark.parametrize(
+    ("client", "relative"),
+    [
+        ("claude", ".credentials.json"),
+        ("codex", "auth.json"),
+        ("opencode", "opencode/auth.json"),
+    ],
+)
+async def test_a_credential_written_inside_a_box_refuses_the_next_launch(
+    tmp_path, monkeypatch, capsys, client, relative
+):
+    """A `--net` session can complete a login inside the box, and the box's
+    config directory IS the rw state dir -- so the token it writes would be
+    handed to every later box for the repository. Nothing about that shows up in
+    the mounts, which is why the launch checks the directory itself."""
+    started = False
+
+    class _Box:
+        def __init__(self, spec, *, box_id):
+            self.spec = spec
+            self.env = {}
+
+        async def __aenter__(self):
+            nonlocal started
+            started = True
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        def command(self, cmd):
+            return cmd
+
+    class _Spec:
+        unshare_net = True
+
+    monkeypatch.setattr("aisan.session.Box", _Box)
+    monkeypatch.setattr(
+        "aisan.session.subprocess.run",
+        lambda *a, **k: subprocess.CompletedProcess(args=a, returncode=0),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state = tmp_path / "state"
+    planted = state / relative
+    planted.parent.mkdir(parents=True)
+    planted.write_text('{"a-real-token": "written in the box"}')
+
+    code = await run_interactive(
+        client=client,
+        harness=client,
+        executable=client,
+        repo=repo,
+        state=state,
+        spec=_Spec(),
+        command=lambda _box: [client],
+        binary=lambda: repo / client,
+        binds=None,
+        egress_profiles=None,
+        grants=None,
+        explain_only=False,
+    )
+
+    assert code == 2
+    assert not started
+    err = capsys.readouterr().err
+    assert str(planted) in err
+    assert "delete the file" in err
+
+
 def test_git_config_binds_only_the_file_never_the_credential_store(
     tmp_path, monkeypatch
 ):
