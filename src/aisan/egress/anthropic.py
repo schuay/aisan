@@ -446,12 +446,18 @@ class AnthropicBackend(Backend):
         means depends on what it is -- so the kind checks itself and the dead
         upstream is checked here, where the route lives.
 
+        The route goes first, because refreshing a near-expired token is itself
+        a network call. On a host with no route that refresh fails silently and
+        the credential check then reports a login that is in fact fine -- which
+        is what an unattended run gets when its timer fires before DHCP has a
+        lease. Checking the route first costs nothing: it runs either way.
+
         Claude remains the only process that mints or writes the credential.
         This check can ask a host Claude subprocess to refresh it through the
         supported request path, with inference trapped on loopback.
         """
-        await self._credential.check(self.name)
         await self._check_upstream()
+        await self._credential.check(self.name)
 
     async def _check_upstream(self) -> None:
         """Does the configured upstream answer at all.

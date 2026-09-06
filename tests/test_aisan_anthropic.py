@@ -264,6 +264,27 @@ async def test_a_dead_upstream_says_start_it_not_log_in(tmp_path):
     assert "login" not in e.value.fix
 
 
+async def test_no_route_is_reported_as_the_route_not_the_login(tmp_path, monkeypatch):
+    """A host with no network fails BOTH checks, and only one of them names the
+    real fault. The refresh is a network call, so it cannot help here -- and a
+    refusal blaming the login sends an operator after a credential that is fine.
+    This is the unattended case: a timer that fires before DHCP has a lease."""
+    import aisan.egress.anthropic as backend_module
+
+    async def refresh(command, config_dir):
+        return  # no route, so host Claude writes nothing
+
+    monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
+    up, runner = await _upstream_server(_hello)
+    await runner.cleanup()  # dead address, deliberately
+    with pytest.raises(PreflightError) as e:
+        await AnthropicBackend(
+            credentials=_credentials(tmp_path / "c.json", ttl_s=60), upstream=up
+        ).preflight()
+    assert "does not answer" in e.value.reason
+    assert "login" not in e.value.fix
+
+
 async def test_preflight_does_not_spend_a_model_call(tmp_path):
     """A connect, not a turn. Asking the upstream something real would spend
     quota to learn that the hop exists -- and on a metered subscription that is
