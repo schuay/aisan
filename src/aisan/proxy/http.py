@@ -93,6 +93,16 @@ _RELAYED_RESPONSE_HEADERS = frozenset({"retry-after", "x-request-id", "request-i
 _RELAYED_RESPONSE_PREFIXES = ("anthropic-ratelimit-", "x-ratelimit-", "ratelimit-")
 
 
+def quoted_names(names: set[str]) -> str:
+    """Box-chosen field names for a refusal message, sorted and quoted.
+
+    `repr` because the refusal is logged host-side and the box picks the
+    string: a raw name carrying a newline writes the operator's log a line of
+    its own choosing.
+    """
+    return ", ".join(repr(name) for name in sorted(names))
+
+
 def relayed_response_headers(
     up_headers, *, content_type_default: str = "application/json"
 ) -> dict[str, str]:

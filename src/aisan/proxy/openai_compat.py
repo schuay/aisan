@@ -65,6 +65,7 @@ from .http import (
     bearer_token,
     is_redirect,
     load_json_unambiguous,
+    quoted_names,
     relayed_response_headers,
     request_path,
     serve,
@@ -200,8 +201,7 @@ class BodyPolicy:
                 return f"`{key}` is not permitted by the sandbox proxy"
         if unknown := set(payload) - self.allowed_keys:
             return (
-                "field(s) not permitted by the sandbox proxy:"
-                f" {', '.join(sorted(unknown))}"
+                f"field(s) not permitted by the sandbox proxy: {quoted_names(unknown)}"
             )
 
         reason = self._content_refusal(payload)

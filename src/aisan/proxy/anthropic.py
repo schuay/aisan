@@ -100,6 +100,7 @@ from .http import (
     bearer_token,
     is_redirect,
     load_json_unambiguous,
+    quoted_names,
     relayed_response_headers,
     request_path,
     serve,
@@ -211,22 +212,13 @@ ALLOWED_KEYS = frozenset(
     }
 )
 
-# Content block types the box may send. Measured from the same round trip:
-# text (and system's text blocks), tool_use and tool_result on the turn after a
-# tool call, thinking when extended thinking is on; redacted_thinking is the
-# API's own transform of thinking and rides with it. `image` and `document`
-# ride in too, but for them the block type is not the gate -- see
-# INLINE_SOURCE_TYPES below.
-ALLOWED_CONTENT_TYPES = frozenset(
-    {
-        "text",
-        "tool_use",
-        "tool_result",
-        "thinking",
-        "redacted_thinking",
-        "image",
-        "document",
-    }
+# Content block types that carry no payload by reference, so the type alone
+# settles them. Measured from the same round trip: text (and system's text
+# blocks), tool_use and tool_result on the turn after a tool call, thinking
+# when extended thinking is on; redacted_thinking is the API's own transform of
+# thinking and rides with it.
+INERT_CONTENT_TYPES = frozenset(
+    {"text", "tool_use", "tool_result", "thinking", "redacted_thinking"}
 )
 
 # The two blocks whose payload can arrive by reference, and the one source that
@@ -248,6 +240,24 @@ ALLOWED_CONTENT_TYPES = frozenset(
 # source type rather than as a walk this does not have.
 SOURCED_CONTENT_TYPES = frozenset({"image", "document"})
 INLINE_SOURCE_TYPES = frozenset({"base64"})
+
+# The measured source shape, key for key, because `type` alone does not say
+# where the bytes come from when a source names two payloads: base64 data AND a
+# url. Two things already stop that one, and this check deliberately trusts
+# neither. The client normalises the extra key away before it reaches the
+# socket (measured: claude-cli 2.1.259 sends exactly these three), and the
+# upstream refuses the shape (measured, posted through this proxy: `400
+# messages.0.content.0.image.source.base64.url: Extra inputs are not
+# permitted`). But the client is not the boundary -- a box holds the relay
+# token and can post a body its client would never build -- and which shapes
+# the upstream validates is the upstream's to change, not a property this side
+# gets to hold still. So: cheap, fail closed, and depending on neither.
+INLINE_SOURCE_KEYS = frozenset({"type", "media_type", "data"})
+
+# Derived rather than spelled a third time: a type is permitted because it
+# carries nothing by reference, or because the source gate covers it. A
+# hand-written union is how a sourced type arrives permitted and ungated.
+ALLOWED_CONTENT_TYPES = INERT_CONTENT_TYPES | SOURCED_CONTENT_TYPES
 
 # The two additions a box on the HOST'S network may make, and nothing else.
 #
@@ -286,11 +296,12 @@ class BodyPolicy:
     is the same posture the header allowlist takes and for the same reason.
 
     Three gates, one posture: the top-level keys (a server-acting field need
-    not declare itself as a tool), the tool types, and the message content
-    block types (an `image` or `document` url source makes the upstream fetch
-    a URL the box chose, and the URL is the payload). All three are measured
-    from the real client, so a key or block it grows next year is a refusal
-    naming itself rather than a hole.
+    not declare itself as a tool), the tool types, and the message content --
+    where the block type settles most blocks, and `image` and `document` are
+    settled instead by their source, because that is the field that can name a
+    URL for the upstream to fetch. All of it is measured from the real client,
+    so a key, block or source it grows next year is a refusal naming itself
+    rather than a hole.
 
     Bounded, and worth stating so the claim is not overread: this refuses a route
     off the machine for bytes the box already holds. It is not what keeps the
@@ -316,6 +327,7 @@ class BodyPolicy:
     content_types: frozenset[str] = ALLOWED_CONTENT_TYPES
     sourced_types: frozenset[str] = SOURCED_CONTENT_TYPES
     inline_sources: frozenset[str] = INLINE_SOURCE_TYPES
+    inline_source_keys: frozenset[str] = INLINE_SOURCE_KEYS
 
     @classmethod
     def for_shared_network(cls) -> BodyPolicy:
@@ -358,8 +370,7 @@ class BodyPolicy:
                 return f"`{key}` is not permitted by the sandbox proxy"
         if unknown := set(payload) - self.allowed_keys:
             return (
-                "field(s) not permitted by the sandbox proxy:"
-                f" {', '.join(sorted(unknown))}"
+                f"field(s) not permitted by the sandbox proxy: {quoted_names(unknown)}"
             )
 
         reason = self._tools_refusal(payload.get("tools"))
@@ -451,6 +462,11 @@ class BodyPolicy:
                 f"{kind} source {origin!r} is not permitted by the sandbox"
                 " proxy: only an inline base64 source carries no fetch for the"
                 " upstream"
+            )
+        if extra := set(source) - self.inline_source_keys:
+            return (
+                f"{kind} source field(s) not permitted by the sandbox proxy:"
+                f" {quoted_names(extra)}"
             )
         return None
 

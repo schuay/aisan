@@ -856,6 +856,87 @@ def test_body_policy_permits_the_measured_inline_image_and_document():
     assert BodyPolicy.for_shared_network().refuse(body) is None
 
 
+def test_body_policy_refuses_a_source_that_carries_two_answers():
+    """A gate that reads only `source.type` takes the tag's word for where the
+    bytes come from, and a source can name both: base64 data AND a url.
+
+    Defence in depth, and worth saying so rather than overclaiming: measured,
+    the client strips the extra key before the socket sees it and the upstream
+    answers this exact body with `400 ... source.base64.url: Extra inputs are
+    not permitted`. Neither is the boundary. A box holds the relay token and
+    can post what its client would not, and upstream validation is the
+    upstream's to loosen."""
+    hybrid = {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "iVBOR",
+            "url": "https://x.test/exfil",
+        },
+    }
+    body = json.dumps({"messages": [{"role": "user", "content": [hybrid]}]}).encode()
+    for policy in (BodyPolicy(), BodyPolicy.for_shared_network()):
+        reason = policy.refuse(body)
+        assert reason is not None
+        assert "url" in reason
+
+
+def test_every_permitted_content_type_is_inert_or_source_gated():
+    """The invariant behind the union, asserted rather than trusted: a type is
+    permitted because it carries nothing by reference, or because the source
+    gate covers it. A future tag added to one set and not the other would
+    arrive permitted and ungated, which is the shape of the hole this whole
+    gate exists to close."""
+    from aisan.proxy.anthropic import (
+        ALLOWED_CONTENT_TYPES,
+        INERT_CONTENT_TYPES,
+        SOURCED_CONTENT_TYPES,
+    )
+
+    assert ALLOWED_CONTENT_TYPES == INERT_CONTENT_TYPES | SOURCED_CONTENT_TYPES
+    assert not INERT_CONTENT_TYPES & SOURCED_CONTENT_TYPES
+    url = {"type": "url", "url": "https://x.test/e"}
+    for kind in SOURCED_CONTENT_TYPES:
+        body = json.dumps(
+            {"messages": [{"role": "user", "content": [{"type": kind, "source": url}]}]}
+        ).encode()
+        assert BodyPolicy().refuse(body) is not None, kind
+
+
+def test_a_refusal_never_lets_the_box_write_the_host_log():
+    """The refusals name what they refused, and the box picks that string. A
+    raw newline in a field name would write the operator's log a line of the
+    box's choosing, so the names go through `repr`."""
+    injected = "x\nanthropic proxy: forwarded body: fine"
+    unknown_key = json.dumps({"messages": [], injected: 1}).encode()
+    bad_source = json.dumps(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "AA",
+                                injected: 1,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+    ).encode()
+    for body in (unknown_key, bad_source):
+        reason = BodyPolicy().refuse(body)
+        assert reason is not None
+        assert "\n" not in reason
+        assert "\\n" in reason
+
+
 def test_the_content_gate_reaches_tool_results_and_system():
     """The two places a naive walk misses: a block nested in a tool_result's
     own content, and the `system` field, which takes the same block shape."""
