@@ -769,11 +769,20 @@ def test_body_policy_permits_a_measured_tool_round_trip_history():
             "the same fetch, spelled document",
         ),
         (
+            {"type": "image", "source": {"type": "file", "file_id": "file_1"}},
+            "Files API state, which nothing reaches through the allowed paths",
+        ),
+        (
             {
-                "type": "image",
-                "source": {"type": "base64", "media_type": "image/png", "data": "AA"},
+                "type": "document",
+                "source": {"type": "text", "media_type": "text/plain", "data": "x"},
             },
             "no fetch, but unmeasured on this client; refused until measured",
+        ),
+        ({"type": "image"}, "a block with no source at all"),
+        (
+            {"type": "image", "source": "https://x.test/e"},
+            "a source that is not an object",
         ),
         (
             {"type": "a_block_type_invented_next_year"},
@@ -790,6 +799,61 @@ def test_body_policy_refuses_content_that_asks_the_upstream_to_fetch(block, why)
     reason = BodyPolicy().refuse(body)
     assert reason is not None, why
     assert block["type"] in reason
+
+
+def test_body_policy_permits_the_measured_inline_image_and_document():
+    """The finer split the source types buy, measured on claude-cli 2.1.259
+    against a recording pass-through: a Read of a PNG comes back as an `image`
+    and a Read of a PDF as a `document`, both base64 inside the tool_result,
+    and a pasted image is the same block directly in the user turn. None of
+    them names a URL, so none of them asks the upstream to fetch anything --
+    refusing them would have cost every screenshot and PDF in a boxed session
+    and bought nothing."""
+    png = {
+        "type": "image",
+        "source": {"type": "base64", "data": "iVBOR", "media_type": "image/png"},
+    }
+    pdf = {
+        "type": "document",
+        "source": {
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": "JVBER",
+        },
+    }
+    body = json.dumps(
+        {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 32000,
+            "messages": [
+                {"role": "user", "content": [png, {"type": "text", "text": "what?"}]},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "Read",
+                            "input": {"file_path": "/w/red.png"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [png, pdf],
+                        }
+                    ],
+                },
+            ],
+            "stream": True,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is None
+    assert BodyPolicy.for_shared_network().refuse(body) is None
 
 
 def test_the_content_gate_reaches_tool_results_and_system():

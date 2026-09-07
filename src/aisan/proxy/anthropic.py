@@ -211,17 +211,43 @@ ALLOWED_KEYS = frozenset(
     }
 )
 
-# Content block types that carry no URL for the upstream to fetch. Measured
-# from the same round trip: text (and system's text blocks), tool_use and
-# tool_result on the turn after a tool call, thinking when extended thinking
-# is on; redacted_thinking is the API's own transform of thinking and rides
-# with it. `image` and `document` are deliberately absent: their url sources
-# make ANTHROPIC's servers fetch a URL the box chose -- the same route the
-# tool-type gate closes -- and their base64 sources are refused with them
-# until a measurement forces the finer split.
+# Content block types the box may send. Measured from the same round trip:
+# text (and system's text blocks), tool_use and tool_result on the turn after a
+# tool call, thinking when extended thinking is on; redacted_thinking is the
+# API's own transform of thinking and rides with it. `image` and `document`
+# ride in too, but for them the block type is not the gate -- see
+# INLINE_SOURCE_TYPES below.
 ALLOWED_CONTENT_TYPES = frozenset(
-    {"text", "tool_use", "tool_result", "thinking", "redacted_thinking"}
+    {
+        "text",
+        "tool_use",
+        "tool_result",
+        "thinking",
+        "redacted_thinking",
+        "image",
+        "document",
+    }
 )
+
+# The two blocks whose payload can arrive by reference, and the one source that
+# does not. A `url` source makes ANTHROPIC's servers fetch a URL the box chose,
+# which is the route the tool-type gate closes one level up; a `file` source
+# names Files API state, which nothing reaches through this proxy's paths.
+#
+# `base64` carries the bytes themselves and asks the upstream for nothing, so it
+# is as inert as a text block -- and it is what the real client sends. Measured
+# on claude-cli 2.1.259: a Read of a PNG arrives as an `image` and a Read of a
+# PDF as a `document`, both `{"type": "base64", "media_type": ..., "data": ...}`
+# nested in a tool_result's content, and a pasted image as the same block
+# directly in the user message. `vertex.py` draws this line in the same place
+# one protocol over, permitting inlineData and refusing fileData.
+#
+# An allowlist, like every other tag here. A document's `text` and `content`
+# sources carry no fetch either, but nothing was measured sending them, and
+# `content` nests blocks of its own -- so they arrive as a refusal naming the
+# source type rather than as a walk this does not have.
+SOURCED_CONTENT_TYPES = frozenset({"image", "document"})
+INLINE_SOURCE_TYPES = frozenset({"base64"})
 
 # The two additions a box on the HOST'S network may make, and nothing else.
 #
@@ -288,6 +314,8 @@ class BodyPolicy:
     refused_keys: tuple[str, ...] = REFUSED_KEYS
     allowed_keys: frozenset[str] = ALLOWED_KEYS
     content_types: frozenset[str] = ALLOWED_CONTENT_TYPES
+    sourced_types: frozenset[str] = SOURCED_CONTENT_TYPES
+    inline_sources: frozenset[str] = INLINE_SOURCE_TYPES
 
     @classmethod
     def for_shared_network(cls) -> BodyPolicy:
@@ -399,10 +427,31 @@ class BodyPolicy:
             kind = block.get("type")
             if not isinstance(kind, str) or kind not in self.content_types:
                 return f"content type {kind!r} is not permitted by the sandbox proxy"
+            if kind in self.sourced_types:
+                reason = self._source_refusal(kind, block.get("source"))
+                if reason is not None:
+                    return reason
             if kind == "tool_result":
                 reason = self._blocks_refusal(block.get("content"))
                 if reason is not None:
                     return reason
+        return None
+
+    def _source_refusal(self, kind: str, source: object) -> str | None:
+        """Where an `image` or `document` block's bytes come from.
+
+        Inline or nothing: the block is permitted, the fetch it could ask for
+        is not.
+        """
+        if not isinstance(source, dict):
+            return f"{kind} blocks must carry a `source` object"
+        origin = source.get("type")
+        if not isinstance(origin, str) or origin not in self.inline_sources:
+            return (
+                f"{kind} source {origin!r} is not permitted by the sandbox"
+                " proxy: only an inline base64 source carries no fetch for the"
+                " upstream"
+            )
         return None
 
 
