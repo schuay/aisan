@@ -225,6 +225,55 @@ def test_body_policy_permits_measured_gpt_5_6_additional_tools_envelope():
     assert BodyPolicy().refuse(body) is None
 
 
+def test_body_policy_permits_the_identifier_codex_stamps_on_the_envelope():
+    """Measured on Codex 0.153.4: the envelope carries an `at_` id beside its
+    tools. Refusing it takes the whole client down, since every turn declares
+    tools through this item."""
+    body = json.dumps(
+        {
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "id": "at_abba6ab0-09f1-5273-aac9-604514c198d2",
+                    "role": "developer",
+                    "tools": [_function()],
+                }
+            ],
+            "store": False,
+            "stream": True,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is None
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"id": {"image_url": "https://evil.test/x"}},
+        {"id": ["at_1"]},
+        {"instructions": {"nested": {"url": "https://evil.test/x"}}},
+    ],
+)
+def test_body_policy_refuses_a_non_string_beside_the_envelope_tools(extra):
+    """The identifier keys are permitted by shape, not by name, so the shape is
+    the whole gate: an object there is a position this policy does not read."""
+    body = json.dumps(
+        {
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [_function()],
+                    **extra,
+                }
+            ],
+            "store": False,
+            "stream": True,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is not None
+
+
 def test_body_policy_permits_the_agent_message_the_upstream_echoed_back():
     """The multi-agent assistant turn. Codex has no code that builds one -- it
     holds one because the upstream emitted it, and replays it verbatim into the

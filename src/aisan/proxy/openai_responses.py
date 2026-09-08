@@ -16,9 +16,10 @@ receives ``/v1/responses``.
 
 Codex 0.147.0 declares local tools as ``function`` or ``custom`` and groups some
 of them in a ``namespace``. GPT-5.6 sends the same declarations through an
-``additional_tools`` input item. Compaction sends no tools. The policy permits
-those local declarations recursively and refuses every server-side tool type,
-including web search and code interpreter.
+``additional_tools`` input item, which 0.153.4 also stamps with an id.
+Compaction sends no tools. The policy permits those local declarations
+recursively and refuses every server-side tool type, including web search and
+code interpreter.
 
 An assistant turn arrives back as ``message`` or, on the multi-agent models,
 as ``agent_message`` -- ``author`` and ``recipient`` in place of ``role``, and
@@ -318,8 +319,18 @@ class BodyPolicy(_BodyPolicy):
         if not isinstance(kind, str) or kind not in ALLOWED_INPUT_TYPES:
             return f"Responses input type {kind!r} is not permitted"
         if kind == TOOL_ENVELOPE_INPUT_TYPE:
-            if set(item) != {"type", "role", "tools"} or item["role"] != "developer":
+            if (
+                not {"type", "role", "tools"} <= set(item)
+                or item["role"] != "developer"
+            ):
                 return "`additional_tools` must be the measured developer envelope"
+            # The rest are identifiers, permitted the way `client_metadata`'s
+            # are: not by name, because each release adds one -- 0.153.4 stamps
+            # an `at_` id on the envelope and pinning the names refused every
+            # turn the client made -- but by shape, so nothing rides inside one.
+            for key, value in item.items():
+                if key != "tools" and not isinstance(value, str):
+                    return f"`additional_tools` `{key}` must be a string"
             return self.refuse_tools(item["tools"])
         # Only the envelope declares tools. The item's other keys are left
         # alone: the upstream returns items carrying ids and metadata this side
