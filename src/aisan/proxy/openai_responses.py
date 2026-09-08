@@ -172,6 +172,32 @@ CONTAINERS = MappingProxyType(
 
 TOOL_ENVELOPE_INPUT_TYPE = "additional_tools"
 
+# Measured: the client sends "auto" and has no reason to send the others, but
+# they name no capability either.
+TOOL_CHOICES = frozenset({"auto", "none", "required"})
+
+# Key names that name a payload for the upstream to fetch. Inside a gated part
+# `image_url` is settled by the scheme check; anywhere else there is no gate,
+# and the tagged-array walk below only recognises a payload spelled as an array
+# of tagged objects -- a bare object, an array one deeper, or an array of
+# objects with no `type` carry the same url past it. So outside the positions
+# this policy reads, the key name alone refuses, which is how vertex's
+# `contents` gate reads a part: the field that names a URI is the capability.
+PAYLOAD_KEYS = frozenset(
+    {"image_url", "file_url", "audio_url", "url", "uri", "file_id"}
+)
+
+CLIENT_METADATA_KEYS = frozenset(
+    {
+        "session_id",
+        "thread_id",
+        "turn_id",
+        "x-codex-installation-id",
+        "x-codex-turn-metadata",
+        "x-codex-window-id",
+    }
+)
+
 # Derived, so that permitting a type means sorting it into a bucket. Spelled as
 # a union of its own, this is where a content-carrying type arrives permitted
 # and ungated: `function_call_output` did, holding an `input_image` whose
@@ -190,6 +216,10 @@ class PathAllowlist(_PathAllowlist):
 class BodyPolicy(_BodyPolicy):
     client_types: frozenset[str] = CLIENT_TOOL_TYPES
     container_types: frozenset[str] = CLIENT_TOOL_CONTAINERS
+    # A function's JSON Schema, a custom tool's grammar, and a namespace's
+    # nested array. Measured: no other key of a real tool holds anything but a
+    # scalar.
+    structured_tool_keys: frozenset[str] = frozenset({"parameters", "format", "tools"})
     # The unknown-key refusal itself runs in the base policy; this is the set
     # it runs against.
     allowed_keys: frozenset[str] = ALLOWED_KEYS
@@ -222,6 +252,36 @@ class BodyPolicy(_BodyPolicy):
             reason = self._input_refusal(item)
             if reason is not None:
                 return reason
+
+        # `tool_choice` names a tool for the upstream to prefer, and the
+        # API's own union spells hosted capabilities there by name --
+        # `image_generation`, `code_interpreter`, an `mcp` server label --
+        # none of which appear in `tools` for the tool gate to catch. Measured
+        # across recorded turns the client sends the string form and nothing
+        # else, so the object form is refused entirely.
+        choice = payload.get("tool_choice")
+        if choice is not None and (
+            not isinstance(choice, str) or choice not in TOOL_CHOICES
+        ):
+            return "`tool_choice` may only be one of " + quoted_names(TOOL_CHOICES)
+
+        # Codex's own turn identifiers, six measured string fields. Free-form
+        # it would be an arbitrary object this side forwards without reading.
+        metadata = payload.get("client_metadata")
+        if metadata is not None and (
+            not isinstance(metadata, dict)
+            or set(metadata) - CLIENT_METADATA_KEYS
+            or not all(isinstance(value, str) for value in metadata.values())
+        ):
+            return "`client_metadata` must be the measured string fields"
+
+        # `input` and `tools` are walked above; every other key is forwarded
+        # without this policy reading its shape, so none of them may name one.
+        for key, value in payload.items():
+            if key in {"input", "tools"}:
+                continue
+            if named := _names_a_payload(value):
+                return f"`{key}` names a payload this policy cannot gate: {named!r}"
 
         text = payload.get("text")
         if text is not None and (
@@ -257,10 +317,16 @@ class BodyPolicy(_BodyPolicy):
         # leaves the same hole that `output` was, one key over.
         walked = {container.field for container in containers}
         for key, value in item.items():
-            if key in walked or not isinstance(value, list):
+            if key in walked:
                 continue
-            if any(isinstance(part, dict) and "type" in part for part in value):
+            if isinstance(value, list) and any(
+                isinstance(part, dict) and "type" in part for part in value
+            ):
                 return f"{kind} `{key}` is not a field the sandbox proxy walks"
+            if named := _names_a_payload(value):
+                return (
+                    f"{kind} `{key}` names a payload this policy cannot gate: {named!r}"
+                )
         for container in containers:
             reason = self._container_refusal(kind, container, item)
             if reason is not None:
@@ -317,6 +383,25 @@ class BodyPolicy(_BodyPolicy):
                 " upstream"
             )
         return None
+
+
+def _names_a_payload(value: object) -> str | None:
+    """The first payload-naming key anywhere under `value`, or None.
+
+    Iterative because the depth is the box's to choose, and a body deep enough
+    to exhaust the stack should be a refusal rather than a traceback.
+    """
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            for key, nested in current.items():
+                if key in PAYLOAD_KEYS:
+                    return key
+                pending.append(nested)
+        elif isinstance(current, list):
+            pending.extend(current)
+    return None
 
 
 CredentialSource = Callable[[], Awaitable[tuple[str, str]]]

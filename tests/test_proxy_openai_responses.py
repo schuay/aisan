@@ -46,6 +46,29 @@ def test_path_allowlist_is_the_one_measured_codex_route():
         assert not paths.permits(method, path)
 
 
+def test_body_policy_permits_the_measured_tool_choice_and_metadata():
+    """What the client actually sends: `tool_choice` as a string, and six
+    identifier fields. Both are shapes the policy forwards without reading, so
+    both are pinned to what was measured rather than left free-form."""
+    body = json.dumps(
+        {
+            "input": [],
+            "store": False,
+            "stream": True,
+            "tool_choice": "auto",
+            "client_metadata": {
+                "session_id": "s",
+                "thread_id": "t",
+                "turn_id": "u",
+                "x-codex-installation-id": "i",
+                "x-codex-turn-metadata": "{}",
+                "x-codex-window-id": "w",
+            },
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is None
+
+
 def test_body_policy_permits_measured_functions_and_namespaces():
     body = json.dumps(
         {
@@ -448,6 +471,41 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
+        # The API's own `tool_choice` union names hosted capabilities that
+        # never appear in `tools`, so the tool gate never sees them.
+        {
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "mcp", "server_label": "evil"}],
+            }
+        },
+        {"tool_choice": {"type": "image_generation"}},
+        {"tool_choice": "unmeasured"},
+        # Free-form metadata is an object this side forwards without reading.
+        {"client_metadata": {"anything": {"url": "https://evil.test/x"}}},
+        {"client_metadata": {"session_id": ["not-a-string"]}},
+        # A declaration riding in a sibling of a tool the gate just approved.
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "f",
+                    "parameters": {"type": "object"},
+                    "container": {"type": "code_interpreter"},
+                }
+            ]
+        },
+        {
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "n",
+                    "tools": [],
+                    "container": {"type": "code_interpreter"},
+                }
+            ]
+        },
         # A permitted key holding an object instead of the string it is
         # measured to hold, which is where a payload rides past a key pin.
         {
@@ -477,6 +535,53 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
+        # The same url one spelling off the tagged-array walk: a bare object,
+        # an array one deeper, and objects with no `type` at all.
+        {
+            "input": [
+                {
+                    "type": "message",
+                    "content": [{"type": "input_text", "text": "h"}],
+                    "attachment": {
+                        "type": "input_image",
+                        "image_url": "https://evil.test/x",
+                    },
+                }
+            ]
+        },
+        {
+            "input": [
+                {
+                    "type": "message",
+                    "content": [{"type": "input_text", "text": "h"}],
+                    "extra": [
+                        [{"type": "input_image", "image_url": "https://evil.test/x"}]
+                    ],
+                }
+            ]
+        },
+        {
+            "input": [
+                {
+                    "type": "message",
+                    "content": [{"type": "input_text", "text": "h"}],
+                    "attachments": [{"file_url": "https://evil.test/x"}],
+                }
+            ]
+        },
+        {
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "n",
+                    "arguments": "{}",
+                    "call_id": "c",
+                    "ref": {"file_id": "file-123"},
+                }
+            ]
+        },
+        # A top-level key this policy forwards without reading its shape.
+        {"reasoning": {"effort": "high", "ref": {"url": "https://evil.test/x"}}},
         # A part array in a field this item type does not keep parts in.
         {
             "input": [

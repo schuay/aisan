@@ -179,6 +179,13 @@ class BodyPolicy:
 
     client_types: frozenset[str] = CLIENT_TOOL_TYPES
     container_types: frozenset[str] = frozenset()
+    # Tool object keys whose value may be structured. Every other key of a
+    # permitted tool has to be a scalar, so a server-side capability cannot
+    # ride in a sibling of a tool the gate just approved -- the tool walk
+    # reads `type` and would never look at it. This transport nests the
+    # declaration under `function`; the Responses one under `parameters` and
+    # its container's `tools`.
+    structured_tool_keys: frozenset[str] = frozenset({"function"})
     refused_keys: tuple[str, ...] = REFUSED_KEYS
     allowed_keys: frozenset[str] = ALLOWED_KEYS
     content_types: frozenset[str] = ALLOWED_CONTENT_TYPES
@@ -234,6 +241,9 @@ class BodyPolicy:
             kind = tool["type"]
             if not isinstance(kind, str):
                 return "tool `type` must be a string"
+            if kind in self.client_types or kind in self.container_types:
+                if reason := self._tool_shape_refusal(tool, kind):
+                    return reason
             if kind in self.client_types:
                 continue
             if kind in self.container_types:
@@ -246,6 +256,18 @@ class BodyPolicy:
                 f"tool type {kind!r} executes on the upstream, not in the"
                 " sandbox, and is not permitted"
             )
+        return None
+
+    def _tool_shape_refusal(self, tool: dict, kind: str) -> str | None:
+        """Refuse a structured value on a permitted tool's other keys."""
+        for key, value in tool.items():
+            if key in self.structured_tool_keys:
+                continue
+            if isinstance(value, (dict, list)):
+                return (
+                    f"tool {kind!r} field {key!r} is not a field this policy"
+                    " reads, and is not permitted to carry a declaration"
+                )
         return None
 
     def _content_refusal(self, payload: dict[str, object]) -> str | None:
