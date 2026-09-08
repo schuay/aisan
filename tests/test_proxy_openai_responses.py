@@ -12,7 +12,11 @@ from aiohttp import ClientSession, UnixConnector, web
 
 from aisan.proxy.openai_responses import (
     ALLOWED_INPUT_TYPES,
-    CONTENT_TYPES,
+    CONTAINERS,
+    INLINE_URL_KEYS,
+    PART_KEYS,
+    TAG_SETTLED_INPUT_TYPES,
+    TOOL_ENVELOPE_INPUT_TYPE,
     BodyPolicy,
     PathAllowlist,
     make_app,
@@ -136,14 +140,78 @@ def test_body_policy_permits_the_agent_message_the_upstream_echoed_back():
     assert BodyPolicy().refuse(body) is None
 
 
-def test_the_two_message_unions_stay_separate():
-    """The gate is per item type because the unions differ, and the difference
-    is the whole point: `input_image` names a url for the upstream to fetch and
-    belongs to neither. A single shared set is how the narrower item widens."""
-    unions = CONTENT_TYPES.values()
-    assert set(CONTENT_TYPES) <= ALLOWED_INPUT_TYPES
-    assert not any({"input_image", "input_audio"} & union for union in unions)
-    assert CONTENT_TYPES["message"] != CONTENT_TYPES["agent_message"]
+def test_body_policy_permits_the_measured_tool_result_shapes():
+    """A tool result carries its parts under `output`, not `content`, and the
+    field is a bare string as often as it is an array. Measured: text parts,
+    and the screenshot a local tool returns inline."""
+    for output in [
+        "done",
+        [{"type": "input_text", "text": "done"}],
+        [{"type": "input_image", "image_url": "data:image/png;base64,iVBOR"}],
+        [
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,iVBOR",
+                "detail": "auto",
+            }
+        ],
+    ]:
+        for kind in ("function_call_output", "custom_tool_call_output"):
+            body = json.dumps(
+                {
+                    "input": [{"type": kind, "call_id": "c", "output": output}],
+                    "store": False,
+                    "stream": True,
+                }
+            ).encode()
+            assert BodyPolicy().refuse(body) is None, (kind, output)
+
+
+def test_body_policy_permits_the_measured_remote_compaction_item():
+    """Remote compaction is a feature this proxy asks for by header, and the
+    item it answers with replays on the turn after. An opaque blob and an id:
+    the tag settles it."""
+    body = json.dumps(
+        {
+            "input": [
+                {
+                    "type": "compaction",
+                    "id": "cmp_1",
+                    "encrypted_content": "gAAAA",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "t"},
+                }
+            ],
+            "store": False,
+            "stream": True,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is None
+
+
+def test_every_permitted_input_type_is_sorted_into_exactly_one_bucket():
+    """Permitting a type means choosing how it is gated. The buckets are
+    derived into ALLOWED_INPUT_TYPES rather than spelled beside it, so a type
+    cannot arrive permitted without one -- which is how `function_call_output`
+    carried an unread `image_url`."""
+    buckets = [TAG_SETTLED_INPUT_TYPES, set(CONTAINERS), {TOOL_ENVELOPE_INPUT_TYPE}]
+    assert set.union(*(set(b) for b in buckets)) == set(ALLOWED_INPUT_TYPES)
+    for i, one in enumerate(buckets):
+        for other in buckets[i + 1 :]:
+            assert not set(one) & set(other), (one, other)
+
+
+def test_every_part_a_container_holds_is_pinned_and_url_gated():
+    """The gate reads a part's keys, so every part a container names needs a
+    key set; and a key that names a url needs the inline check, or the part
+    becomes the fetch the whole policy exists to refuse."""
+    for container in CONTAINERS.values():
+        assert container.parts <= set(PART_KEYS), container
+    for part_kind, keys in PART_KEYS.items():
+        naming_a_url = {key for key in keys if key.endswith("_url")}
+        assert not naming_a_url or INLINE_URL_KEYS.get(part_kind) in naming_a_url, (
+            part_kind
+        )
+    assert set(INLINE_URL_KEYS) <= set(PART_KEYS)
 
 
 @pytest.mark.parametrize("kind", ["web_search", "code_interpreter", "unknown"])
@@ -240,6 +308,89 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                     "content": [
                         {"type": "encrypted_content", "encrypted_content": "gAAAA"}
                     ],
+                }
+            ]
+        },
+        # The fetch as it actually reached the allowlist: under `output`, in a
+        # tool result, which the gate settled by its tag and never walked.
+        {
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "output": [
+                        {"type": "input_image", "image_url": "https://evil.test/x"}
+                    ],
+                }
+            ]
+        },
+        {
+            "input": [
+                {
+                    "type": "custom_tool_call_output",
+                    "output": [
+                        {"type": "input_image", "image_url": "https://evil.test/x"}
+                    ],
+                }
+            ]
+        },
+        # A scheme that is not `data:` however it is spelled, and a part that
+        # names no url at all where the type says it must.
+        {
+            "input": [
+                {
+                    "type": "custom_tool_call_output",
+                    "output": [
+                        {"type": "input_image", "image_url": " data:image/png;base64,x"}
+                    ],
+                }
+            ]
+        },
+        {
+            "input": [
+                {"type": "custom_tool_call_output", "output": [{"type": "input_image"}]}
+            ]
+        },
+        # The tag says text, a second key names a payload. Refusing on the tag
+        # alone is what lets these two answers ride in one part.
+        {
+            "input": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "hi",
+                            "image_url": "https://evil.test/x",
+                        }
+                    ],
+                }
+            ]
+        },
+        {
+            "input": [
+                {
+                    "type": "agent_message",
+                    "author": "a",
+                    "recipient": "u",
+                    "content": [
+                        {
+                            "type": "encrypted_content",
+                            "encrypted_content": "x",
+                            "image_url": "https://evil.test/x",
+                        }
+                    ],
+                }
+            ]
+        },
+        # Tools ride in the envelope and nowhere else.
+        {
+            "input": [
+                {
+                    "type": "agent_message",
+                    "author": "a",
+                    "recipient": "u",
+                    "content": [],
+                    "tools": [{"type": "web_search"}],
                 }
             ]
         },
