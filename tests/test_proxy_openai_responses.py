@@ -448,6 +448,35 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
+        # A permitted key holding an object instead of the string it is
+        # measured to hold, which is where a payload rides past a key pin.
+        {
+            "input": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": {"image_url": "https://evil.test/x"},
+                        }
+                    ],
+                }
+            ]
+        },
+        {
+            "input": [
+                {
+                    "type": "custom_tool_call_output",
+                    "output": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,x",
+                            "detail": {"url": "https://evil.test/x"},
+                        }
+                    ],
+                }
+            ]
+        },
         # A part array in a field this item type does not keep parts in.
         {
             "input": [

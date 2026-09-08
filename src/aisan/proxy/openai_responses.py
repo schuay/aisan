@@ -300,14 +300,17 @@ class BodyPolicy(_BodyPolicy):
                 f"{part_kind} field(s) not permitted by the sandbox proxy:"
                 f" {quoted_names(extra)}"
             )
+        # Every value a part carries is a string, measured. Pinning the keys
+        # settles which fields a part has and not what they hold, so without
+        # this a permitted key takes an object and the payload rides inside it.
+        for key, value in part.items():
+            if not isinstance(value, str):
+                return f"{part_kind} `{key}` must be a string"
         url_key = INLINE_URL_KEYS.get(part_kind)
         if url_key is None:
             return None
-        url = part.get(url_key)
-        if (
-            not isinstance(url, str)
-            or url[: len(INLINE_URL_SCHEME)].lower() != INLINE_URL_SCHEME
-        ):
+        url = part.get(url_key, "")
+        if url[: len(INLINE_URL_SCHEME)].lower() != INLINE_URL_SCHEME:
             return (
                 f"{part_kind} `{url_key}` must carry the payload inline as a"
                 f" {INLINE_URL_SCHEME} url: any other scheme is a fetch for the"
