@@ -260,7 +260,20 @@ def depot_tools_job(
     binds throughout -- a dep symlink target or an operator extra_ro that has
     gone away is a bind to skip, not a profile to refuse -- unlike the .git pins,
     which are guards and must exist.
+
+    The root is in that second class, and is checked first. It is bound rw and
+    is the box's cwd, so there is no box without it; absent, the scan below
+    walked into it anyway and the caller got an ENOENT from an iterdir() five
+    frames down, naming a path it had never heard of. Checked here rather than
+    in BoxSpec.__post_init__, which is pure -- every other rule it enforces is a
+    statement about the spec's own fields, and this one is a question for the
+    filesystem.
     """
+    if not worktree.is_dir():
+        raise ValueError(
+            f"box root does not exist: {worktree}"
+            " (a box is rooted at a real directory: bound rw, and its cwd)"
+        )
     grant = depot_tools_grant(depot_tools)
     ro = [*external_symlink_targets(worktree), *extra_ro]
     home = Path.home()

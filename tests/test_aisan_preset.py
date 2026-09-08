@@ -372,6 +372,20 @@ def test_depot_tools_job_profile(tmp_path):
     assert spec.limits.memory_max == "8G"
 
 
+def test_depot_tools_job_refuses_a_root_that_is_not_there(tmp_path):
+    """A missing root is named here, not discovered by the scan that walks it.
+
+    It used to be neither: the caller passed a worktree that had been removed
+    underneath it and got an ENOENT out of gitbinds' iterdir(), five frames in
+    and naming a path the caller had never mentioned. The root is bound rw and
+    is the box's cwd, so it belongs with the .git pins -- a guard -- and not
+    with the optional binds around it.
+    """
+    gone = tmp_path / "reclaimed"
+    with pytest.raises(ValueError, match=str(gone)):
+        depot_tools_job(gone)
+
+
 def test_depot_tools_job_binds_no_credential_at_all(tmp_path):
     """The box holds nothing a credential could be read out of, in any mode.
 
