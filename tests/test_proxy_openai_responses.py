@@ -11,6 +11,8 @@ import pytest
 from aiohttp import ClientSession, UnixConnector, web
 
 from aisan.proxy.openai_responses import (
+    ALLOWED_INPUT_TYPES,
+    CONTENT_TYPES,
     BodyPolicy,
     PathAllowlist,
     make_app,
@@ -108,6 +110,42 @@ def test_body_policy_permits_measured_gpt_5_6_additional_tools_envelope():
     assert BodyPolicy().refuse(body) is None
 
 
+def test_body_policy_permits_the_agent_message_the_upstream_echoed_back():
+    """The multi-agent assistant turn. Codex has no code that builds one -- it
+    holds one because the upstream emitted it, and replays it verbatim into the
+    next request. Its content is text or the model's own encrypted blob, and
+    `reasoning`'s blob already rides through on the same body."""
+    body = json.dumps(
+        {
+            "input": [
+                {
+                    "type": "agent_message",
+                    "id": "amsg_1",
+                    "author": "assistant",
+                    "recipient": "user",
+                    "content": [
+                        {"type": "input_text", "text": "measured"},
+                        {"type": "encrypted_content", "encrypted_content": "gAAAA"},
+                    ],
+                }
+            ],
+            "store": False,
+            "stream": True,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is None
+
+
+def test_the_two_message_unions_stay_separate():
+    """The gate is per item type because the unions differ, and the difference
+    is the whole point: `input_image` names a url for the upstream to fetch and
+    belongs to neither. A single shared set is how the narrower item widens."""
+    unions = CONTENT_TYPES.values()
+    assert set(CONTENT_TYPES) <= ALLOWED_INPUT_TYPES
+    assert not any({"input_image", "input_audio"} & union for union in unions)
+    assert CONTENT_TYPES["message"] != CONTENT_TYPES["agent_message"]
+
+
 @pytest.mark.parametrize("kind", ["web_search", "code_interpreter", "unknown"])
 def test_body_policy_refuses_server_side_tools_at_any_depth(kind):
     direct = json.dumps({"tools": [{"type": kind}]}).encode()
@@ -164,6 +202,43 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                     "type": "message",
                     "content": [
                         {"type": "input_image", "image_url": "https://example.test/x"}
+                    ],
+                }
+            ]
+        },
+        # The same fetch, moved into the item whose own union has no url in it.
+        # Reached only because the content gate runs for `agent_message` too;
+        # an item type permitted by tag alone would carry this straight
+        # through.
+        {
+            "input": [
+                {
+                    "type": "agent_message",
+                    "author": "assistant",
+                    "recipient": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": "https://example.test/x"}
+                    ],
+                }
+            ]
+        },
+        {
+            "input": [
+                {
+                    "type": "agent_message",
+                    "author": "assistant",
+                    "recipient": "user",
+                    "content": [{"type": "output_text", "text": "wrong union"}],
+                }
+            ]
+        },
+        {
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "encrypted_content", "encrypted_content": "gAAAA"}
                     ],
                 }
             ]

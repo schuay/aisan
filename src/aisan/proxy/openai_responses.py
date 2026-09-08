@@ -20,6 +20,12 @@ of them in a ``namespace``. GPT-5.6 sends the same declarations through an
 those local declarations recursively and refuses every server-side tool type,
 including web search and code interpreter.
 
+An assistant turn arrives back as ``message`` or, on the multi-agent models,
+as ``agent_message`` -- ``author`` and ``recipient`` in place of ``role``.
+Codex never builds one itself: it holds one only because the upstream emitted
+it, and replays it into the next request's ``input``. The two carry different
+content unions, so the policy gates each against its own.
+
 Forwarding, credential replacement, limits, errors, and streaming are the same
 mechanism as the OpenAI-compatible chat transport. This module supplies the
 Responses route, body policy, and two host-generated protocol headers to its
@@ -63,6 +69,7 @@ ALLOWED_INCLUDES = frozenset({"reasoning.encrypted_content"})
 ALLOWED_INPUT_TYPES = frozenset(
     {
         "additional_tools",
+        "agent_message",
         "custom_tool_call",
         "custom_tool_call_output",
         "function_call",
@@ -71,7 +78,19 @@ ALLOWED_INPUT_TYPES = frozenset(
         "reasoning",
     }
 )
-ALLOWED_CONTENT_TYPES = frozenset({"input_text", "output_text"})
+
+# One union per item type, because the two items do not share one. A `message`
+# carries Codex's `ContentItem`, and `input_image` and `input_audio` there name
+# a url the upstream would fetch. An `agent_message` carries an
+# `AgentMessageInputContent`: text, or the model's own opaque blob, and neither
+# names anything to fetch. Written as a mapping rather than a union so that a
+# type reaching the content gate is one whose union was chosen for it -- an
+# item type added to ALLOWED_INPUT_TYPES and not here is settled by its tag,
+# which is right for `reasoning` and a hole for anything that carries content.
+CONTENT_TYPES = {
+    "message": frozenset({"input_text", "output_text"}),
+    "agent_message": frozenset({"input_text", "encrypted_content"}),
+}
 
 
 @dataclass(frozen=True)
@@ -133,20 +152,21 @@ class BodyPolicy(_BodyPolicy):
             if set(item) != {"type", "role", "tools"} or item["role"] != "developer":
                 return "`additional_tools` must be the measured developer envelope"
             return self.refuse_tools(item["tools"])
-        if kind != "message":
+        content_types = CONTENT_TYPES.get(kind)
+        if content_types is None:
             return None
 
         content = item.get("content")
         if isinstance(content, str):
             return None
         if not isinstance(content, list):
-            return "message `content` must be text or an array"
+            return f"{kind} `content` must be text or an array"
         for part in content:
             if not isinstance(part, dict):
-                return "every message content part must be a JSON object"
+                return f"every {kind} content part must be a JSON object"
             part_kind = part.get("type")
-            if not isinstance(part_kind, str) or part_kind not in ALLOWED_CONTENT_TYPES:
-                return f"Responses content type {part_kind!r} is not permitted"
+            if not isinstance(part_kind, str) or part_kind not in content_types:
+                return f"{kind} content type {part_kind!r} is not permitted"
         return None
 
 
