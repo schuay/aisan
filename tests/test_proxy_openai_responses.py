@@ -46,6 +46,35 @@ def test_path_allowlist_is_the_one_measured_codex_route():
         assert not paths.permits(method, path)
 
 
+def test_a_schema_property_named_url_is_not_a_payload():
+    """A schema says a field named `url` exists by describing it with an
+    object; a reference is a string the upstream would go and get. Reading the
+    property name as the second thing refuses a structured output for the shape
+    of its own result."""
+    described = {"properties": {"url": {"type": "string"}}}
+    for meta, permitted in [
+        (described, True),
+        ({"url": "data:text/plain,inline"}, True),
+        ({"url": "https://evil.test/x"}, False),
+        ({"nested": [{"file_url": "https://evil.test/x"}]}, False),
+    ]:
+        body = json.dumps(
+            {
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "h"}],
+                        "meta": meta,
+                    }
+                ],
+                "store": False,
+                "stream": True,
+            }
+        ).encode()
+        assert (BodyPolicy().refuse(body) is None) is permitted, meta
+
+
 def test_body_policy_permits_a_subagent_and_an_mcp_tool_result():
     """Two shapes a narrowed union refused. `codex review` runs as a subagent
     and names itself and its parent in the metadata; an MCP server can mark its

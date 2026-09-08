@@ -42,8 +42,8 @@ Under those gates, two layers that do not depend on knowing the protocol.
 A part is pinned key for key and value by value, because a tag says what a part
 is and not where its bytes come from. And outside the positions this policy
 reads, a key that names a payload -- an ``image_url``, a ``file_id`` -- is
-refused on its name: the spellings a body can smuggle one in outnumber the ones
-worth enumerating, and whether the upstream honours a field in a position its
+refused on its name and its value: the spellings a body can smuggle one in
+outnumber the ones worth enumerating, and whether the upstream honours a field in a position its
 schema does not define is the upstream's to change, not a property this side
 gets to hold still.
 
@@ -404,7 +404,14 @@ class BodyPolicy(_BodyPolicy):
 
 
 def _names_a_payload(value: object) -> str | None:
-    """The first payload-naming key anywhere under `value`, or None.
+    """The first payload-naming key anywhere under `value` that holds a
+    reference, or None.
+
+    Only a string is one. A JSON Schema describes a field named `url` as an
+    object saying what it is, so reading the property's NAME as a payload
+    refuses a structured output for the shape of its own result. The string it
+    does read has to be inline, on the same terms as a gated part: what makes
+    a reference a capability is that the upstream would go and get it.
 
     Iterative because the depth is the box's to choose, and a body deep enough
     to exhaust the stack should be a refusal rather than a traceback.
@@ -414,7 +421,11 @@ def _names_a_payload(value: object) -> str | None:
         current = pending.pop()
         if isinstance(current, dict):
             for key, nested in current.items():
-                if key in PAYLOAD_KEYS:
+                if (
+                    key in PAYLOAD_KEYS
+                    and isinstance(nested, str)
+                    and nested[: len(INLINE_URL_SCHEME)].lower() != INLINE_URL_SCHEME
+                ):
                     return key
                 pending.append(nested)
         elif isinstance(current, list):
