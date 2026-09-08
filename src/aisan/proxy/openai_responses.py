@@ -32,7 +32,9 @@ parts live differs -- a message keeps them under ``content``, a tool result
 under ``output`` -- and so does what they may be, which is why a single shared
 union would gate the wrong thing. Server-side tools stay refused: a
 ``web_search_call`` names a page for the upstream to open, and nothing local
-needs it.
+needs it. It is the one item a recorded session replays that this policy will
+not forward, so a history that already contains one -- resumed from outside a
+box -- cannot be continued inside one.
 
 Forwarding, credential replacement, limits, errors, and streaming are the same
 mechanism as the OpenAI-compatible chat transport. This module supplies the
