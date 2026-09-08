@@ -13,6 +13,7 @@ from aiohttp import ClientSession, UnixConnector, web
 from aisan.proxy.openai_responses import (
     ALLOWED_INPUT_TYPES,
     CONTAINERS,
+    INERT_PART_KEYS,
     INLINE_URL_KEYS,
     PART_KEYS,
     TAG_SETTLED_INPUT_TYPES,
@@ -167,6 +168,46 @@ def test_body_policy_permits_the_measured_tool_result_shapes():
             assert BodyPolicy().refuse(body) is None, (kind, output)
 
 
+@pytest.mark.parametrize("kind", sorted(TAG_SETTLED_INPUT_TYPES))
+@pytest.mark.parametrize("field", ["content", "output", "summary"])
+def test_a_tag_settled_item_may_not_carry_parts_at_all(kind, field):
+    """The tag settles these because they hold no parts. If one ever does, the
+    answer has to be a refusal and not a walk that never happens -- which is
+    what made a fetch under `output` invisible."""
+    body = json.dumps(
+        {
+            "input": [
+                {
+                    "type": kind,
+                    field: [{"type": "input_image", "image_url": "https://evil/x"}],
+                }
+            ],
+            "store": False,
+            "stream": True,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is not None
+
+
+def test_body_policy_permits_the_measured_reasoning_shapes():
+    """An empty summary and a null content, which is every reasoning item on
+    record. Gated when present, not required to be."""
+    for extra in [
+        {"summary": []},
+        {"summary": [], "content": None},
+        {"summary": [{"type": "summary_text", "text": "s"}]},
+        {"content": [{"type": "reasoning_text", "text": "r"}]},
+    ]:
+        body = json.dumps(
+            {
+                "input": [{"type": "reasoning", "encrypted_content": "x", **extra}],
+                "store": False,
+                "stream": True,
+            }
+        ).encode()
+        assert BodyPolicy().refuse(body) is None, extra
+
+
 def test_body_policy_permits_an_inline_image_in_either_container():
     """The same bytes in the same part type, so the same answer: a screenshot a
     tool returned and an image a user attached both ride, and neither may name
@@ -217,6 +258,7 @@ def test_every_permitted_input_type_is_sorted_into_exactly_one_bucket():
     cannot arrive permitted without one -- which is how `function_call_output`
     carried an unread `image_url`."""
     buckets = [TAG_SETTLED_INPUT_TYPES, set(CONTAINERS), {TOOL_ENVELOPE_INPUT_TYPE}]
+    assert not any(CONTAINERS.get(kind) for kind in TAG_SETTLED_INPUT_TYPES)
     assert set.union(*(set(b) for b in buckets)) == set(ALLOWED_INPUT_TYPES)
     for i, one in enumerate(buckets):
         for other in buckets[i + 1 :]:
@@ -227,13 +269,14 @@ def test_every_part_a_container_holds_is_pinned_and_url_gated():
     """The gate reads a part's keys, so every part a container names needs a
     key set; and a key that names a url needs the inline check, or the part
     becomes the fetch the whole policy exists to refuse."""
-    for container in CONTAINERS.values():
-        assert container.parts <= set(PART_KEYS), container
+    for containers in CONTAINERS.values():
+        for container in containers:
+            assert container.parts <= set(PART_KEYS), container
     for part_kind, keys in PART_KEYS.items():
-        naming_a_url = {key for key in keys if key.endswith("_url")}
-        assert not naming_a_url or INLINE_URL_KEYS.get(part_kind) in naming_a_url, (
-            part_kind
-        )
+        # Not a guess from the key's name: anything outside the inert
+        # vocabulary has to be the key the inline gate reads, so a part added
+        # with a `url`, `src` or `file_id` cannot slip in ungated.
+        assert keys - INERT_PART_KEYS <= {INLINE_URL_KEYS.get(part_kind)}, part_kind
     assert set(INLINE_URL_KEYS) <= set(PART_KEYS)
 
 
@@ -405,6 +448,41 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
+        # A part array in a field this item type does not keep parts in.
+        {
+            "input": [
+                {
+                    "type": "reasoning",
+                    "content": [
+                        {"type": "input_image", "image_url": "https://evil.test/x"}
+                    ],
+                }
+            ]
+        },
+        {
+            "input": [
+                {
+                    "type": "message",
+                    "content": "hi",
+                    "output": [
+                        {"type": "input_image", "image_url": "https://evil.test/x"}
+                    ],
+                }
+            ]
+        },
+        {
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "output": "ok",
+                    "content": [
+                        {"type": "input_image", "image_url": "https://evil.test/x"}
+                    ],
+                }
+            ]
+        },
+        # Absent is not false, and the API's default for absent is to retain.
+        {"store": None},
         # Tools ride in the envelope and nowhere else.
         {
             "input": [
@@ -421,6 +499,8 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
 )
 def test_body_policy_refuses_unmeasured_response_capabilities(change):
     body = {"input": [], "tools": [], "store": False, "stream": True, **change}
+    if body["store"] is None:
+        del body["store"]
     assert BodyPolicy().refuse(json.dumps(body).encode()) is not None
 
 

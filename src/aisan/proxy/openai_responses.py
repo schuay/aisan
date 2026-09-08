@@ -81,8 +81,8 @@ ALLOWED_KEYS = frozenset(
 ALLOWED_INCLUDES = frozenset({"reasoning.encrypted_content"})
 # Item types the tag settles, because nothing they carry can name a fetch:
 # `function_call` keeps its arguments in a string, `custom_tool_call` its
-# input, `reasoning` its summary and content as text beside an opaque blob,
-# `compaction` nothing but the blob and an id.
+# input, `compaction` nothing but an opaque blob and an id. They hold no parts
+# at all, so a tagged array on one of them is refused outright below.
 #
 # Compaction is the odd one, and not for the reason it looks like. A boxed
 # client never produces it: remote compaction wants a provider Codex
@@ -91,10 +91,10 @@ ALLOWED_INCLUDES = frozenset({"reasoning.encrypted_content"})
 # `_protocol_headers` sends advertises the client's features rather than asking
 # for any. It is permitted because a history recorded outside a box does carry
 # the item -- measured -- and replaying it is how that session resumes inside
-# one.
-TAG_SETTLED_INPUT_TYPES = frozenset(
-    {"compaction", "custom_tool_call", "function_call", "reasoning"}
-)
+# one. Its counterpart `compaction_trigger`, the item that ASKS the upstream to
+# compact, stays refused: replaying a summary a recorded session already holds
+# is not the same act as a box asking OpenAI to produce one.
+TAG_SETTLED_INPUT_TYPES = frozenset({"compaction", "custom_tool_call", "function_call"})
 
 # The parts a container may hold, pinned key for key. The tag alone does not
 # say where a part's bytes come from: a text part carrying an `image_url`
@@ -108,6 +108,9 @@ PART_KEYS = MappingProxyType(
         "output_text": frozenset({"type", "text"}),
         "encrypted_content": frozenset({"type", "encrypted_content"}),
         "input_image": frozenset({"type", "image_url", "detail"}),
+        "summary_text": frozenset({"type", "text"}),
+        "reasoning_text": frozenset({"type", "text"}),
+        "text": frozenset({"type", "text"}),
     }
 )
 
@@ -120,6 +123,13 @@ PART_KEYS = MappingProxyType(
 INLINE_URL_KEYS = MappingProxyType({"input_image": "image_url"})
 INLINE_URL_SCHEME = "data:"
 
+# Part keys that carry the payload itself. A key outside this set is either the
+# part's inline-url key or an unreviewed way to name a payload, and the test
+# that pins the two together reads this rather than guessing from the name: a
+# key called `url`, `uri`, `src` or `file_id` names one just as well as one
+# ending `_url`.
+INERT_PART_KEYS = frozenset({"type", "text", "detail", "encrypted_content"})
+
 
 @dataclass(frozen=True)
 class Container:
@@ -127,6 +137,9 @@ class Container:
 
     field: str
     parts: frozenset[str]
+    # `reasoning` sends an empty summary and a null content, so a part field
+    # is gated when it is there and not required to be.
+    optional: bool = False
 
 
 # `message` carries Codex's `ContentItem`, `agent_message` an
@@ -136,17 +149,23 @@ class Container:
 # check settles it.
 CONTAINERS = MappingProxyType(
     {
-        "message": Container(
-            "content", frozenset({"input_text", "output_text", "input_image"})
+        "message": (
+            Container(
+                "content", frozenset({"input_text", "output_text", "input_image"})
+            ),
         ),
-        "agent_message": Container(
-            "content", frozenset({"input_text", "encrypted_content"})
+        "agent_message": (
+            Container("content", frozenset({"input_text", "encrypted_content"})),
         ),
-        "function_call_output": Container(
-            "output", frozenset({"input_text", "input_image"})
+        "function_call_output": (
+            Container("output", frozenset({"input_text", "input_image"})),
         ),
-        "custom_tool_call_output": Container(
-            "output", frozenset({"input_text", "input_image"})
+        "custom_tool_call_output": (
+            Container("output", frozenset({"input_text", "input_image"})),
+        ),
+        "reasoning": (
+            Container("summary", frozenset({"summary_text"}), optional=True),
+            Container("content", frozenset({"reasoning_text", "text"}), optional=True),
         ),
     }
 )
@@ -181,8 +200,11 @@ class BodyPolicy(_BodyPolicy):
             return reason
 
         payload = parse_json_object(body)
-        if payload.get("store", False) is not False:
-            return "`store` must be false"
+        # Not `.get(..., False)`: the API's own default for an absent `store`
+        # is to retain, so absence is the opposite of what this asks for.
+        # Measured across recorded turns, the client always sends it.
+        if payload.get("store") is not False:
+            return "`store` must be present and false"
         if payload.get("stream") is not True:
             return "`stream` must be true"
 
@@ -228,12 +250,33 @@ class BodyPolicy(_BodyPolicy):
         if "tools" in item:
             return f"{kind} may not declare tools"
 
-        container = CONTAINERS.get(kind)
-        if container is None:
-            return None
+        containers = CONTAINERS.get(kind, ())
+        # A part array anywhere but the field its own type keeps parts in is a
+        # payload this side never reads. Which field an item keeps parts in
+        # varies by type, so reading one field per type and ignoring the rest
+        # leaves the same hole that `output` was, one key over.
+        walked = {container.field for container in containers}
+        for key, value in item.items():
+            if key in walked or not isinstance(value, list):
+                continue
+            if any(isinstance(part, dict) and "type" in part for part in value):
+                return f"{kind} `{key}` is not a field the sandbox proxy walks"
+        for container in containers:
+            reason = self._container_refusal(kind, container, item)
+            if reason is not None:
+                return reason
+        return None
+
+    def _container_refusal(
+        self, kind: str, container: Container, item: dict
+    ) -> str | None:
+        parts = item.get(container.field)
+        if parts is None:
+            if container.optional:
+                return None
+            return f"{kind} `{container.field}` must be text or an array"
         # Both shapes are measured -- a tool result is a bare string more
         # often than an array -- and a string names nothing.
-        parts = item.get(container.field)
         if isinstance(parts, str):
             return None
         if not isinstance(parts, list):
