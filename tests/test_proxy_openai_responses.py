@@ -46,6 +46,64 @@ def test_path_allowlist_is_the_one_measured_codex_route():
         assert not paths.permits(method, path)
 
 
+def test_body_policy_permits_a_subagent_and_an_mcp_tool_result():
+    """Two shapes a narrowed union refused. `codex review` runs as a subagent
+    and names itself and its parent in the metadata; an MCP server can mark its
+    result encrypted, which arrives as a part beside the text. Neither is a
+    capability, and both were measured off a real client."""
+    review = {
+        "session_id": "s",
+        "thread_id": "t",
+        "turn_id": "u",
+        "x-codex-installation-id": "i",
+        "x-codex-turn-metadata": "{}",
+        "x-codex-window-id": "w",
+        "x-openai-subagent": "review",
+        "x-codex-parent-thread-id": "p",
+        "parent_turn_id": "q",
+    }
+    mcp = {
+        "type": "function_call_output",
+        "call_id": "c",
+        "output": [
+            {"type": "input_text", "text": "Wall time: 1s"},
+            {"type": "encrypted_content", "encrypted_content": "ciphertext"},
+        ],
+    }
+    body = json.dumps(
+        {
+            "input": [mcp],
+            "store": False,
+            "stream": True,
+            "client_metadata": review,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is None
+
+
+def test_body_policy_gates_inline_audio_the_way_it_gates_an_image():
+    """Same shape, same answer: an MCP audio result rides inline and may not
+    name a url for the upstream to fetch."""
+    for url, permitted in [
+        ("data:audio/wav;base64,UklG", True),
+        ("https://e/x", False),
+    ]:
+        body = json.dumps(
+            {
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": "c",
+                        "output": [{"type": "input_audio", "audio_url": url}],
+                    }
+                ],
+                "store": False,
+                "stream": True,
+            }
+        ).encode()
+        assert (BodyPolicy().refuse(body) is None) is permitted, url
+
+
 def test_body_policy_permits_the_measured_tool_choice_and_metadata():
     """What the client actually sends: `tool_choice` as a string, and six
     identifier fields. Both are shapes the policy forwards without reading, so
@@ -485,6 +543,7 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
         # Free-form metadata is an object this side forwards without reading.
         {"client_metadata": {"anything": {"url": "https://evil.test/x"}}},
         {"client_metadata": {"session_id": ["not-a-string"]}},
+        {"client_metadata": {"ref": {"url": "https://evil.test/x"}}},
         # A declaration riding in a sibling of a tool the gate just approved.
         {
             "tools": [

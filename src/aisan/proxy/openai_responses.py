@@ -123,6 +123,7 @@ PART_KEYS = MappingProxyType(
         "output_text": frozenset({"type", "text"}),
         "encrypted_content": frozenset({"type", "encrypted_content"}),
         "input_image": frozenset({"type", "image_url", "detail"}),
+        "input_audio": frozenset({"type", "audio_url"}),
         "summary_text": frozenset({"type", "text"}),
         "reasoning_text": frozenset({"type", "text"}),
         "text": frozenset({"type", "text"}),
@@ -135,7 +136,9 @@ PART_KEYS = MappingProxyType(
 # image observed in a recorded session is a `data:` url -- but the box is not
 # its client, and any other scheme is a fetch the box chose and the upstream
 # performs.
-INLINE_URL_KEYS = MappingProxyType({"input_image": "image_url"})
+INLINE_URL_KEYS = MappingProxyType(
+    {"input_image": "image_url", "input_audio": "audio_url"}
+)
 INLINE_URL_SCHEME = "data:"
 
 # Part keys that carry the payload itself. A key outside this set is either the
@@ -157,27 +160,34 @@ class Container:
     optional: bool = False
 
 
+# A tool result carries what a local tool produced: text, an image or audio
+# inline, and the opaque blob an MCP server marks as encrypted content.
+TOOL_RESULT_PARTS = frozenset(
+    {"input_text", "input_image", "input_audio", "encrypted_content"}
+)
+
 # `message` carries Codex's `ContentItem`, `agent_message` an
 # `AgentMessageInputContent` -- text or the encrypted payload, no url in the
 # type at all -- and a tool result the text and images a local tool produced.
-# An image rides either way only inline, so the union admits it and the scheme
-# check settles it.
+# Each union is the protocol type's, because an image or audio part carries
+# its payload inline or is refused, and a blob names nothing at all -- so which
+# container a part may appear in is a question about the protocol and not about
+# what the box can reach. Narrowing one of these by hand is how `codex review`
+# and an MCP tool result got refused for carrying fields that were never a
+# capability.
 CONTAINERS = MappingProxyType(
     {
         "message": (
             Container(
-                "content", frozenset({"input_text", "output_text", "input_image"})
+                "content",
+                frozenset({"input_text", "output_text", "input_image", "input_audio"}),
             ),
         ),
         "agent_message": (
             Container("content", frozenset({"input_text", "encrypted_content"})),
         ),
-        "function_call_output": (
-            Container("output", frozenset({"input_text", "input_image"})),
-        ),
-        "custom_tool_call_output": (
-            Container("output", frozenset({"input_text", "input_image"})),
-        ),
+        "function_call_output": (Container("output", TOOL_RESULT_PARTS),),
+        "custom_tool_call_output": (Container("output", TOOL_RESULT_PARTS),),
         "reasoning": (
             Container("summary", frozenset({"summary_text"}), optional=True),
             Container("content", frozenset({"reasoning_text", "text"}), optional=True),
@@ -202,16 +212,6 @@ PAYLOAD_KEYS = frozenset(
     {"image_url", "file_url", "audio_url", "url", "uri", "file_id"}
 )
 
-CLIENT_METADATA_KEYS = frozenset(
-    {
-        "session_id",
-        "thread_id",
-        "turn_id",
-        "x-codex-installation-id",
-        "x-codex-turn-metadata",
-        "x-codex-window-id",
-    }
-)
 
 # Derived, so that permitting a type means sorting it into a bucket. Spelled as
 # a union of its own, this is where a content-carrying type arrives permitted
@@ -280,15 +280,18 @@ class BodyPolicy(_BodyPolicy):
         ):
             return "`tool_choice` may only be one of " + quoted_names(TOOL_CHOICES)
 
-        # Codex's own turn identifiers, six measured string fields. Free-form
-        # it would be an arbitrary object this side forwards without reading.
+        # Codex's own turn identifiers. The names are not pinned: a subagent
+        # adds `x-openai-subagent` and its parent ids, and each release adds
+        # more, so a fixed set refuses a feature over an identifier. What is
+        # pinned is that they are strings, which is what keeps this from being
+        # an arbitrary object forwarded unread -- and the sweep below refuses
+        # a payload named among them.
         metadata = payload.get("client_metadata")
         if metadata is not None and (
             not isinstance(metadata, dict)
-            or set(metadata) - CLIENT_METADATA_KEYS
             or not all(isinstance(value, str) for value in metadata.values())
         ):
-            return "`client_metadata` must be the measured string fields"
+            return "`client_metadata` must be an object of string fields"
 
         # `input` and `tools` are walked above; every other key is forwarded
         # without this policy reading its shape, so none of them may name one.
