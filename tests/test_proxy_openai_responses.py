@@ -167,10 +167,33 @@ def test_body_policy_permits_the_measured_tool_result_shapes():
             assert BodyPolicy().refuse(body) is None, (kind, output)
 
 
-def test_body_policy_permits_the_measured_remote_compaction_item():
-    """Remote compaction is a feature this proxy asks for by header, and the
-    item it answers with replays on the turn after. An opaque blob and an id:
-    the tag settles it."""
+def test_body_policy_permits_an_inline_image_in_either_container():
+    """The same bytes in the same part type, so the same answer: a screenshot a
+    tool returned and an image a user attached both ride, and neither may name
+    a url for the upstream to fetch. Codex strips a remote one before the
+    socket sees it; the box is not Codex."""
+    inline = {"type": "input_image", "image_url": "data:image/png;base64,iVBOR"}
+    remote = {"type": "input_image", "image_url": "https://evil.test/x"}
+    for item, field in [
+        ({"type": "message", "role": "user"}, "content"),
+        ({"type": "custom_tool_call_output", "call_id": "c"}, "output"),
+    ]:
+        for part, permitted in [(inline, True), (remote, False)]:
+            body = json.dumps(
+                {
+                    "input": [{**item, field: [part]}],
+                    "store": False,
+                    "stream": True,
+                }
+            ).encode()
+            assert (BodyPolicy().refuse(body) is None) is permitted, (item, part)
+
+
+def test_body_policy_permits_the_recorded_compaction_item():
+    """A box compacts locally and never produces this, but a history recorded
+    outside one carries it, and resuming that session inside a box replays it.
+    An opaque blob, an id and the metadata every item may carry: the tag
+    settles it."""
     body = json.dumps(
         {
             "input": [

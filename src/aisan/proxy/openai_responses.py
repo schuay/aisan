@@ -26,15 +26,17 @@ a content union of its own. Codex both replays the upstream's and builds its
 own: an inter-agent message becomes an ``agent_message`` whose text names the
 sender and whose payload rides beside it encrypted.
 
-The gate is therefore per item type, in three buckets a new type must be sorted
+So the gate is per item type, in three buckets a new type has to be sorted
 into: the tag settles it, it holds parts, or it is the tool envelope. Where the
 parts live differs -- a message keeps them under ``content``, a tool result
-under ``output`` -- and so does what they may be, which is why a single shared
-union would gate the wrong thing. Server-side tools stay refused: a
-``web_search_call`` names a page for the upstream to open, and nothing local
-needs it. It is the one item a recorded session replays that this policy will
-not forward, so a history that already contains one -- resumed from outside a
-box -- cannot be continued inside one.
+under ``output`` -- and so does what they may be.
+
+Server-side tools stay refused. A ``web_search_call`` names a page for the
+upstream to open and nothing a local turn does needs it; likewise
+``local_shell_call``, ``tool_search_call`` and ``image_generation_call``. Codex
+persists and replays all of them, so a history that collected one outside a box
+cannot be continued inside one. Of the four, only ``web_search_call`` has been
+seen in a recorded session.
 
 Forwarding, credential replacement, limits, errors, and streaming are the same
 mechanism as the OpenAI-compatible chat transport. This module supplies the
@@ -77,23 +79,29 @@ ALLOWED_KEYS = frozenset(
     }
 )
 ALLOWED_INCLUDES = frozenset({"reasoning.encrypted_content"})
-# Item types the tag settles, because what they carry names nothing for the
-# upstream to fetch: `function_call` and `custom_tool_call` keep their
-# arguments in a string, `reasoning` a summary and an opaque blob, `compaction`
-# nothing but an opaque blob. Compaction is measured, and it is this proxy that
-# asks for it -- `_protocol_headers` sends the remote-compaction beta header,
-# and remote compaction answers with the one item type the turn after every
-# compaction then replays.
+# Item types the tag settles, because nothing they carry can name a fetch:
+# `function_call` keeps its arguments in a string, `custom_tool_call` its
+# input, `reasoning` its summary and content as text beside an opaque blob,
+# `compaction` nothing but the blob and an id.
+#
+# Compaction is the odd one, and not for the reason it looks like. A boxed
+# client never produces it: remote compaction wants a provider Codex
+# recognises as OpenAI's, and this transport is a loopback under a name of its
+# own, so a box compacts locally and sends plain messages. The beta header
+# `_protocol_headers` sends advertises the client's features rather than asking
+# for any. It is permitted because a history recorded outside a box does carry
+# the item -- measured -- and replaying it is how that session resumes inside
+# one.
 TAG_SETTLED_INPUT_TYPES = frozenset(
     {"compaction", "custom_tool_call", "function_call", "reasoning"}
 )
 
 # The parts a container may hold, pinned key for key. The tag alone does not
-# say where a part's bytes come from -- an `input_image` names a url, and a
-# text part carrying an `image_url` beside its text would name one past a gate
-# that read only the tag. Measured: every real part is exactly one of these
-# key sets. `encrypted_content` is from the protocol type, not the wire; no
-# `agent_message` traffic has been captured yet.
+# say where a part's bytes come from: a text part carrying an `image_url`
+# beside its text names one past a gate that reads only the tag, which is
+# cfdf7b6's finding one protocol over. Every part observed in a recorded
+# session is exactly one of these key sets. `encrypted_content` is from the
+# protocol type instead, no `agent_message` having been captured on the wire.
 PART_KEYS = MappingProxyType(
     {
         "input_text": frozenset({"type", "text"}),
@@ -104,10 +112,11 @@ PART_KEYS = MappingProxyType(
 )
 
 # The part key that names a payload, and the one scheme that keeps the payload
-# inline. Measured: every image a tool result carries is a base64 `data:` url,
-# so refusing the rest costs nothing and any other scheme is a fetch the box
-# chose and the upstream performs. Same posture as anthropic's base64-only
-# source, and for the same reason: the fetch, not the bytes, is the capability.
+# inline, as anthropic's source gate does with base64. Codex strips a remote
+# image url before the socket sees it and sends the bytes instead, and every
+# image observed in a recorded session is a `data:` url -- but the box is not
+# its client, and any other scheme is a fetch the box chose and the upstream
+# performs.
 INLINE_URL_KEYS = MappingProxyType({"input_image": "image_url"})
 INLINE_URL_SCHEME = "data:"
 
@@ -120,15 +129,16 @@ class Container:
     parts: frozenset[str]
 
 
-# A message keeps its parts under `content`, a tool result under `output`, and
-# the unions differ too: a `message` carries Codex's `ContentItem`, an
-# `agent_message` an `AgentMessageInputContent` (text or the encrypted payload,
-# no url in the type at all), a tool result the text and images a local tool
-# produced. One shared union would gate every one of them against the wrong
-# set.
+# `message` carries Codex's `ContentItem`, `agent_message` an
+# `AgentMessageInputContent` -- text or the encrypted payload, no url in the
+# type at all -- and a tool result the text and images a local tool produced.
+# An image rides either way only inline, so the union admits it and the scheme
+# check settles it.
 CONTAINERS = MappingProxyType(
     {
-        "message": Container("content", frozenset({"input_text", "output_text"})),
+        "message": Container(
+            "content", frozenset({"input_text", "output_text", "input_image"})
+        ),
         "agent_message": Container(
             "content", frozenset({"input_text", "encrypted_content"})
         ),
@@ -144,9 +154,9 @@ CONTAINERS = MappingProxyType(
 TOOL_ENVELOPE_INPUT_TYPE = "additional_tools"
 
 # Derived, so that permitting a type means sorting it into a bucket. Spelled as
-# its own union this is where a content-carrying type arrives permitted and
-# ungated -- which is what `function_call_output` was, carrying an `input_image`
-# whose `image_url` the sandbox never read.
+# a union of its own, this is where a content-carrying type arrives permitted
+# and ungated: `function_call_output` did, holding an `input_image` whose
+# `image_url` nothing on this side read.
 ALLOWED_INPUT_TYPES = (
     TAG_SETTLED_INPUT_TYPES | frozenset(CONTAINERS) | {TOOL_ENVELOPE_INPUT_TYPE}
 )
@@ -212,18 +222,18 @@ class BodyPolicy(_BodyPolicy):
                 return "`additional_tools` must be the measured developer envelope"
             return self.refuse_tools(item["tools"])
         # Only the envelope declares tools. The item's other keys are left
-        # alone deliberately: the upstream returns items carrying ids and
-        # metadata this side has not measured, and pinning the key set of an
-        # item the box merely replays is how a turn gets refused for a field
-        # that was never a capability.
+        # alone: the upstream returns items carrying ids and metadata this side
+        # has not measured, and pinning those refuses a turn over a field that
+        # was never a capability.
         if "tools" in item:
             return f"{kind} may not declare tools"
 
         container = CONTAINERS.get(kind)
         if container is None:
             return None
+        # Both shapes are measured -- a tool result is a bare string more
+        # often than an array -- and a string names nothing.
         parts = item.get(container.field)
-        # The measured shape of a tool result, and it names nothing.
         if isinstance(parts, str):
             return None
         if not isinstance(parts, list):
