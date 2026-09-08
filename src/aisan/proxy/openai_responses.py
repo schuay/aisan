@@ -38,6 +38,21 @@ persists and replays all of them, so a history that collected one outside a box
 cannot be continued inside one. Of the four, only ``web_search_call`` has been
 seen in a recorded session.
 
+Under those gates, two layers that do not depend on knowing the protocol.
+A part is pinned key for key and value by value, because a tag says what a part
+is and not where its bytes come from. And outside the positions this policy
+reads, a key that names a payload -- an ``image_url``, a ``file_id`` -- is
+refused on its name: the spellings a body can smuggle one in outnumber the ones
+worth enumerating, and whether the upstream honours a field in a position its
+schema does not define is the upstream's to change, not a property this side
+gets to hold still.
+
+The keys forwarded without being read are pinned to what the client sends.
+``tool_choice`` to its string form, because the API's own union names hosted
+capabilities there -- an ``mcp`` server, ``image_generation`` -- that never
+appear in ``tools`` for the tool gate to catch, and ``client_metadata`` to
+Codex's six identifier fields.
+
 Forwarding, credential replacement, limits, errors, and streaming are the same
 mechanism as the OpenAI-compatible chat transport. This module supplies the
 Responses route, body policy, and two host-generated protocol headers to its
