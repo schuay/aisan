@@ -34,6 +34,52 @@ def _function(name: str = "exec_command") -> dict:
     }
 
 
+def _recap_format() -> dict:
+    return {
+        "type": "json_schema",
+        "name": "codex_output_schema",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "recap": {"type": "string", "minLength": 1, "maxLength": 320}
+            },
+            "required": ["recap"],
+            "additionalProperties": False,
+        },
+    }
+
+
+@pytest.mark.parametrize("verbosity", [None, "low", "medium", "high"])
+def test_body_policy_permits_codex_structured_output(verbosity):
+    text = {"format": _recap_format()}
+    if verbosity is not None:
+        text["verbosity"] = verbosity
+    body = {"input": [], "store": False, "stream": True, "text": text}
+    assert BodyPolicy().refuse(json.dumps(body).encode()) is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"type": "web_search"},
+        {"name": {}},
+        {"strict": "true"},
+        {"schema": "not-a-schema"},
+        {"tools": [{"type": "web_search"}]},
+        {"schema": {"nested": {"file_url": "https://evil.test/x"}}},
+    ],
+)
+def test_body_policy_refuses_unsafe_or_malformed_output_formats(change):
+    body = {
+        "input": [],
+        "store": False,
+        "stream": True,
+        "text": {"verbosity": "low", "format": {**_recap_format(), **change}},
+    }
+    assert BodyPolicy().refuse(json.dumps(body).encode()) is not None
+
+
 def test_path_allowlist_is_the_one_measured_codex_route():
     paths = PathAllowlist()
     assert paths.permits("POST", "/responses")
@@ -788,7 +834,10 @@ async def _credential() -> tuple[str, str]:
     return "real-key", "real-account"
 
 
-async def test_valid_response_request_reaches_the_prefixed_upstream(tmp_path):
+@pytest.mark.parametrize("structured_output", [False, True])
+async def test_valid_response_request_reaches_the_prefixed_upstream(
+    tmp_path, structured_output
+):
     reached = []
 
     async def upstream(request: web.Request) -> web.Response:
@@ -809,9 +858,10 @@ async def test_valid_response_request_reaches_the_prefixed_upstream(tmp_path):
         socket, make_app(credential=_credential, upstream=upstream_url)
     )
     session = ClientSession(connector=UnixConnector(path=str(socket)))
-    body = json.dumps(
-        {"input": [], "tools": [_function()], "store": False, "stream": True}
-    ).encode()
+    payload = {"input": [], "tools": [_function()], "store": False, "stream": True}
+    if structured_output:
+        payload["text"] = {"verbosity": "low", "format": _recap_format()}
+    body = json.dumps(payload).encode()
     try:
         async with session.post(
             "http://codex.invalid/responses", data=body

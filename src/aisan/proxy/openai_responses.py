@@ -302,14 +302,36 @@ class BodyPolicy(_BodyPolicy):
             if named := _names_a_payload(value):
                 return f"`{key}` names a payload this policy cannot gate: {named!r}"
 
-        text = payload.get("text")
-        if text is not None and (
+        return self._text_refusal(payload.get("text"))
+
+    def _text_refusal(self, text: object) -> str | None:
+        if text is None:
+            return None
+        if (
             not isinstance(text, dict)
-            or set(text) != {"verbosity"}
-            or not isinstance(text["verbosity"], str)
+            or not text
+            or set(text) - {"verbosity", "format"}
+        ):
+            return "`text` may only contain verbosity and an output format"
+        if "verbosity" in text and (
+            not isinstance(text["verbosity"], str)
             or text["verbosity"] not in {"low", "medium", "high"}
         ):
-            return "`text` may only select low, medium, or high verbosity"
+            return "`text.verbosity` must be low, medium, or high"
+        # Codex 0.153.4 uses a strict output schema for task recaps and
+        # --output-schema. The schema describes the result; the payload sweep
+        # above still checks it for references, as it does other text fields.
+        if "format" in text:
+            output_format = text["format"]
+            if (
+                not isinstance(output_format, dict)
+                or set(output_format) != {"type", "name", "strict", "schema"}
+                or output_format["type"] != "json_schema"
+                or not isinstance(output_format["name"], str)
+                or output_format["strict"] is not True
+                or not isinstance(output_format["schema"], dict)
+            ):
+                return "`text.format` must be a named strict JSON schema"
         return None
 
     def _input_refusal(self, item: object) -> str | None:
