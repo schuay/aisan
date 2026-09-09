@@ -355,6 +355,7 @@ async def test_subscription_credential_is_absent_inside_a_real_box(tmp_path):
     assert f"client_key={PLACEHOLDER_KEY}" in result.stdout
 
 
+@pytest.mark.live
 @pytest.mark.skipif(codex_binary() is None, reason="codex is not installed")
 async def test_codex_tui_can_persist_repository_trust(tmp_path):
     upstream, runner = await _upstream_server(_hello)
@@ -446,6 +447,7 @@ async def test_codex_tui_can_persist_repository_trust(tmp_path):
     assert config["projects"][str(worktree)]["trust_level"] == "trusted"
 
 
+@pytest.mark.live
 @pytest.mark.skipif(codex_binary() is None, reason="codex is not installed")
 async def test_real_codex_reaches_a_stub_only_through_the_responses_backend(
     tmp_path,

@@ -297,6 +297,7 @@ def test_missing_mcp_command_fails_before_the_box_owns_the_terminal(
         mcp_ro_binds(config, "/usr/bin")
 
 
+@pytest.mark.live
 @pytest.mark.skipif(codex_binary() is None, reason="codex is not installed")
 def test_real_codex_loads_the_generated_mcp_profile(tmp_path):
     source = tmp_path / "host-config.toml"
@@ -327,6 +328,7 @@ def test_real_codex_loads_the_generated_mcp_profile(tmp_path):
     ]
 
 
+@pytest.mark.live
 @pytest.mark.skipif(codex_binary() is None, reason="codex is not installed")
 async def test_real_codex_starts_an_imported_mcp_server_inside_the_box(
     tmp_path, monkeypatch

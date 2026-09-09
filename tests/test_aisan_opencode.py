@@ -693,6 +693,7 @@ async def test_the_box_reaches_the_model_only_through_the_relay(tmp_path):
     assert "host=111" in r.stdout
 
 
+@pytest.mark.live
 @pytest.mark.skipif(opencode_binary() is None, reason="opencode is not installed")
 async def test_a_real_opencode_turn_through_the_whole_chain(tmp_path):
     """The strongest claim in the file: the REAL client, in a REAL box, turns

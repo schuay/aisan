@@ -168,3 +168,13 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# A default run asserts on this package, never on whichever build of a vendor's
+# agent CLI the host happens to have. Those tests measure a moving wire format
+# against a binary nobody here upgraded, so an unrelated release turns the suite
+# red for code that did not change -- and a machine with an older build turns it
+# green for a shape that no longer ships. Run them deliberately, when pinning a
+# new client version: `pytest -m live` (a command-line -m replaces this one).
+addopts = "-m 'not live'"
+markers = [
+    "live: spawns a third-party agent CLI installed on the host",
+]
