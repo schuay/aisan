@@ -173,13 +173,11 @@ def test_seed_state_rebuilds_malformed_state_instead_of_crashing(tmp_path, malfo
     state.mkdir()
     (state / ".claude.json").write_text(malformed)
 
-    seed_state(state, Path("/repo"))
+    seed_state(state)
 
     config = json.loads((state / ".claude.json").read_text())
     assert config["hasCompletedOnboarding"] is True
-    assert config["bypassPermissionsModeAccepted"] is True
     assert isinstance(config["customApiKeyResponses"]["approved"], list)
-    assert config["projects"]["/repo"]["hasTrustDialogAccepted"] is True
 
 
 def test_seed_state_preserves_unrelated_valid_state(tmp_path):
@@ -195,12 +193,11 @@ def test_seed_state_preserves_unrelated_valid_state(tmp_path):
         json.dumps({"userID": "keep-me", "projects": {"/other": {"seen": True}}})
     )
 
-    seed_state(state, Path("/repo"))
+    seed_state(state)
 
     config = json.loads((state / ".claude.json").read_text())
     assert config["userID"] == "keep-me"
     assert config["projects"]["/other"] == {"seen": True}
-    assert config["projects"]["/repo"]["hasTrustDialogAccepted"] is True
 
 
 def test_seed_state_lends_the_box_the_hosts_model_menu(tmp_path):
@@ -228,7 +225,7 @@ def test_seed_state_lends_the_box_the_hosts_model_menu(tmp_path):
     ]
     host.write_text(json.dumps({"additionalModelOptionsCache": options}))
 
-    seed_state(state, Path("/repo"), host)
+    seed_state(state, host)
 
     config = json.loads((state / ".claude.json").read_text())
     # Verbatim, the disabled entry included: an entitlement the host does not
@@ -277,7 +274,7 @@ def test_seed_state_lends_the_box_the_hosts_feature_flags(tmp_path):
         )
     )
 
-    seed_state(state, Path("/repo"), host)
+    seed_state(state, host)
 
     config = json.loads((state / ".claude.json").read_text())
     assert config["cachedGrowthBookFeatures"] == features
@@ -315,7 +312,7 @@ def test_seed_state_mirrors_each_cache_on_its_own(tmp_path):
         )
     )
 
-    seed_state(state, Path("/repo"), host)
+    seed_state(state, host)
 
     config = json.loads((state / ".claude.json").read_text())
     assert config["additionalModelOptionsCache"] == kept
@@ -348,7 +345,7 @@ def test_seed_state_keeps_the_boxs_model_menu_when_the_host_lends_none(
     if host_state != "absent":
         host.write_text(host_state)
 
-    seed_state(state, Path("/repo"), host)
+    seed_state(state, host)
 
     config = json.loads((state / ".claude.json").read_text())
     assert config["additionalModelOptionsCache"] == kept
@@ -375,7 +372,7 @@ def test_the_model_menu_is_read_from_the_hosts_real_config_dir(tmp_path, monkeyp
 
     state = tmp_path / "state"
     state.mkdir()
-    seed_state(state, Path("/repo"))
+    seed_state(state)
 
     config = json.loads((state / ".claude.json").read_text())
     assert config["additionalModelOptionsCache"] == options
@@ -540,3 +537,118 @@ def test_help_without_plugins_is_unchanged(monkeypatch, capsys):
 
     assert cli.main(["--help"]) == 0
     assert "plugin commands" not in capsys.readouterr().out
+
+
+def test_seed_state_never_answers_the_folder_trust_prompt(tmp_path):
+    """Whether this repository's contents are trusted is the operator's call,
+    and the CLI asks it in a dialog that persists in the state dir. The seed
+    must leave it unanswered rather than accept on their behalf."""
+    import json
+
+    from aisan.cli.claude import seed_state
+
+    state = tmp_path / "state"
+    state.mkdir()
+
+    seed_state(state)
+
+    config = json.loads((state / ".claude.json").read_text())
+    assert "hasTrustDialogAccepted" not in json.dumps(config)
+
+
+def test_seed_state_keeps_the_trust_answer_given_in_the_box(tmp_path):
+    """Answered once inside the box, it has to survive every later reseed --
+    otherwise the dialog returns on every launch."""
+    import json
+
+    from aisan.cli.claude import seed_state
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / ".claude.json").write_text(
+        json.dumps({"projects": {"/repo": {"hasTrustDialogAccepted": True}}})
+    )
+
+    seed_state(state)
+
+    config = json.loads((state / ".claude.json").read_text())
+    assert config["projects"]["/repo"]["hasTrustDialogAccepted"] is True
+
+
+def test_seed_settings_accepts_the_disclaimer_where_the_cli_reads_it(tmp_path):
+    """2.1.259 reads the bypassPermissions answer from user settings, not from
+    `.claude.json`: seeding the old key only made the CLI run its migration on
+    every launch."""
+    import json
+
+    from aisan.cli.claude import seed_settings, seed_state
+
+    state = tmp_path / "state"
+    state.mkdir()
+
+    seed_state(state)
+    seed_settings(state)
+
+    settings = json.loads((state / "settings.json").read_text())
+    assert settings["skipDangerousModePermissionPrompt"] is True
+    config = json.loads((state / ".claude.json").read_text())
+    assert "bypassPermissionsModeAccepted" not in config
+
+
+def test_seed_settings_keeps_the_settings_the_cli_wrote(tmp_path):
+    """The CLI owns this file too. Reseeding must change one key, not truncate
+    the settings a session left behind."""
+    import json
+
+    from aisan.cli.claude import seed_settings
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "settings.json").write_text(
+        json.dumps({"statusLine": {"type": "command"}})
+    )
+
+    seed_settings(state)
+
+    settings = json.loads((state / "settings.json").read_text())
+    assert settings["statusLine"] == {"type": "command"}
+    assert settings["skipDangerousModePermissionPrompt"] is True
+
+
+@pytest.mark.parametrize("malformed", ["not json", "[1, 2, 3]", '"a string"'])
+def test_seed_settings_rebuilds_a_mangled_file_instead_of_crashing(tmp_path, malformed):
+    """The file sits in the box-writable state dir, so its contents are
+    attacker-reachable between sessions and must not wedge the next launch."""
+    import json
+
+    from aisan.cli.claude import seed_settings
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "settings.json").write_text(malformed)
+
+    seed_settings(state)
+
+    settings = json.loads((state / "settings.json").read_text())
+    assert settings == {"skipDangerousModePermissionPrompt": True}
+
+
+def test_seed_settings_reads_nothing_through_a_planted_symlink(tmp_path):
+    """Following the link would merge the HOST's own settings into the box --
+    the file reads as absent instead, and the write lands on a fresh regular
+    file (tests/test_aisan_statedir.py covers the write side)."""
+    import json
+
+    from aisan.cli.claude import seed_settings
+
+    state = tmp_path / "state"
+    state.mkdir()
+    victim = tmp_path / "host-settings.json"
+    victim.write_text(json.dumps({"plantedFromHost": True}))
+    (state / "settings.json").symlink_to(victim)
+
+    seed_settings(state)
+
+    settings = json.loads((state / "settings.json").read_text())
+    assert settings == {"skipDangerousModePermissionPrompt": True}
+    assert json.loads(victim.read_text()) == {"plantedFromHost": True}

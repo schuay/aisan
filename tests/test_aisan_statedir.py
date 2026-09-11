@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from aisan.cli.claude import seed_state
+from aisan.cli.claude import seed_settings, seed_state
 from aisan.session import mirror_user_memory
 from aisan.session_mcp import SessionMCP
 from aisan.statedir import prepare_state_dir, read_sealed_text, write_sealed
@@ -98,13 +98,25 @@ def test_seed_state_cannot_overwrite_a_symlink_target(tmp_path):
     state.mkdir()
     victim = tmp_path / "gitconfig"
     _planted_link(state, ".claude.json", victim)
-    seed_state(state, tmp_path / "repo")
+    seed_state(state)
     # The host file is untouched, and a real config was rebuilt from scratch.
     assert victim.read_text() == "SECRET-HOST-CONTENT\n"
     written = state / ".claude.json"
     assert not written.is_symlink()
     config = json.loads(written.read_text())
     assert config["hasCompletedOnboarding"] is True
+
+
+def test_seed_settings_cannot_overwrite_a_symlink_target(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    victim = tmp_path / "gitconfig"
+    link = _planted_link(state, "settings.json", victim)
+    seed_settings(state)
+    # The host file is untouched, and real settings were rebuilt from scratch.
+    assert victim.read_text() == "SECRET-HOST-CONTENT\n"
+    assert not link.is_symlink()
+    assert json.loads(link.read_text())["skipDangerousModePermissionPrompt"] is True
 
 
 def test_session_mcp_write_cannot_overwrite_a_symlink_target(tmp_path):

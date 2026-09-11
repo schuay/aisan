@@ -85,7 +85,7 @@ def host_config() -> Path:
     return claude_config_file()
 
 
-def seed_state(state: Path, repo: Path, host_config_path: Path | None = None) -> None:
+def seed_state(state: Path, host_config_path: Path | None = None) -> None:
     """Answer the CLI's first-run gates, because one of them cannot be answered.
 
     Onboarding's first step is a connectivity check that fetches
@@ -101,10 +101,17 @@ def seed_state(state: Path, repo: Path, host_config_path: Path | None = None) ->
     write a real credential into a directory bound rw into the box, which is the
     one thing the profile exists to prevent.
 
-    The other three are ordinary dialogs that persist here once answered, so
-    seeding them only saves answering them the first time: the folder-trust
-    prompt, "Detected a custom API key" (the placeholder trips it, defaulting to
-    No), and the bypassPermissions disclaimer.
+    The one other gate here is "Detected a custom API key" (the placeholder
+    trips it, defaulting to No), which is about the dress aisan itself chose and
+    so presumes nothing about the tree. The bypassPermissions disclaimer is the
+    same kind of answer but no longer lives in this file -- see `seed_settings`.
+
+    The folder-trust prompt is deliberately NOT seeded. It asks whether the
+    contents of this repository are trusted, which is the operator's call and
+    not one a launcher can make for them. The CLI persists the answer into this
+    same file, and the merge below leaves it alone, so a box asks once per
+    repository and remembers -- inside the state dir only: the host's own
+    ~/.claude.json is never read for it and never written.
 
     The same file carries the caches the box cannot fill for itself, which are
     not gates at all -- see `mirror_host_caches`; they are merged here because
@@ -127,7 +134,6 @@ def seed_state(state: Path, repo: Path, host_config_path: Path | None = None) ->
         parsed = {}
     config = parsed if isinstance(parsed, dict) else {}
     config["hasCompletedOnboarding"] = True  # the mandatory one, see above
-    config["bypassPermissionsModeAccepted"] = True
     responses = _object_at(config, "customApiKeyResponses")
     approved = responses.get("approved")
     if not isinstance(approved, list):
@@ -140,11 +146,40 @@ def seed_state(state: Path, repo: Path, host_config_path: Path | None = None) ->
     # correct for whichever dress the next run picks cannot go stale.
     if PLACEHOLDER_KEY[-20:] not in approved:  # the CLI stores the last 20 chars
         approved.append(PLACEHOLDER_KEY[-20:])
-    _object_at(_object_at(config, "projects"), str(repo))["hasTrustDialogAccepted"] = (
-        True
-    )
     mirror_host_caches(config, host_config_path or host_config())
     write_sealed(path, json.dumps(config, indent=2))
+
+
+def seed_settings(state: Path) -> None:
+    """Accept the bypassPermissions disclaimer where the CLI reads it today.
+
+    The answer used to be `bypassPermissionsModeAccepted` in `.claude.json`, and
+    2.1.259 migrates it on startup: it writes `skipDangerousModePermissionPrompt`
+    into user settings -- `$CLAUDE_CONFIG_DIR/settings.json`, so the state dir --
+    and then strips the old key from `.claude.json`. Seeding the old key still
+    worked, at the cost of that migration running on every single launch, since
+    the seed put it back each time. This writes what the CLI reads.
+
+    Not an answer about the tree: the disclaimer is about the permission mode
+    this launcher itself passes, which the box is the sandbox for.
+
+    The CLI owns this file too and writes its own keys into it, so this reads
+    before writing and changes only its own key -- the same shape as Codex's
+    profile file, for the same reason. A file the agent left unparseable is
+    rebuilt rather than merged, which loses whatever else was in it; of the two
+    ways to be wrong, wedging every later launch of this repo is worse.
+    """
+    path = state / "settings.json"
+    # Read without following a symlink, as with `.claude.json` above: a planted
+    # `settings.json -> ~/.claude/settings.json` must not be read here, nor the
+    # merged result written back through it.
+    try:
+        parsed = json.loads(read_sealed_text(path) or "{}")
+    except json.JSONDecodeError:
+        parsed = {}
+    settings = parsed if isinstance(parsed, dict) else {}
+    settings["skipDangerousModePermissionPrompt"] = True
+    write_sealed(path, json.dumps(settings, indent=2))
 
 
 # The keys Claude Code fills from a server it dials at its compiled-in address,
@@ -293,7 +328,8 @@ async def _main(argv: list[str]) -> int:
     command += ["--permission-mode", "bypassPermissions", *payload]
 
     def prepare() -> None:
-        seed_state(state, repo)
+        seed_state(state)
+        seed_settings(state)
         seed_user_memory(state, USER_MEMORY)
         if mcp.enabled:
             mcp.write(mcp_config)

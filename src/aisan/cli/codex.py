@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 from aisan.egress.openai_responses import (
@@ -33,7 +35,8 @@ from aisan.session import (
     state_dir,
     terminal_env,
 )
-from aisan.session_mcp import codex_host_mcp, mcp_search_path
+from aisan.session_mcp import SessionMCP, codex_host_mcp, mcp_search_path
+from aisan.statedir import read_sealed_text
 
 USER_MEMORY = Path.home() / ".codex" / "AGENTS.md"
 
@@ -44,6 +47,64 @@ def seed_user_memory(state: Path, source: Path) -> None:
     Measured against codex-cli 0.147: the file is read from $CODEX_HOME.
     See `mirror_user_memory` for why this is a copy and not a bind."""
     mirror_user_memory(source, state / "AGENTS.md")
+
+
+def preserved_trust(path: Path) -> dict[str, object]:
+    """Carry Codex's own answer to the folder-trust prompt across a rewrite.
+
+    The launcher rewrites the profile file from the host MCP import on every
+    launch, and Codex persists that answer INTO the file the active profile
+    names -- measured against codex-cli 0.153.4: with `--profile NAME` the entry
+    lands in `$CODEX_HOME/NAME.config.toml`, and only without one does it land
+    in `config.toml`. So the truncating write asked the question again every
+    session. Nothing here answers it; this only stops the import from erasing
+    the answer the operator gave.
+
+    Trust stays inside the state dir. It is not read from the host's ~/.codex
+    and never written back there, so an entry an agent could have authored
+    steers nothing outside its own box.
+
+    TODO: only the trust field survives -- any OTHER setting Codex persists into
+    the profile file is still dropped. 0.153.4 writes nothing else there (model,
+    reasoning effort and the tui keys go to config.toml, which aisan does not
+    rewrite), so today that costs nothing. A later version that persists more
+    here would show up as a second setting that will not stick.
+
+    Read without following a symlink, like every other read of this dir: a
+    planted `aisan-host-mcp.config.toml -> ~/.codex/config.toml` must not be
+    read through, which would copy the host's file into the box. A planted link
+    reads as absent and costs one more trust prompt.
+    """
+    text = read_sealed_text(path)
+    if text is None:
+        return {}
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return {}
+    projects = parsed.get("projects")
+    if not isinstance(projects, dict):
+        return {}
+    # Every path the file names, not just this box's root: Codex keys the entry
+    # on the directory it was started in, and a box rooted at a subdirectory
+    # would otherwise silently stop persisting. One field of each is narrow
+    # enough -- an entry for another path steers only a later box on that path.
+    kept = {
+        name: {"trust_level": entry["trust_level"]}
+        for name, entry in projects.items()
+        if isinstance(entry, dict) and isinstance(entry.get("trust_level"), str)
+    }
+    return {"projects": kept} if kept else {}
+
+
+def write_host_mcp(mcp: SessionMCP, path: Path) -> None:
+    """Rewrite the profile file from the host import, keeping what Codex wrote.
+
+    The import owns `mcp_servers` outright -- a server the agent planted in this
+    file is replaced, not merged. `preserved_trust` names the one thing that
+    survives, and why.
+    """
+    replace(mcp, document={**mcp.document, **preserved_trust(path)}).write(path)
 
 
 def parse_args(argv: list[str]):
@@ -87,7 +148,7 @@ async def _main(argv: list[str]) -> int:
     def prepare() -> None:
         seed_user_memory(state, USER_MEMORY)
         if mcp.enabled:
-            mcp.write(mcp_config)
+            write_host_mcp(mcp, mcp_config)
 
     return await run_interactive(
         client="codex",

