@@ -66,7 +66,7 @@ from aisan.session import (
     terminal_env,
 )
 from aisan.session_mcp import claude_config_file, claude_host_mcp, mcp_search_path
-from aisan.statedir import read_sealed_text, write_sealed
+from aisan.statedir import read_sealed_object, write_sealed
 
 USER_MEMORY = Path.home() / ".claude" / "CLAUDE.md"
 
@@ -127,12 +127,7 @@ def seed_state(state: Path, host_config_path: Path | None = None) -> None:
     # planted `.claude.json -> /etc/passwd` would otherwise be read here (and the
     # merged result written back through the link). A non-regular file reads as
     # absent, rebuilding from scratch.
-    existing = read_sealed_text(path)
-    try:
-        parsed = json.loads(existing) if existing else {}
-    except json.JSONDecodeError:
-        parsed = {}
-    config = parsed if isinstance(parsed, dict) else {}
+    config = read_sealed_object(path)
     config["hasCompletedOnboarding"] = True  # the mandatory one, see above
     responses = _object_at(config, "customApiKeyResponses")
     approved = responses.get("approved")
@@ -173,11 +168,7 @@ def seed_settings(state: Path) -> None:
     # Read without following a symlink, as with `.claude.json` above: a planted
     # `settings.json -> ~/.claude/settings.json` must not be read here, nor the
     # merged result written back through it.
-    try:
-        parsed = json.loads(read_sealed_text(path) or "{}")
-    except json.JSONDecodeError:
-        parsed = {}
-    settings = parsed if isinstance(parsed, dict) else {}
+    settings = read_sealed_object(path)
     settings["skipDangerousModePermissionPrompt"] = True
     write_sealed(path, json.dumps(settings, indent=2))
 

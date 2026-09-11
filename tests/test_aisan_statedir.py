@@ -12,7 +12,12 @@ import pytest
 from aisan.cli.claude import seed_settings, seed_state
 from aisan.session import mirror_user_memory
 from aisan.session_mcp import SessionMCP
-from aisan.statedir import prepare_state_dir, read_sealed_text, write_sealed
+from aisan.statedir import (
+    prepare_state_dir,
+    read_sealed_object,
+    read_sealed_text,
+    write_sealed,
+)
 
 
 def _planted_link(state: Path, name: str, victim: Path) -> Path:
@@ -78,6 +83,26 @@ def test_read_sealed_text_treats_a_symlink_as_absent(tmp_path):
     real = state / "real"
     real.write_text("data\n")
     assert read_sealed_text(real) == "data\n"
+
+
+@pytest.mark.parametrize("content", ["", "not json", "[1, 2, 3]", '"a string"', "null"])
+def test_read_sealed_object_rebuilds_anything_that_is_not_an_object(tmp_path, content):
+    path = tmp_path / "seed.json"
+    path.write_text(content)
+    assert read_sealed_object(path) == {}
+    assert read_sealed_object(tmp_path / "missing") == {}
+
+
+def test_read_sealed_object_reads_a_symlink_as_absent(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    victim = tmp_path / "victim.json"
+    victim.write_text('{"planted": true}')
+    link = _planted_link(state, "seed.json", victim)
+    assert read_sealed_object(link) == {}
+    real = state / "real.json"
+    real.write_text('{"keep": 1}')
+    assert read_sealed_object(real) == {"keep": 1}
 
 
 def test_mirror_user_memory_cannot_overwrite_a_symlink_target(tmp_path):

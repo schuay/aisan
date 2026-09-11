@@ -18,6 +18,7 @@ without an import cycle.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -119,6 +120,25 @@ def read_sealed_text(path: Path) -> str | None:
             return handle.read()
     except OSError:
         return None
+
+
+def read_sealed_object(path: Path) -> dict:
+    """The JSON object at `path`, read as `read_sealed_text`; {} if it is not one.
+
+    For a seed that merges its own keys into a file the boxed client also
+    writes. The file sits in the box-writable state dir, so absent, planted,
+    unparseable and non-object all rebuild from scratch rather than raise: a
+    file the agent mangled must cost the client one more first-run prompt, not
+    wedge every later launch of this repo.
+    """
+    text = read_sealed_text(path)
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _unlink_if_not_regular(path: Path) -> None:
