@@ -7,13 +7,13 @@
   chdir     <ROOT>
 
 == egress backends (host half on a socket, in-box on loopback) ==
-  anthropic 127.0.0.1:8713 -> <AISAN NESTED ROOT>/proxy-16a0eeb0791b6c92/anthropic.sock
+  anthropic 127.0.0.1:8713 -> <AISAN PRIVATE>/proxy-16a0eeb0791b6c92/anthropic.sock
 
 == tmpfs mounts (mounted before binds; intended writable scratch) ==
   [..] <TMP>  (2147483648)
   [..] <HOME>  (1073741824  <- $HOME)
   [..] <MAIN>/.git/worktrees  (no size)
-  [..] <AISAN NESTED ROOT>  (no size)
+  [..] <AISAN PRIVATE>  (no size)
 
 == binds in argv order (later shadows earlier on overlap) ==
   system    /usr /bin /lib /lib64 /sbin /etc /proc /dev /run/systemd/journal/stdout
@@ -31,13 +31,13 @@
   [..] ro        <CONFIG>
   [..] rw        <STATE>
   <AISAN RUNTIME>
-  [..] ro        <AISAN NESTED ROOT>/proxy-16a0eeb0791b6c92
+  [..] ro        <AISAN PRIVATE>/proxy-16a0eeb0791b6c92
   [..] seal-ro   <MAIN>/.git/worktrees
-  [..] seal-ro   <AISAN NESTED ROOT>
+  [..] seal-ro   <AISAN PRIVATE>
 
 == sealed directories (empty in the box; nothing creatable) ==
   <MAIN>/.git/worktrees
-  <AISAN NESTED ROOT>
+  <AISAN PRIVATE>
 
 == environment (the box's complete environment; --clearenv first) ==
   AISAN_PRIVATE_ROOT=<AISAN NESTED ROOT>
@@ -152,14 +152,14 @@
   <STATE>
   <AISAN RUNTIME>
   --tmpfs
-  <AISAN NESTED ROOT>
+  <AISAN PRIVATE>
   --ro-bind
-  <AISAN NESTED ROOT>/proxy-16a0eeb0791b6c92
-  <AISAN NESTED ROOT>/proxy-16a0eeb0791b6c92
+  <AISAN PRIVATE>/proxy-16a0eeb0791b6c92
+  <AISAN PRIVATE>/proxy-16a0eeb0791b6c92
   --remount-ro
   <MAIN>/.git/worktrees
   --remount-ro
-  <AISAN NESTED ROOT>
+  <AISAN PRIVATE>
   --unshare-pid
   --unshare-ipc
   --unshare-uts
@@ -238,6 +238,6 @@
   <AISAN PYTHON>
   -m
   aisan.launch
-  <AISAN NESTED ROOT>/proxy-16a0eeb0791b6c92
+  <AISAN PRIVATE>/proxy-16a0eeb0791b6c92
   --
   <payload>

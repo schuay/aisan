@@ -478,16 +478,14 @@ def normalise(
         (str(Path(sys.executable)), "<AISAN PYTHON>"),
         (str(root.resolve()), "<ROOT>") if root else None,
         (str(Path.home()), "<HOME>"),
-        # Before the private root, and skipping it when the two are equal: in a
-        # box they ARE equal (the box names this path as the root for an aisan
-        # nested inside it), and whichever rule ran first would decide the
-        # token. A snapshot regenerated in a box would then differ from the same
-        # snapshot regenerated on a host -- and running the suite inside a box
-        # is the reason the override exists.
+        (str(private_root()), "<AISAN PRIVATE>"),
+        # The root a box offers a nested aisan, which is a fixed path carrying
+        # this uid -- a literal one would make a snapshot match only for the
+        # user who wrote it. Distinct from the rule above because on a host the
+        # two are different paths; when they are the SAME path (inside a box)
+        # the rule above has already claimed it, which is why the snapshot
+        # harness pins the private root rather than leaving it ambient.
         (_NESTED_ROOT, "<AISAN NESTED ROOT>"),
-        (str(private_root()), "<AISAN PRIVATE>")
-        if str(private_root()) != _NESTED_ROOT
-        else None,
         (tempfile.gettempdir(), "<TMP>"),
     ]
     text = _collapse_aisan_runtime(text)

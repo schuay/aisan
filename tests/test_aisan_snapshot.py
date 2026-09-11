@@ -91,16 +91,26 @@ def _check(name: str, text: str) -> None:
 def pinned_host(tmp_path, monkeypatch):
     """The preset's host-dependent inputs, made the same everywhere.
 
-    Two of them, both discovered rather than passed: the vpython cache (an
+    Three of them, all discovered rather than passed: the vpython cache (an
     Overlay, present only on a host that has run `git cl`) and depot_tools
     (found on PATH). Left alone, the snapshot would carry two mounts that appear
     and vanish with the machine -- and the case that matters is the one where
     they are PRESENT, since that is the complete profile.
+
+    The third is the private root, which AISAN_PRIVATE_ROOT makes nameable. A
+    box names the NESTED root, so a suite run inside one has the two paths equal
+    and no substitution can tell them apart -- every seal and socket line would
+    regenerate under the nested token, and a snapshot written in a box would not
+    match one written on a host. Running the suite in a box is the reason the
+    override exists, so that regeneration is the expected one, not the odd one.
     """
     # import_module, not `from ... import depot_tools_job`: the presets package re-exports
     # the FUNCTION under its module's name, so the plain import binds a callable
     # with no module attributes to patch.
     preset = importlib.import_module("aisan.presets.depot_tools_job")
+
+    private = importlib.import_module("aisan.private")
+    monkeypatch.setattr(private, "_PRIVATE_ROOT", Path("/tmp/aisan-snapshot"))
 
     cache = tmp_path / "vpython-cache" / "vpython-root"
     cache.mkdir(parents=True)
