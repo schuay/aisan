@@ -695,6 +695,35 @@ def test_a_bind_of_the_adc_store_is_refused_for_a_vertex_box(tmp_path, monkeypat
         box.wrapper()
 
 
+def test_the_vertex_backend_points_both_sdks_at_its_proxy():
+    """Two variables, one proxy. The Anthropic SDK builds `/projects/...` paths
+    with no version segment and takes it from the base URL, so without the
+    `/v1` every Claude call arrives one segment short of the allowlisted
+    shape."""
+    from aisan.egress.vertex import PORT, VertexBackend
+
+    b = VertexBackend(
+        rpm=1,
+        project="p",
+        location="global",
+        models=("gemini-3",),
+        anthropic_models=("claude-4",),
+        fetch=object(),
+    )
+    assert b.client_env() == {
+        "AISAN_VERTEX_PROXY_ENDPOINT": f"http://127.0.0.1:{PORT}",
+        "ANTHROPIC_VERTEX_BASE_URL": f"http://127.0.0.1:{PORT}/v1",
+    }
+    # Set whether or not a Claude model is configured: the allowlist alone
+    # decides reachability, and the box gets a 403 rather than a hang.
+    assert (
+        VertexBackend(
+            rpm=1, project="p", location="global", models=("g",), fetch=object()
+        ).client_env()
+        == b.client_env()
+    )
+
+
 def test_a_root_beside_a_credential_is_allowed(tmp_path):
     b = _FakeBackend()
     b.credentials = (tmp_path / "credentials" / "key.json",)

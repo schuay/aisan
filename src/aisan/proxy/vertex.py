@@ -17,13 +17,25 @@ one:
   matcher. A request naming another project does not match, so it cannot be
   forwarded -- the box cannot reach a resource we did not name.
 - Request headers are never passed through. The proxy builds its own, so
-  anything the box sends is data.
-- Two request shapes are reachable, both POST-or-DELETE on one host: model
-  inference, and the cached-content lifecycle the growing-prefix cache needs.
+  anything the box sends is data. One of the headers it builds is a Vertex
+  session id, which keeps a conversation's Claude turns together so the prefix
+  one turn cached is readable by the next. It is minted HERE, once per proxy
+  and so once per box, and a box's own value is discarded like every other
+  header it sends -- a session id is a routing key, so honouring one the box
+  chose would let it steer its own requests.
+- A fixed set of request shapes is reachable, all POST-or-DELETE on one host:
+  Gemini inference (`publishers/google/...:generateContent`), the cached-content
+  lifecycle the growing-prefix cache needs, and, only where the deploy names
+  Claude models, Anthropic inference (`publishers/anthropic/...:rawPredict`).
+  The two model routes carry separate model lists; with no Claude model
+  configured the Anthropic shape is not emitted at all.
 - The body may declare only the tools that run IN the box. Neither of the above
   reads the body, and on this upstream the body is not inert: a declared
   `googleSearch` or `urlContext` makes Google fetch a URL the box chose, which
   is a route off a machine the box otherwise has no route off. See `BodyPolicy`.
+  The two model routes speak different body protocols; the policy that applies
+  is chosen by the pattern that permitted the path (`Allowlist.dialect`), never
+  by a second look at it.
 
 Token-file brokering is what this replaces: there the box held a
 short-lived token, here it holds nothing.
@@ -33,10 +45,16 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
+
+# For its `BodyPolicy` only: Claude on Vertex carries an Anthropic Messages
+# body, and a second implementation here would be a second thing to keep
+# measured. Imported as a module so each use reads as that protocol's rule.
+from . import anthropic
 
 # Re-exported for compatibility; new shared-infrastructure imports should use
 # `aisan.proxy.http` directly.
@@ -52,14 +70,16 @@ from .http import (
     run_forever,
     serve,
 )
-from .policy import permits as policy_permits
+from .policy import decision as policy_decision
 from .policy import refusal as policy_refusal
 
 __all__ = [
     "MAX_BODY_BYTES",
+    "VERTEX_ANTHROPIC_KEYS",
     "Allowlist",
     "BodyPolicy",
     "RateLimit",
+    "anthropic_body_policy",
     "make_app",
     "run_forever",
     "serve",
@@ -97,28 +117,81 @@ class Allowlist:
     Built from config, never from the request. `re.escape` on every interpolated
     value: a project id with a regex metacharacter would otherwise silently widen
     the pattern, which is the classic way an allowlist stops being one.
+
+    Two model lists. Claude on Vertex is a different API version, publisher
+    and method (`/v1/.../publishers/anthropic/models/<m>:rawPredict`) than
+    Gemini (`/v1beta1/.../publishers/google/models/<m>:generateContent`) with
+    a different body protocol behind it; one merged set would permit each name
+    on the other's route. `anthropic_models` defaults to empty, so a deploy
+    with no Claude model does not grow the surface.
     """
 
     project: str
     location: str
     models: tuple[str, ...]
+    anthropic_models: tuple[str, ...] = ()
 
-    def _patterns(self) -> tuple[re.Pattern[str], ...]:
+    def _patterns(self) -> tuple[tuple[str, re.Pattern[str]], ...]:
+        """Every permitted shape, tagged with the body protocol behind it.
+
+        The tag is what `make_app` picks the body policy by: one match, one
+        decision. A second test on the path could disagree with the pattern
+        that permitted it, and the Anthropic policy reads a Gemini `tools`
+        array by the wrong rules.
+
+        A model pattern is emitted only when its list is non-empty: `()`
+        matches the empty string, so an unguarded group would permit
+        `.../models/:rawPredict` exactly when nothing was allowed.
+        """
         base = rf"/v1beta1/projects/{re.escape(self.project)}/locations/{re.escape(self.location)}"
         models = "|".join(re.escape(m) for m in self.models)
-        return (
-            re.compile(
-                rf"^{base}/publishers/google/models/({models})"
-                r":(generateContent|streamGenerateContent)$"
-            ),
-            re.compile(rf"^{base}/cachedContents$"),
-            re.compile(rf"^{base}/cachedContents/[0-9]+$"),
-        )
+        patterns: list[tuple[str, re.Pattern[str]]] = []
+        if self.models:
+            patterns.append(
+                (
+                    "google",
+                    re.compile(
+                        rf"^{base}/publishers/google/models/({models})"
+                        r":(generateContent|streamGenerateContent)$"
+                    ),
+                )
+            )
+        patterns += [
+            ("google", re.compile(rf"^{base}/cachedContents$")),
+            ("google", re.compile(rf"^{base}/cachedContents/[0-9]+$")),
+        ]
+        if self.anthropic_models:
+            # `/v1`, not `/v1beta1`: the Anthropic SDK's Vertex client puts
+            # that version in its base URL.
+            anthropic_base = (
+                rf"/v1/projects/{re.escape(self.project)}"
+                rf"/locations/{re.escape(self.location)}"
+            )
+            anthropic_models = "|".join(re.escape(m) for m in self.anthropic_models)
+            patterns.append(
+                (
+                    "anthropic",
+                    re.compile(
+                        rf"^{anthropic_base}/publishers/anthropic/models/"
+                        rf"({anthropic_models})"
+                        r":(rawPredict|streamRawPredict)$"
+                    ),
+                )
+            )
+        return tuple(patterns)
+
+    def dialect(self, method: str, path: str) -> str | None:
+        """The body protocol `path` speaks, or None if it is not permitted.
+        One lookup answers both; `permits` derives from it."""
+        if method not in ("POST", "DELETE"):
+            return None
+        for name, pattern in self._patterns():
+            if pattern.match(path):
+                return name
+        return None
 
     def permits(self, method: str, path: str) -> bool:
-        if method not in ("POST", "DELETE"):
-            return False
-        return any(p.match(path) for p in self._patterns())
+        return self.dialect(method, path) is not None
 
 
 # `Part` keys that name a URI for GOOGLE to fetch. A `contents` part carrying
@@ -150,7 +223,11 @@ CLIENT_TOOL_FIELDS = frozenset({"functionDeclarations", "function_declarations"}
 
 @dataclass(frozen=True)
 class BodyPolicy:
-    """Which capabilities the body may declare.
+    """Which capabilities a Gemini body may declare.
+
+    Claude on Vertex reaches the same host with an Anthropic Messages body,
+    gated by `anthropic_body_policy` instead; the route that was permitted
+    selects between them.
 
     The path allowlist gates the ENVELOPE of a model call, and on this upstream
     the body is not inert: the tools it declares -- and the `contents` parts it
@@ -244,6 +321,39 @@ class BodyPolicy:
         return None
 
 
+# The Anthropic Messages body as the Vertex transport spells it. `rawPredict`
+# takes a Messages request verbatim, so the policy that already reads one
+# (tool types, top-level keys, content blocks) is reused; a second copy here
+# would drift, since the Anthropic proxy is where the measurements happen. It
+# accepts the type-less custom-tool shape langchain emits, which the Gemini
+# policy refuses on sight, and it refuses `image`/`document` url sources,
+# which the Gemini policy never sees because it looks for `parts`.
+#
+# The added keys are measured from the real client. `anthropic_version` is
+# injected by the SDK on every request; `stop_sequences`, `top_k` and `top_p`
+# are sampling parameters ChatAnthropicVertex sends. `tool_choice` is bound on
+# every call by an agent with a structured result (ToolStrategy forces the
+# result tool), so refusing it 403s the first turn. It is safe because it can
+# only name a tool the same body declares, and `_tools_refusal` has already
+# limited those to in-box tools. Any widening of `anthropic.ALLOWED_KEYS` lands
+# here too, measured on the direct route rather than this one.
+#
+# `model` is removed: on this route the model is a path segment (the SDK pops
+# it out of the body), and the path is what the allowlist gates. A body `model`
+# would be a second, ungated place to name one. The count-tokens route keeps
+# `model` in the body and would need it back if ever allowlisted.
+VERTEX_ANTHROPIC_KEYS = (
+    anthropic.ALLOWED_KEYS
+    | {"anthropic_version", "stop_sequences", "tool_choice", "top_k", "top_p"}
+) - {"model"}
+
+
+def anthropic_body_policy() -> anthropic.BodyPolicy:
+    """The body policy for the `publishers/anthropic` route. A function, like
+    the other defaulted policies, so no caller mutates a shared instance."""
+    return anthropic.BodyPolicy(allowed_keys=VERTEX_ANTHROPIC_KEYS)
+
+
 def _error(status: int, message: str, *, streaming: bool) -> web.Response:
     """A refusal the client can actually parse.
 
@@ -278,9 +388,30 @@ def make_app(
     location: str,
     rate: RateLimit | None = None,
     body: BodyPolicy | None = None,
+    anthropic_body: anthropic.BodyPolicy | None = None,
+    session_header: str | None = None,
+    session_id: str | None = None,
 ) -> web.Application:
     limiter = rate or RateLimit()
-    body_policy = body or BodyPolicy()
+    # Session affinity keeps a conversation's turns together, so the prefix one
+    # turn cached is readable by the next. Which header carries it is the
+    # caller's to name: the upstreams that offer affinity spell it differently
+    # and not all of them document it, so naming one here would ship a guess at
+    # every other deploy's. Unnamed means the mechanism is simply off, which is
+    # a cache miss and never a failed request.
+    #
+    # One id per app, which is one per box. The box's client sends a
+    # per-conversation id of its own; it is dropped like every other header,
+    # and since one box runs one conversation the granularity is the same.
+    # Injectable so a test can assert what was sent.
+    vertex_session = session_id or uuid.uuid4().hex
+    # One policy per body protocol, keyed by the dialect the allowlist reports.
+    # A dialect with no entry is a KeyError inside the fail-closed wrapper
+    # below, so a refusal rather than a forwarded request.
+    body_policies = {
+        "google": body or BodyPolicy(),
+        "anthropic": anthropic_body or anthropic_body_policy(),
+    }
     warn = LogGate()
     upstream = _upstream(location)
 
@@ -290,13 +421,18 @@ def make_app(
         # also fire on `...streamGenerateContentEvil`. Only used to shape the
         # error envelope (streaming errors are array-wrapped), but a check whose
         # comment says "streaming" should mean the streaming method.
+        #
+        # Not `:streamRawPredict`: the array wrapper is the Gemini stream's
+        # error shape, and the Anthropic SDK parses the plain object.
         streaming = path.endswith(":streamGenerateContent")
-        # Through `policy_permits`, so an allowlist that RAISES denies rather
-        # than tearing the connection down as a retryable transport error.
-        if not policy_permits(
-            lambda: allowlist.permits(request.method, path),
+        # Through `policy_decision`, so an allowlist that raises denies rather
+        # than tearing the connection down as a retryable transport error. It
+        # also names the shape that matched, which picks the body policy below.
+        dialect = policy_decision(
+            lambda: allowlist.dialect(request.method, path),
             subject=f"{request.method} {path}",
-        ):
+        )
+        if dialect is None:
             warn.warning(log, "vertex proxy: refused %s %s", request.method, path)
             return _error(
                 403, "path not permitted by the sandbox proxy", streaming=streaming
@@ -312,10 +448,12 @@ def make_app(
 
         # Before `token()`: no reason to read the credential for a request being
         # refused. Through `policy_refusal` for the same reason the path check
-        # goes through `policy_permits` -- a policy that raises must deny, not
-        # tear the connection down as something the client will retry into.
+        # goes through `policy_decision` -- a policy that raises must deny, not
+        # tear the connection down as something the client will retry into. The
+        # dict lookup is inside the wrapper for that reason too.
         reason = policy_refusal(
-            lambda: body_policy.refuse(body), subject=f"body of {request.path}"
+            lambda: body_policies[dialect].refuse(body),
+            subject=f"body of {request.path}",
         )
         if reason is not None:
             warn.warning(log, "vertex proxy: refused body: %s", reason)
@@ -326,6 +464,9 @@ def make_app(
             "Authorization": f"Bearer {await token()}",
             "Content-Type": "application/json",
         }
+        if session_header and dialect == "anthropic":
+            # Anthropic-only: Gemini's implicit cache gains nothing from it.
+            headers[session_header] = vertex_session
         session = request.app[_SESSION]
         url = f"{upstream}{request.path_qs}"
         try:

@@ -102,6 +102,8 @@ class VertexBackend(Backend):
         project: str,
         location: str,
         models: tuple[str, ...],
+        anthropic_models: tuple[str, ...] = (),
+        session_header: str | None = None,
         impersonate: str = "",
         fetch=None,
     ) -> None:
@@ -109,6 +111,14 @@ class VertexBackend(Backend):
         self._project = project
         self._location = location
         self._models = models
+        # Claude on Vertex is a different path shape on the same host, so the
+        # allowlist needs to know which names belong on which route. Empty by
+        # default: a deploy with no Claude model gets no Anthropic route.
+        self._anthropic_models = anthropic_models
+        # The header carrying session affinity on the Anthropic route, named by
+        # the deploy because the upstreams spell it differently. None leaves the
+        # mechanism off; see make_app.
+        self._session_header = session_header
         self._impersonate = impersonate
         # ADC is minted in memory, but what it is minted FROM is a file, and a
         # box that can read it can mint the same token for itself.
@@ -138,7 +148,16 @@ class VertexBackend(Backend):
         return self._cached
 
     def client_env(self) -> dict[str, str]:
-        return {"AISAN_VERTEX_PROXY_ENDPOINT": f"http://127.0.0.1:{self.port}"}
+        return {
+            "AISAN_VERTEX_PROXY_ENDPOINT": f"http://127.0.0.1:{self.port}",
+            # The Anthropic SDK finds the same proxy through its own variable.
+            # The `/v1` is required: the SDK builds `/projects/...` paths with
+            # no version segment and takes it from the base URL. Set whether or
+            # not a Claude model is configured, so the allowlist alone decides
+            # reachability: a box gets a legible 403 rather than a hang against
+            # the real host.
+            "ANTHROPIC_VERTEX_BASE_URL": f"http://127.0.0.1:{self.port}/v1",
+        }
 
     async def preflight(self) -> None:
         try:
@@ -160,11 +179,15 @@ class VertexBackend(Backend):
         sock.unlink(missing_ok=True)
         app = make_app(
             allowlist=Allowlist(
-                project=self._project, location=self._location, models=self._models
+                project=self._project,
+                location=self._location,
+                models=self._models,
+                anthropic_models=self._anthropic_models,
             ),
             token=self._token,
             location=self._location,
             rate=RateLimit(per_minute=self._rpm),
+            session_header=self._session_header,
         )
         runner = await serve_proxy(sock, app)
         log.info("vertex proxy: listening on %s for 127.0.0.1:%d", sock, self.port)

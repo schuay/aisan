@@ -33,9 +33,25 @@ LOCATION = "global"
 MODEL = "gemini-3.1-pro-preview"
 BASE = f"/v1beta1/projects/{PROJECT}/locations/{LOCATION}"
 
+# Claude on Vertex: a different API version, publisher and method on the same
+# host. Spelled out rather than derived from BASE so the two routes cannot
+# move together.
+ANTHROPIC_MODEL = "claude-sonnet-4-5@20250929"
+ANTHROPIC_BASE = f"/v1/projects/{PROJECT}/locations/{LOCATION}"
+ANTHROPIC_MODELS = f"{ANTHROPIC_BASE}/publishers/anthropic/models"
+
 
 def _allow() -> Allowlist:
     return Allowlist(project=PROJECT, location=LOCATION, models=(MODEL,))
+
+
+def _allow_both() -> Allowlist:
+    return Allowlist(
+        project=PROJECT,
+        location=LOCATION,
+        models=(MODEL,),
+        anthropic_models=(ANTHROPIC_MODEL,),
+    )
 
 
 def test_the_log_gate_bounds_a_refusal_flood(caplog, monkeypatch):
@@ -59,7 +75,7 @@ def test_the_log_gate_bounds_a_refusal_flood(caplog, monkeypatch):
     assert messages[-1] == "refused later"
 
 
-def test_allowlist_permits_exactly_the_two_shapes():
+def test_allowlist_permits_exactly_the_two_gemini_shapes():
     a = _allow()
     assert a.permits("POST", f"{BASE}/publishers/google/models/{MODEL}:generateContent")
     assert a.permits(
@@ -67,6 +83,144 @@ def test_allowlist_permits_exactly_the_two_shapes():
     )
     assert a.permits("POST", f"{BASE}/cachedContents")
     assert a.permits("DELETE", f"{BASE}/cachedContents/12345")
+
+
+def test_allowlist_permits_the_anthropic_shape_only_where_configured():
+    a = _allow_both()
+    assert a.permits("POST", f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:rawPredict")
+    assert a.permits("POST", f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:streamRawPredict")
+    # The existing routes are unmoved.
+    assert a.permits("POST", f"{BASE}/publishers/google/models/{MODEL}:generateContent")
+    assert a.permits("POST", f"{BASE}/cachedContents")
+    # The default, no Claude model, reaches none of it.
+    assert not _allow().permits(
+        "POST", f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:rawPredict"
+    )
+
+
+def test_an_empty_model_list_permits_no_model_path_at_all():
+    """`()` matches the empty string, so a pattern emitted for an empty list
+    would permit `.../models/:rawPredict`. The pattern must not be emitted at
+    all; both lists, since both interpolate the same way."""
+    no_claude = _allow()
+    assert not no_claude.permits("POST", f"{ANTHROPIC_MODELS}/:rawPredict")
+    assert not no_claude.permits("POST", f"{ANTHROPIC_MODELS}/:streamRawPredict")
+    assert no_claude.dialect("POST", f"{ANTHROPIC_MODELS}/:rawPredict") is None
+
+    no_gemini = Allowlist(project=PROJECT, location=LOCATION, models=())
+    assert not no_gemini.permits(
+        "POST", f"{BASE}/publishers/google/models/:generateContent"
+    )
+    # An empty model list is not an empty allowlist.
+    assert no_gemini.permits("POST", f"{BASE}/cachedContents")
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "why"),
+    [
+        # Each model list gates its own route; a merged set would permit both.
+        (
+            "POST",
+            f"{ANTHROPIC_MODELS}/{MODEL}:rawPredict",
+            "a Gemini name on the Anthropic route",
+        ),
+        (
+            "POST",
+            f"{BASE}/publishers/google/models/{ANTHROPIC_MODEL}:generateContent",
+            "a Claude name on the Gemini route",
+        ),
+        # The version segment is part of the shape.
+        (
+            "POST",
+            (
+                f"/v1beta1/projects/{PROJECT}/locations/{LOCATION}"
+                f"/publishers/anthropic/models/{ANTHROPIC_MODEL}:rawPredict"
+            ),
+            "the Anthropic shape under the Gemini version",
+        ),
+        (
+            "POST",
+            f"{ANTHROPIC_BASE}/publishers/google/models/{MODEL}:generateContent",
+            "the Gemini shape under the Anthropic version",
+        ),
+        # The publisher is not the box's to choose either.
+        (
+            "POST",
+            f"{ANTHROPIC_BASE}/publishers/google/models/{ANTHROPIC_MODEL}:rawPredict",
+            "publisher",
+        ),
+        ("POST", "/v1/projects/other/locations/global/cachedContents", "project"),
+        (
+            "POST",
+            (
+                f"/v1/projects/{PROJECT}/locations/us-central1"
+                f"/publishers/anthropic/models/{ANTHROPIC_MODEL}:rawPredict"
+            ),
+            "location",
+        ),
+        # Real Vertex verbs on a listed model, neither of them granted.
+        (
+            "POST",
+            f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:predict",
+            "method suffix",
+        ),
+        (
+            "POST",
+            f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:countTokens",
+            "method suffix",
+        ),
+        # The SDK's count_tokens pseudo-model is not configured.
+        ("POST", f"{ANTHROPIC_MODELS}/count-tokens:rawPredict", "pseudo-model"),
+        ("GET", f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:rawPredict", "http method"),
+        # Anchored at both ends: neither a prefix nor a suffix may ride along.
+        (
+            "POST",
+            f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:rawPredictEvil",
+            "suffix anchoring",
+        ),
+        (
+            "POST",
+            f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}EXTRA:rawPredict",
+            "model anchoring",
+        ),
+        (
+            "POST",
+            f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:rawPredict/../../evil",
+            "path traversal",
+        ),
+    ],
+)
+def test_allowlist_refuses_on_the_anthropic_route(method, path, why):
+    assert not _allow_both().permits(method, path), why
+
+
+def test_dialect_names_the_protocol_behind_the_path_that_matched():
+    """The body policy is chosen from this answer; the wrong dialect would read
+    a Gemini `tools` array by Anthropic rules."""
+    a = _allow_both()
+    assert (
+        a.dialect("POST", f"{BASE}/publishers/google/models/{MODEL}:generateContent")
+        == "google"
+    )
+    assert a.dialect("POST", f"{BASE}/cachedContents") == "google"
+    assert a.dialect("DELETE", f"{BASE}/cachedContents/12345") == "google"
+    assert (
+        a.dialect("POST", f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:rawPredict")
+        == "anthropic"
+    )
+    assert a.dialect("POST", f"{BASE}/nope") is None
+
+
+def test_allowlist_escapes_regex_metacharacters_in_an_anthropic_model():
+    # Real Claude-on-Vertex names carry `@` and `.`.
+    a = Allowlist(
+        project=PROJECT,
+        location=LOCATION,
+        models=(),
+        anthropic_models=("claude-4.5@1",),
+    )
+    assert a.permits("POST", f"{ANTHROPIC_MODELS}/claude-4.5@1:rawPredict")
+    assert not a.permits("POST", f"{ANTHROPIC_MODELS}/claude-4X5@1:rawPredict")
 
 
 @pytest.mark.parametrize(
@@ -212,7 +366,8 @@ async def test_an_allowlist_that_raises_denies(tmp_path, caplog):
         return "unused"
 
     class Exploding:
-        def permits(self, method: str, path: str) -> bool:
+        # `dialect` is the method the handler asks.
+        def dialect(self, method: str, path: str) -> str | None:
             raise RuntimeError("the policy is broken")
 
     app = make_app(allowlist=Exploding(), token=token, location=LOCATION)
@@ -524,6 +679,126 @@ async def test_box_headers_are_never_forwarded(tmp_path):
 
     assert got["Authorization"] == "Bearer real"
     assert "X-Goog-User-Project" not in got
+
+
+# ── session affinity ─────────────────────────────────────────────────────────
+#
+# Without a session id a conversation's later turns are not guaranteed to find
+# the prefix an earlier turn cached. The id is the proxy's, never the box's:
+# honouring a box-chosen header would let a box steer requests.
+#
+# The header name is the deploy's, so these tests invent one. What they assert
+# is that the proxy sends the name it was given, on the route that benefits,
+# with a value the box cannot choose -- none of which depends on which name a
+# particular upstream wants.
+
+_SESSION_HEADER = "X-Test-Session-Id"
+
+_UNSET = object()
+
+
+async def _forwarded_headers(
+    tmp_path, path, *, session_header=_UNSET, session_id=None, sent=None
+):
+    """The headers upstream saw for one request the box made to `path`."""
+    from aiohttp import ClientSession
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    got: dict[str, str] = {}
+
+    async def upstream(request: web.Request) -> web.Response:
+        got.update(request.headers)
+        return web.json_response({"ok": True})
+
+    up_url, up_runner = await _upstream_server(upstream)
+    import aisan.proxy.vertex as v
+
+    orig = v._upstream
+    v._upstream = lambda _loc: up_url
+    try:
+        app = make_app(
+            allowlist=_allow_both(),
+            token=lambda: _ready("real"),
+            location=LOCATION,
+            session_header=(
+                _SESSION_HEADER if session_header is _UNSET else session_header
+            ),
+            session_id=session_id,
+        )
+        sock = tmp_path / "vertex.sock"
+        runner = await serve_proxy(sock, app)
+        relay = await serve_relay(sock, 0)
+        port = relay.sockets[0].getsockname()[1]
+        try:
+            async with ClientSession() as s:
+                await s.post(
+                    f"http://127.0.0.1:{port}{path}",
+                    data=b"{}",
+                    headers=sent or {},
+                )
+        finally:
+            relay.close()
+            await relay.wait_closed()
+            await runner.cleanup()
+    finally:
+        v._upstream = orig
+        await up_runner.cleanup()
+    return got
+
+
+async def test_claude_requests_carry_the_proxys_session_id(tmp_path):
+    got = await _forwarded_headers(
+        tmp_path,
+        f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:rawPredict",
+        session_id="box-session",
+    )
+    assert got[_SESSION_HEADER] == "box-session"
+
+
+async def test_a_box_cannot_choose_its_own_session_id(tmp_path):
+    """A session id steers routing, so a box-supplied value is discarded like
+    any other header."""
+    got = await _forwarded_headers(
+        tmp_path,
+        f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:rawPredict",
+        session_id="ours",
+        sent={_SESSION_HEADER: "chosen-by-the-box"},
+    )
+    assert got[_SESSION_HEADER] == "ours"
+
+
+async def test_gemini_requests_carry_no_session_id(tmp_path):
+    """Gemini's implicit cache gains nothing from it, so it is kept off that
+    route rather than sent and ignored."""
+    got = await _forwarded_headers(tmp_path, f"{BASE}/cachedContents")
+    assert _SESSION_HEADER not in got
+
+
+async def test_no_session_header_means_no_affinity_at_all(tmp_path):
+    """The mechanism is off, not defaulted to a guessed name: a deploy that
+    names no header gets a request carrying none, rather than one the upstream
+    ignores or rejects."""
+    claude = f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:rawPredict"
+    named = await _forwarded_headers(tmp_path / "named", claude)
+    unnamed = await _forwarded_headers(
+        tmp_path / "unnamed", claude, session_header=None
+    )
+    # Set difference both ways, not "the name is absent": a mechanism that fell
+    # back to a built-in name would pass that test and ship the guess this
+    # parameter exists to avoid.
+    assert _SESSION_HEADER in named
+    assert set(named) - set(unnamed) == {_SESSION_HEADER}
+    assert set(unnamed) - set(named) == set()
+
+
+async def test_each_proxy_mints_its_own_session_id(tmp_path):
+    """One proxy is one box, and the id is real: a named header with no id
+    given still gets affinity, on a value no other box shares."""
+    claude = f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:rawPredict"
+    first = await _forwarded_headers(tmp_path / "a", claude)
+    second = await _forwarded_headers(tmp_path / "b", claude)
+    assert first[_SESSION_HEADER] != second[_SESSION_HEADER]
+    assert len(first[_SESSION_HEADER]) == 32
 
 
 async def _ready(value: str) -> str:
@@ -982,3 +1257,246 @@ async def test_a_refused_body_never_reaches_the_upstream_or_the_credential(tmp_p
 
     assert not reached, "a refused body must not reach upstream"
     assert minted == 0, "a refused body must not spend a credential mint"
+
+
+# The tool shape ChatAnthropicVertex posts: the custom-tool spelling with no
+# `type` key, which the Gemini policy refuses on the first field it sees.
+_REAL_ANTHROPIC_TOOL = {
+    "name": "read_file",
+    "description": "read",
+    "input_schema": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+    },
+}
+
+# One turn as it reaches the proxy, captured from a real ChatAnthropicVertex
+# through a mock transport for a ToolStrategy agent with the caching middleware
+# in the stack. A hand-written version had omitted `tool_choice` and passed a
+# policy that refused every real call.
+_REAL_ANTHROPIC_BODY = {
+    "anthropic_version": "vertex-2023-10-16",
+    "max_tokens": 4096,
+    "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    # What the caching middleware makes of a plain string system prompt.
+    "system": [
+        {
+            "type": "text",
+            "text": "be brief",
+            "cache_control": {"type": "ephemeral", "ttl": "5m"},
+        }
+    ],
+    "temperature": 0.0,
+    "top_k": 40,
+    "top_p": 0.95,
+    "stop_sequences": ["STOP"],
+    "stream": True,
+    # Bound on every call by an agent with a structured result.
+    "tool_choice": {"type": "any"},
+    "tools": [_REAL_ANTHROPIC_TOOL],
+}
+
+
+def test_the_anthropic_body_policy_permits_what_the_real_client_sends():
+    """The negative control: a policy that refused everything would pass every
+    adversarial case below, and the agent declares tools on every turn."""
+    from aisan.proxy.vertex import BodyPolicy, anthropic_body_policy
+
+    body = json.dumps(_REAL_ANTHROPIC_BODY).encode()
+    assert anthropic_body_policy().refuse(body) is None
+    # A tool_result turn, which nests another content value of the same shape.
+    turn = json.dumps(
+        {
+            "anthropic_version": "vertex-2023-10-16",
+            "max_tokens": 1,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": [{"type": "text", "text": "ok"}],
+                        }
+                    ],
+                }
+            ],
+        }
+    ).encode()
+    assert anthropic_body_policy().refuse(turn) is None
+    # The Gemini policy cannot read this body at all.
+    assert BodyPolicy().refuse(body) is not None
+
+
+@pytest.mark.parametrize(
+    ("extra", "why"),
+    [
+        ({"tools": [{"type": "web_search_20250305", "name": "web_search"}]}, "search"),
+        ({"tools": [{"type": "web_fetch_20250910", "name": "web_fetch"}]}, "fetch"),
+        ({"mcp_servers": [{"url": "https://x.example"}]}, "mcp"),
+        ({"container": "c"}, "container"),
+        (
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "url",
+                                    "url": "https://x.example/exfil",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            },
+            "an image url source is the upstream fetching for the box",
+        ),
+        ({"betas": ["something"]}, "a key nobody measured is refused, not forwarded"),
+    ],
+)
+def test_the_anthropic_body_policy_still_refuses_upstream_capabilities(extra, why):
+    """Each of these makes Vertex act on the box's behalf."""
+    from aisan.proxy.vertex import anthropic_body_policy
+
+    body = json.dumps({**_REAL_ANTHROPIC_BODY, **extra}).encode()
+    assert anthropic_body_policy().refuse(body) is not None, why
+
+
+def test_the_anthropic_body_policy_refuses_a_model_key():
+    """The model is a path segment here, and the path is what the allowlist
+    gates; a body `model` would be a second, ungated place to name one."""
+    from aisan.proxy.vertex import anthropic_body_policy
+
+    body = json.dumps({**_REAL_ANTHROPIC_BODY, "model": "claude-opus-4"}).encode()
+    reason = anthropic_body_policy().refuse(body)
+    assert reason is not None
+    assert "model" in reason
+
+
+def test_tool_choice_cannot_force_a_tool_the_policy_refuses():
+    """Permitting `tool_choice` only picks among the declared tools, which are
+    already limited to in-box ones; the refusal names the tool."""
+    from aisan.proxy.vertex import anthropic_body_policy
+
+    forced = json.dumps(
+        {
+            **_REAL_ANTHROPIC_BODY,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+            "tool_choice": {"type": "tool", "name": "web_search"},
+        }
+    ).encode()
+    reason = anthropic_body_policy().refuse(forced)
+    assert reason is not None
+    assert "web_search" in reason
+
+
+async def test_a_claude_request_reaches_the_upstream_with_our_bearer(tmp_path):
+    """The whole chain for the new route: permitted path, permitted body, our
+    header on the wire and none of the box's."""
+    from aiohttp import ClientSession
+
+    import aisan.proxy.vertex as v
+
+    seen: dict = {}
+
+    async def upstream(request: web.Request) -> web.Response:
+        seen["path"] = request.path
+        seen["auth"] = request.headers.get("Authorization")
+        seen["x-api-key"] = request.headers.get("x-api-key")
+        seen["body"] = json.loads(await request.text())
+        return web.json_response({"type": "message", "content": []})
+
+    async def token() -> str:
+        return "real-bearer"
+
+    up_url, up_runner = await _upstream_server(upstream)
+    orig_up = v._upstream
+    v._upstream = lambda _loc: up_url
+    try:
+        app = make_app(allowlist=_allow_both(), token=token, location=LOCATION)
+        sock = tmp_path / "vertex.sock"
+        runner = await serve_proxy(sock, app)
+        relay = await serve_relay(sock, 0)
+        port = relay.sockets[0].getsockname()[1]
+        try:
+            async with (
+                ClientSession() as s,
+                s.post(
+                    f"http://127.0.0.1:{port}{ANTHROPIC_MODELS}"
+                    f"/{ANTHROPIC_MODEL}:streamRawPredict",
+                    data=json.dumps(_REAL_ANTHROPIC_BODY).encode(),
+                    # The box's own credential attempt, which must not survive.
+                    headers={"x-api-key": "a-key-the-box-made-up"},
+                ) as r,
+            ):
+                assert r.status == 200, await r.text()
+        finally:
+            relay.close()
+            await relay.wait_closed()
+            await runner.cleanup()
+    finally:
+        v._upstream = orig_up
+        await up_runner.cleanup()
+
+    assert seen["path"] == f"{ANTHROPIC_MODELS}/{ANTHROPIC_MODEL}:streamRawPredict"
+    assert seen["auth"] == "Bearer real-bearer"
+    assert seen["x-api-key"] is None, "nothing the box sent is forwarded"
+    assert seen["body"]["tools"] == [_REAL_ANTHROPIC_TOOL]
+
+
+async def test_a_gemini_path_is_never_read_with_the_anthropic_policy(tmp_path):
+    """`{"tools": [{"googleSearch": {}}]}` is a Gemini server-side tool that the
+    Anthropic policy would permit (an untyped tool is the custom variant).
+    Posted to the Gemini path it must still be refused by name."""
+    from aiohttp import ClientSession
+
+    import aisan.proxy.vertex as v
+    from aisan.proxy.vertex import anthropic_body_policy
+
+    smuggled = json.dumps({"tools": [{"googleSearch": {}}]}).encode()
+    # The premise: this would slip past the other dialect's policy.
+    assert anthropic_body_policy().refuse(smuggled) is None
+
+    reached = False
+
+    async def upstream(request: web.Request) -> web.Response:
+        nonlocal reached
+        reached = True
+        return web.json_response({})
+
+    async def token() -> str:
+        return "real-bearer"
+
+    up_url, up_runner = await _upstream_server(upstream)
+    orig_up = v._upstream
+    v._upstream = lambda _loc: up_url
+    try:
+        app = make_app(allowlist=_allow_both(), token=token, location=LOCATION)
+        sock = tmp_path / "vertex.sock"
+        runner = await serve_proxy(sock, app)
+        relay = await serve_relay(sock, 0)
+        port = relay.sockets[0].getsockname()[1]
+        try:
+            async with (
+                ClientSession() as s,
+                s.post(
+                    f"http://127.0.0.1:{port}{BASE}"
+                    f"/publishers/google/models/{MODEL}:generateContent",
+                    data=smuggled,
+                ) as r,
+            ):
+                assert r.status == 403
+                assert "googleSearch" in json.loads(await r.text())["error"]["message"]
+        finally:
+            relay.close()
+            await relay.wait_closed()
+            await runner.cleanup()
+    finally:
+        v._upstream = orig_up
+        await up_runner.cleanup()
+
+    assert not reached

@@ -16,7 +16,7 @@ approved. Routed through here it becomes an outage instead: the request is
 refused in the protocol's own terms, with the reason the client can read.
 
 The fail-closed rule was informed by sandbox-runtime's request-filter contract.
-This implementation is independent: it turns either predicate shape into an
+This implementation is independent: it turns any of its predicate shapes into an
 explicit denial and records the exception.
 
 Logged at exception level, always, and never rate-limited: a mint failure repeats
@@ -59,3 +59,18 @@ def refusal(check: Callable[[], str | None], *, subject: str) -> str | None:
     except Exception:
         log.exception("policy check raised, denying: %s", subject)
         return "the sandbox proxy's body policy failed to evaluate"
+
+
+def decision(check: Callable[[], str | None], *, subject: str) -> str | None:
+    """The same contract for a check that answers which shape matched.
+
+    `None` denies; a string names the matched shape, which the caller uses to
+    pick the policy for the rest of the request. One evaluation, so the permit
+    and the shape cannot disagree. The sense is inverted against `refusal`
+    (there a string denies), but an exception still yields the denial.
+    """
+    try:
+        return check()
+    except Exception:
+        log.exception("policy check raised, denying: %s", subject)
+        return None
