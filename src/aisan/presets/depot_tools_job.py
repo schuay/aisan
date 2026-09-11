@@ -48,7 +48,7 @@ from pathlib import Path
 from ..egress.base import Backend, EgressProfile
 from ..gitbinds import GC_ENV, external_symlink_targets, git_binds, git_host_files
 from ..sandbox import RO, Bind, BindSpec, Overlay
-from ..spec import DEFANG_ENV, BoxSpec, Grant, Limits
+from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Grant, Limits
 
 # The variable that bites before a turn even starts. The `gclient` and `fetch`
 # wrappers run `update_depot_tools` on every invocation, which is a `git fetch`
@@ -310,6 +310,7 @@ def depot_tools_job(
             # have them. AI_AGENT is the one that shows: siso keys off it to drop
             # per-action build spam.
             *DEFANG_ENV.items(),
+            *NESTING_ENV.items(),
             ("HOME", str(home)),
             ("PATH", path_env),
             *GC_ENV,

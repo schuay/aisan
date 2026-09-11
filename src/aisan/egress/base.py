@@ -83,6 +83,10 @@ SHARED_PORT_MARKER = "(assigned at launch)"
 SHARED_TOKEN_MARKER = "<per-box proxy token>"  # noqa: S105 - descriptive marker
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
+# What Linux allows in sockaddr_un.sun_path: 108 bytes, one of which is the NUL
+# bind() writes. Measured against a real bind, not read off a header.
+_SUN_PATH_BYTES = 107
+
 
 @dataclass(frozen=True)
 class BackendActivation:
@@ -131,7 +135,21 @@ class Backend(abc.ABC):
             raise ValueError(
                 f"backend name {self.name!r} is not a safe socket-file component"
             )
-        return runtime_dir / f"{self.name}.sock"
+        path = runtime_dir / f"{self.name}.sock"
+        # Checked here because here is the only place both halves are known. The
+        # root is nameable now (AISAN_PRIVATE_ROOT) and a name may be built from
+        # a caller's provider string, which _NAME_RE bounds at 64 -- so neither
+        # end alone can promise the sum fits. Unchecked, the report is bind()
+        # answering "AF_UNIX path too long" from inside a running box, which is
+        # the failure `runtime.runtime_dir`'s digest was introduced to end;
+        # hashing bounded the term aisan controls and this bounds the total.
+        if len(str(path).encode()) > _SUN_PATH_BYTES:
+            raise ValueError(
+                f"socket path is too long for AF_UNIX "
+                f"({len(str(path).encode())} bytes, limit {_SUN_PATH_BYTES}): "
+                f"{path}. Shorten the private root or the backend name."
+            )
+        return path
 
     def client_env(self) -> dict[str, str]:
         """Environment the box's CLIENT reads to find this backend.

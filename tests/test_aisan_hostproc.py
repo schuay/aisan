@@ -55,6 +55,16 @@ def test_private_root_rejects_unsafe_existing_paths(tmp_path, monkeypatch):
         private_mod.prepare_private_dir(private_mod.host_child_root())
 
 
+def test_a_root_that_holds_no_socket_is_not_held_to_the_socket_budget(
+    tmp_path, monkeypatch
+):
+    """host-children holds directories for host processes, never sockets, so a
+    long root is a problem only for the file a backend binds."""
+    root = tmp_path / ("r" * 90)
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", root)
+    assert private_mod.prepare_private_dir(private_mod.host_child_root()).is_dir()
+
+
 def test_default_host_child_environment_is_a_copy(tmp_path, monkeypatch):
     monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", tmp_path / "private")
     monkeypatch.setenv("OLDPWD", "/agent/old")

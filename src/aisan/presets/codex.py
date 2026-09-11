@@ -28,7 +28,7 @@ from pathlib import Path
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
 from ..sandbox import RO, RW, Bind, BindSpec
-from ..spec import DEFANG_ENV, BoxSpec, Limits
+from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
 
 
 def codex_binary() -> Path | None:
@@ -89,6 +89,7 @@ def codex(
         tmpfs=(("/tmp", tmp_size_mb << 20), (str(home), home_size_mb << 20)),  # noqa: S108
         env=(
             *DEFANG_ENV.items(),
+            *NESTING_ENV.items(),
             *GC_ENV,
             ("HOME", str(home)),
             ("PATH", "/usr/bin"),

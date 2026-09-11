@@ -76,7 +76,7 @@ from pathlib import Path
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
 from ..sandbox import RO, RW, Bind, BindSpec
-from ..spec import DEFANG_ENV, BoxSpec, Limits
+from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
 
 # Turn off the CLI's own retry ladder. A box whose host half is missing gets a
 # connection reset on the relay port immediately, but the client retries with
@@ -221,6 +221,7 @@ def claude_code(
         tmpfs=(("/tmp", tmp_size_mb << 20), (str(home), home_size_mb << 20)),  # noqa: S108
         env=(
             *DEFANG_ENV.items(),
+            *NESTING_ENV.items(),
             *GC_ENV,
             ("HOME", str(home)),
             ("PATH", "/usr/bin"),

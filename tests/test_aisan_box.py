@@ -142,6 +142,32 @@ def test_the_runtime_dir_is_per_box_and_derived_from_the_id():
     assert runtime_dir("a") == runtime_dir("a")
 
 
+def test_a_named_root_that_leaves_no_room_for_a_socket_is_refused(
+    tmp_path, monkeypatch
+):
+    """The other end of the same budget. Hashing the box_id bounded the term
+    aisan controls; AISAN_PRIVATE_ROOT reopened the one it does not, so the sum
+    is what has to be checked -- and it is checked where a name and a root are
+    both in hand rather than guessed at from either side.
+    """
+    import aisan.private as private_mod
+
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", tmp_path / ("r" * 90))
+    with pytest.raises(ValueError, match="too long for AF_UNIX"):
+        _FakeBackend().socket_path(runtime_dir("box"))
+
+
+def test_a_caller_named_backend_cannot_overrun_the_socket_path(tmp_path):
+    """A name is not always aisan's: OpenAICompatBackend builds one out of a
+    caller's provider string, and _NAME_RE permits 64 characters -- enough to
+    overrun even the default root, which is why a constant derived from the
+    backends that ship today would not have held.
+    """
+
+    with pytest.raises(ValueError, match="too long for AF_UNIX"):
+        _FakeBackend(name="a" * 64).socket_path(runtime_dir("box"))
+
+
 def test_socket_path_fits_in_sun_path(tmp_path):
     """The bug this shape exists for: bind() died "AF_UNIX path too long" on a
     observed job at 129 bytes, killing it outright.

@@ -26,6 +26,7 @@ from pathlib import Path
 
 from .egress.base import _NAME_RE as _BACKEND_NAME_RE
 from .egress.base import Backend
+from .private import nested_root
 from .sandbox import BindSpec, EnsurePath
 
 # Noninteractive defaults for any box that runs build tooling. Not a bwrap flag
@@ -48,6 +49,15 @@ DEFANG_ENV = {
     "GIT_TERMINAL_PROMPT": "0",
     "AI_AGENT": "aisan",
 }
+
+# A root for an aisan running INSIDE the box. Its own default is sealed here --
+# that is the point of the seal -- so without this one, nesting fails on a
+# directory it cannot create, and aisan's own suite cannot be run in the thing
+# it is a suite for. Separate from DEFANG_ENV because it defangs nothing; merged
+# the same way, by the spec, so `explain` shows it rather than a launcher adding
+# it behind the profile's back.
+#
+NESTING_ENV = {"AISAN_PRIVATE_ROOT": str(nested_root())}
 
 
 @dataclass(frozen=True)

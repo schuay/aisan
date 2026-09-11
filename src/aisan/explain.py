@@ -462,6 +462,9 @@ def normalise(
     import tempfile
 
     from .private import private_root
+    from .spec import NESTING_ENV
+
+    _NESTED_ROOT = NESTING_ENV["AISAN_PRIVATE_ROOT"]
 
     subs = [
         *((str(Path(p).resolve()), name) for p, name in paths),
@@ -475,7 +478,16 @@ def normalise(
         (str(Path(sys.executable)), "<AISAN PYTHON>"),
         (str(root.resolve()), "<ROOT>") if root else None,
         (str(Path.home()), "<HOME>"),
-        (str(private_root()), "<AISAN PRIVATE>"),
+        # Before the private root, and skipping it when the two are equal: in a
+        # box they ARE equal (the box names this path as the root for an aisan
+        # nested inside it), and whichever rule ran first would decide the
+        # token. A snapshot regenerated in a box would then differ from the same
+        # snapshot regenerated on a host -- and running the suite inside a box
+        # is the reason the override exists.
+        (_NESTED_ROOT, "<AISAN NESTED ROOT>"),
+        (str(private_root()), "<AISAN PRIVATE>")
+        if str(private_root()) != _NESTED_ROOT
+        else None,
         (tempfile.gettempdir(), "<TMP>"),
     ]
     text = _collapse_aisan_runtime(text)

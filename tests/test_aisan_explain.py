@@ -212,6 +212,29 @@ def test_normalise_replaces_the_longest_host_prefix_first(tmp_path, monkeypatch)
     assert out == "a <HOME>/x b <TMP>/y\n"
 
 
+def test_normalise_renders_the_nested_root_the_same_in_a_box_and_out(monkeypatch):
+    """A snapshot regenerated inside a box must equal one regenerated on a host.
+
+    In a box the nested root IS the private root -- that is what the box names
+    it -- so without an explicit order the two rules race and the token depends
+    on where the developer happened to run the suite. Running it in a box is the
+    reason the override exists, so that is not a theoretical regeneration.
+    """
+    import aisan.private as private_mod
+    from aisan.spec import NESTING_ENV
+
+    nested = NESTING_ENV["AISAN_PRIVATE_ROOT"]
+    text = f"env AISAN_PRIVATE_ROOT={nested} here"
+
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", Path("/tmp/aisan-99999"))
+    on_a_host = normalise(text)
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", Path(nested))
+    in_a_box = normalise(text)
+
+    assert on_a_host == in_a_box
+    assert nested not in on_a_host, "the raw path (it carries a uid) must not ship"
+
+
 def test_normalise_leaves_the_policy_alone(tmp_path):
     # The complement, stated as a test because it is the whole contract: host
     # facts get placeholders, everything else -- ordering, kinds, sizes, flags
