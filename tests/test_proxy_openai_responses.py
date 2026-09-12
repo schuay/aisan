@@ -1,7 +1,6 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Measured policy surface for Codex's OpenAI Responses transport."""
 
 from __future__ import annotations
 
@@ -93,10 +92,6 @@ def test_path_allowlist_is_the_one_measured_codex_route():
 
 
 def test_a_schema_property_named_url_is_not_a_payload():
-    """A schema says a field named `url` exists by describing it with an
-    object; a reference is a string the upstream would go and get. Reading the
-    property name as the second thing refuses a structured output for the shape
-    of its own result."""
     described = {"properties": {"url": {"type": "string"}}}
     for meta, permitted in [
         (described, True),
@@ -122,10 +117,6 @@ def test_a_schema_property_named_url_is_not_a_payload():
 
 
 def test_body_policy_permits_a_subagent_and_an_mcp_tool_result():
-    """Two shapes a narrowed union refused. `codex review` runs as a subagent
-    and names itself and its parent in the metadata; an MCP server can mark its
-    result encrypted, which arrives as a part beside the text. Neither is a
-    capability, and both were measured off a real client."""
     review = {
         "session_id": "s",
         "thread_id": "t",
@@ -157,8 +148,6 @@ def test_body_policy_permits_a_subagent_and_an_mcp_tool_result():
 
 
 def test_body_policy_gates_inline_audio_the_way_it_gates_an_image():
-    """Same shape, same answer: an MCP audio result rides inline and may not
-    name a url for the upstream to fetch."""
     for url, permitted in [
         ("data:audio/wav;base64,UklG", True),
         ("https://e/x", False),
@@ -180,9 +169,6 @@ def test_body_policy_gates_inline_audio_the_way_it_gates_an_image():
 
 
 def test_body_policy_permits_the_measured_tool_choice_and_metadata():
-    """What the client actually sends: `tool_choice` as a string, and six
-    identifier fields. Both are shapes the policy forwards without reading, so
-    both are pinned to what was measured rather than left free-form."""
     body = json.dumps(
         {
             "input": [],
@@ -272,9 +258,6 @@ def test_body_policy_permits_measured_gpt_5_6_additional_tools_envelope():
 
 
 def test_body_policy_permits_the_identifier_codex_stamps_on_the_envelope():
-    """Measured on Codex 0.153.4: the envelope carries an `at_` id beside its
-    tools. Refusing it takes the whole client down, since every turn declares
-    tools through this item."""
     body = json.dumps(
         {
             "input": [
@@ -301,8 +284,6 @@ def test_body_policy_permits_the_identifier_codex_stamps_on_the_envelope():
     ],
 )
 def test_body_policy_refuses_a_non_string_beside_the_envelope_tools(extra):
-    """The identifier keys are permitted by shape, not by name, so the shape is
-    the whole gate: an object there is a position this policy does not read."""
     body = json.dumps(
         {
             "input": [
@@ -321,10 +302,6 @@ def test_body_policy_refuses_a_non_string_beside_the_envelope_tools(extra):
 
 
 def test_body_policy_permits_the_agent_message_the_upstream_echoed_back():
-    """The multi-agent assistant turn. Codex has no code that builds one -- it
-    holds one because the upstream emitted it, and replays it verbatim into the
-    next request. Its content is text or the model's own encrypted blob, and
-    `reasoning`'s blob already rides through on the same body."""
     body = json.dumps(
         {
             "input": [
@@ -347,9 +324,6 @@ def test_body_policy_permits_the_agent_message_the_upstream_echoed_back():
 
 
 def test_body_policy_permits_the_measured_tool_result_shapes():
-    """A tool result carries its parts under `output`, not `content`, and the
-    field is a bare string as often as it is an array. Measured: text parts,
-    and the screenshot a local tool returns inline."""
     for output in [
         "done",
         [{"type": "input_text", "text": "done"}],
@@ -376,9 +350,6 @@ def test_body_policy_permits_the_measured_tool_result_shapes():
 @pytest.mark.parametrize("kind", sorted(TAG_SETTLED_INPUT_TYPES))
 @pytest.mark.parametrize("field", ["content", "output", "summary"])
 def test_a_tag_settled_item_may_not_carry_parts_at_all(kind, field):
-    """The tag settles these because they hold no parts. If one ever does, the
-    answer has to be a refusal and not a walk that never happens -- which is
-    what made a fetch under `output` invisible."""
     body = json.dumps(
         {
             "input": [
@@ -395,8 +366,6 @@ def test_a_tag_settled_item_may_not_carry_parts_at_all(kind, field):
 
 
 def test_body_policy_permits_the_measured_reasoning_shapes():
-    """An empty summary and a null content, which is every reasoning item on
-    record. Gated when present, not required to be."""
     for extra in [
         {"summary": []},
         {"summary": [], "content": None},
@@ -414,10 +383,6 @@ def test_body_policy_permits_the_measured_reasoning_shapes():
 
 
 def test_body_policy_permits_an_inline_image_in_either_container():
-    """The same bytes in the same part type, so the same answer: a screenshot a
-    tool returned and an image a user attached both ride, and neither may name
-    a url for the upstream to fetch. Codex strips a remote one before the
-    socket sees it; the box is not Codex."""
     inline = {"type": "input_image", "image_url": "data:image/png;base64,iVBOR"}
     remote = {"type": "input_image", "image_url": "https://evil.test/x"}
     for item, field in [
@@ -436,10 +401,6 @@ def test_body_policy_permits_an_inline_image_in_either_container():
 
 
 def test_body_policy_permits_the_recorded_compaction_item():
-    """A box compacts locally and never produces this, but a history recorded
-    outside one carries it, and resuming that session inside a box replays it.
-    An opaque blob, an id and the metadata every item may carry: the tag
-    settles it."""
     body = json.dumps(
         {
             "input": [
@@ -458,10 +419,6 @@ def test_body_policy_permits_the_recorded_compaction_item():
 
 
 def test_every_permitted_input_type_is_sorted_into_exactly_one_bucket():
-    """Permitting a type means choosing how it is gated. The buckets are
-    derived into ALLOWED_INPUT_TYPES rather than spelled beside it, so a type
-    cannot arrive permitted without one -- which is how `function_call_output`
-    carried an unread `image_url`."""
     buckets = [TAG_SETTLED_INPUT_TYPES, set(CONTAINERS), {TOOL_ENVELOPE_INPUT_TYPE}]
     assert not any(CONTAINERS.get(kind) for kind in TAG_SETTLED_INPUT_TYPES)
     assert set.union(*(set(b) for b in buckets)) == set(ALLOWED_INPUT_TYPES)
@@ -471,16 +428,10 @@ def test_every_permitted_input_type_is_sorted_into_exactly_one_bucket():
 
 
 def test_every_part_a_container_holds_is_pinned_and_url_gated():
-    """The gate reads a part's keys, so every part a container names needs a
-    key set; and a key that names a url needs the inline check, or the part
-    becomes the fetch the whole policy exists to refuse."""
     for containers in CONTAINERS.values():
         for container in containers:
             assert container.parts <= set(PART_KEYS), container
     for part_kind, keys in PART_KEYS.items():
-        # Not a guess from the key's name: anything outside the inert
-        # vocabulary has to be the key the inline gate reads, so a part added
-        # with a `url`, `src` or `file_id` cannot slip in ungated.
         assert keys - INERT_PART_KEYS <= {INLINE_URL_KEYS.get(part_kind)}, part_kind
     assert set(INLINE_URL_KEYS) <= set(PART_KEYS)
 
@@ -545,10 +496,6 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
-        # The same fetch, moved into the item whose own union has no url in it.
-        # Reached only because the content gate runs for `agent_message` too;
-        # an item type permitted by tag alone would carry this straight
-        # through.
         {
             "input": [
                 {
@@ -582,8 +529,6 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
-        # The fetch as it actually reached the allowlist: under `output`, in a
-        # tool result, which the gate settled by its tag and never walked.
         {
             "input": [
                 {
@@ -604,8 +549,6 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
-        # A scheme that is not `data:` however it is spelled, and a part that
-        # names no url at all where the type says it must.
         {
             "input": [
                 {
@@ -621,8 +564,6 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 {"type": "custom_tool_call_output", "output": [{"type": "input_image"}]}
             ]
         },
-        # The tag says text, a second key names a payload. Refusing on the tag
-        # alone is what lets these two answers ride in one part.
         {
             "input": [
                 {
@@ -653,8 +594,6 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
-        # The API's own `tool_choice` union names hosted capabilities that
-        # never appear in `tools`, so the tool gate never sees them.
         {
             "tool_choice": {
                 "type": "allowed_tools",
@@ -664,11 +603,9 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
         },
         {"tool_choice": {"type": "image_generation"}},
         {"tool_choice": "unmeasured"},
-        # Free-form metadata is an object this side forwards without reading.
         {"client_metadata": {"anything": {"url": "https://evil.test/x"}}},
         {"client_metadata": {"session_id": ["not-a-string"]}},
         {"client_metadata": {"ref": {"url": "https://evil.test/x"}}},
-        # A declaration riding in a sibling of a tool the gate just approved.
         {
             "tools": [
                 {
@@ -689,8 +626,6 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
-        # A permitted key holding an object instead of the string it is
-        # measured to hold, which is where a payload rides past a key pin.
         {
             "input": [
                 {
@@ -718,8 +653,6 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
-        # The same url one spelling off the tagged-array walk: a bare object,
-        # an array one deeper, and objects with no `type` at all.
         {
             "input": [
                 {
@@ -763,9 +696,7 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
-        # A top-level key this policy forwards without reading its shape.
         {"reasoning": {"effort": "high", "ref": {"url": "https://evil.test/x"}}},
-        # A part array in a field this item type does not keep parts in.
         {
             "input": [
                 {
@@ -798,9 +729,7 @@ def test_body_policy_refuses_unclassifiable_namespaces(tool):
                 }
             ]
         },
-        # Absent is not false, and the API's default for absent is to retain.
         {"store": None},
-        # Tools ride in the envelope and nowhere else.
         {
             "input": [
                 {

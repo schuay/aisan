@@ -12,9 +12,6 @@ from aisan import mint
 
 
 async def test_rbe_token_gives_luci_auth_no_inherited_stdin(monkeypatch):
-    """luci-auth reauth is interactive, and an inherited stdin is the box's own
-    TTY -- it would block the request forever. The mint must hand it DEVNULL so
-    a lapsed login fails fast instead of prompting into the sandbox."""
     captured: dict = {}
 
     class _Proc:
@@ -35,8 +32,6 @@ async def test_rbe_token_gives_luci_auth_no_inherited_stdin(monkeypatch):
 
 
 async def test_rbe_token_starts_luci_auth_in_an_empty_directory(monkeypatch, tmp_path):
-    """Same rule as the credential-refresh children: a host process holding the
-    durable login does not start in a directory a box has written to."""
     captured: dict = {}
 
     class _Proc:
@@ -69,9 +64,6 @@ async def test_rbe_token_starts_luci_auth_in_an_empty_directory(monkeypatch, tmp
 
 
 async def test_rbe_token_survives_non_utf8_output(monkeypatch):
-    """The output is decoded best-effort: a luci-auth that emits a non-UTF-8
-    byte must not turn a mint into an opaque UnicodeDecodeError on the request
-    path."""
 
     class _Proc:
         returncode = 0
@@ -89,11 +81,7 @@ async def test_rbe_token_survives_non_utf8_output(monkeypatch):
 
 
 async def test_rbe_token_times_out_instead_of_blocking(monkeypatch, tmp_path):
-    """A luci-auth that never returns (the interactive-reauth case, or any other
-    hang) is bounded: the mint raises rather than pinning the request forever."""
-    # `exec` so the killed process IS the sleep, as a single-binary luci-auth
-    # would be: a forked grandchild would keep the stdout pipe open and gate
-    # asyncio's own wait(), which is a fake-harness artifact, not the real tool.
+
     fake = tmp_path / "luci-auth"
     fake.write_text("#!/bin/sh\nexec sleep 3\n")
     fake.chmod(0o755)

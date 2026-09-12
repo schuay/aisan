@@ -1,7 +1,6 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The Codex backend and preset, including one real boxed client turn."""
 
 from __future__ import annotations
 
@@ -140,9 +139,6 @@ async def test_near_expiry_login_is_refreshed_by_host_codex(tmp_path, monkeypatc
 
 
 async def test_host_codex_refresh_starts_in_an_empty_directory(tmp_path, monkeypatch):
-    """`codex` reads project configuration from its cwd and has no flag against
-    it, so the refresh child must not inherit the repository the boxed agent has
-    been editing."""
     script = tmp_path / "fake-codex.py"
     home = tmp_path / "codex-home"
     home.mkdir()
@@ -434,9 +430,6 @@ async def test_codex_tui_can_persist_repository_trust(tmp_path):
                 try:
                     await asyncio.wait_for(process.wait(), timeout=5)
                 except TimeoutError:
-                    # The write response is the operation's completion boundary.
-                    # app-server can keep background work alive after stdin EOF;
-                    # stopping that idle process is cleanup, not a failed write.
                     process.terminate()
                     await process.wait()
     finally:
@@ -507,10 +500,6 @@ async def test_real_codex_reaches_a_stub_only_through_the_responses_backend(
 
 
 def test_preserved_trust_survives_the_host_mcp_rewrite(tmp_path):
-    """The launcher rewrites the profile file from the host MCP import every
-    launch, and Codex persists the folder-trust answer into that same file when
-    a profile is active. Without the carry-forward the answer was truncated away
-    before Codex started, so every session asked again."""
     from aisan.cli.codex import write_host_mcp
     from aisan.session_mcp import SessionMCP
 
@@ -529,14 +518,11 @@ def test_preserved_trust_survives_the_host_mcp_rewrite(tmp_path):
 
     rewritten = tomllib.loads(config.read_text())
     assert rewritten["projects"] == {"/repo": {"trust_level": "trusted"}}
-    # The import still owns the servers: the stale one is gone, not merged.
+
     assert rewritten["mcp_servers"] == {"fresh": {"command": "/usr/bin/tool"}}
 
 
 def test_preserved_trust_carries_the_trust_field_and_nothing_else(tmp_path):
-    """The file is bound rw into the box, so everything in it may have been
-    written by the agent. Only the one field Codex records the answer in is
-    carried; anything else it plants is dropped with the rest of the rewrite."""
     from aisan.cli.codex import preserved_trust
 
     config = tmp_path / "profile.config.toml"
@@ -561,8 +547,6 @@ def test_preserved_trust_carries_the_trust_field_and_nothing_else(tmp_path):
     ],
 )
 def test_preserved_trust_carries_nothing_from_a_mangled_file(tmp_path, content):
-    """A file the agent left unparseable or wrong-typed must cost one more trust
-    prompt, never a traceback that wedges every later launch of this repo."""
     from aisan.cli.codex import preserved_trust
 
     config = tmp_path / "profile.config.toml"
@@ -572,8 +556,6 @@ def test_preserved_trust_carries_nothing_from_a_mangled_file(tmp_path, content):
 
 
 def test_preserved_trust_reads_nothing_through_a_planted_symlink(tmp_path):
-    """A planted link must not be read through: that would copy the host's own
-    ~/.codex config into the box. It reads as absent, as everywhere else."""
     from aisan.cli.codex import preserved_trust
 
     victim = tmp_path / "host-config.toml"

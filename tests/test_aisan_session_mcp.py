@@ -1,7 +1,6 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Host MCP declarations imported without moving their processes outside."""
 
 from __future__ import annotations
 
@@ -144,12 +143,6 @@ def test_mcp_binds_chase_a_uv_tool_launcher_and_python(tmp_path, monkeypatch):
 
 
 def test_a_bare_local_bin_script_is_refused_not_overmounted(tmp_path, monkeypatch):
-    """The overshoot shape: a plain console script (pip --user, npm) sits
-    directly in ~/.local/bin, so the old grandparent guess bound ~/.local --
-    every other tool's state, credential stores included. Refused with the
-    remedy in the message rather than silently narrowed: the script's own
-    imports (~/.local/lib) would not be bound either, so a narrow bind could
-    only fail confusingly at run time."""
     home = tmp_path / "home"
     shim_dir = home / ".local" / "bin"
     shim_dir.mkdir(parents=True)
@@ -164,8 +157,6 @@ def test_a_bare_local_bin_script_is_refused_not_overmounted(tmp_path, monkeypatc
 
 
 def test_a_launcher_symlinked_into_a_checkout_is_refused(tmp_path, monkeypatch):
-    """A ~/.local/bin symlink to a script at a checkout's top level: the
-    grandparent is ~/projects, and the guess would have mounted every repo."""
     home = tmp_path / "home"
     shim_dir = home / ".local" / "bin"
     tool = home / "projects" / "tool"
@@ -183,8 +174,6 @@ def test_a_launcher_symlinked_into_a_checkout_is_refused(tmp_path, monkeypatch):
 
 
 def test_a_pyvenv_cfg_proves_a_tool_root(tmp_path, monkeypatch):
-    """The proof that admits a root: an ordinary venv, whose bin/python is a
-    copy rather than a symlink chain worth walking."""
     home = tmp_path / "home"
     shim_dir = home / ".local" / "bin"
     tool = home / "venvs" / "local-mcp"
@@ -202,13 +191,6 @@ def test_a_pyvenv_cfg_proves_a_tool_root(tmp_path, monkeypatch):
 
 
 def test_the_known_credential_list_covers_the_mint_from_disk_backends(monkeypatch):
-    """A token minted in memory is not a credential kept off disk.
-
-    The Vertex and RBE routes both mint from a store the host keeps (ADC,
-    luci-auth's), and a bind handing either to a box hands over the mint. They
-    were missing from this list while it claimed to name every backend
-    credential on the host, which is the claim the launcher guard is built on.
-    """
     from aisan.egress import known_credential_paths
     from aisan.egress.reapi import LUCI_STORE
     from aisan.egress.vertex import default_credentials as adc
@@ -220,11 +202,6 @@ def test_the_known_credential_list_covers_the_mint_from_disk_backends(monkeypatc
 
 
 def test_the_claude_credential_follows_the_hosts_config_redirect(tmp_path, monkeypatch):
-    """CLAUDE_CONFIG_DIR moves the whole config directory, credential included
-    (read out of claude-cli 2.1.246). The model menu already followed it while
-    the credential path did not, which left `known_credential_paths` -- the list
-    the launcher refuses binds against -- naming a file the host does not use,
-    and the refresh child forcing the wrong directory on host Claude."""
     from pathlib import Path
 
     from aisan.egress import known_credential_paths
@@ -244,11 +221,6 @@ def test_the_claude_credential_follows_the_hosts_config_redirect(tmp_path, monke
 
 
 def test_no_launcher_bind_may_contain_a_backend_credential_store(tmp_path, monkeypatch):
-    """Structural, over every KNOWN backend credential rather than one box's
-    egress: a root that passes the venv proof but contains a credential store
-    is still refused, and the refusal names the file. The per-box
-    `Sandbox.exposed_path` check cannot catch this -- the store belongs to a
-    backend the box does not carry."""
     home = tmp_path / "home"
     shim_dir = home / ".local" / "bin"
     root = home / ".local" / "share" / "opencode"
@@ -271,9 +243,6 @@ def test_no_launcher_bind_may_contain_a_backend_credential_store(tmp_path, monke
 def test_an_unbindable_launcher_is_a_launch_refusal_not_a_traceback(
     tmp_path, monkeypatch
 ):
-    """The refusal reaches the operator through the same return-2 route as an
-    uninstalled command, instead of tracebacking out of every launcher
-    including --explain."""
     home = tmp_path / "home"
     shim_dir = home / ".local" / "bin"
     shim_dir.mkdir(parents=True)
@@ -338,7 +307,7 @@ async def test_real_codex_starts_an_imported_mcp_server_inside_the_box(
     tool = home / ".local" / "share" / "tools" / "local-mcp"
     shim_dir.mkdir(parents=True)
     (tool / "bin").mkdir(parents=True)
-    # The resolver only trusts a proven tool root; a venv marker is the proof.
+
     (tool / "pyvenv.cfg").write_text("home = /usr/bin\n")
     server = tool / "bin" / "local-mcp"
     server.write_text(
@@ -448,13 +417,6 @@ async def test_real_codex_starts_an_imported_mcp_server_inside_the_box(
 
 
 def test_the_import_notice_names_the_servers_and_the_env_carriers():
-    """The import is by operator choice, but a silent one is not reviewable.
-
-    Each declaration is copied verbatim into the box, so a server carrying an
-    API token in its environment puts that token where the agent can read it --
-    the one thing that widens the box without announcing itself. The notice
-    names the servers, and names again the ones whose environment travels.
-    """
     config = SessionMCP(
         document={},
         commands=("a-mcp", "b-mcp"),
@@ -467,7 +429,7 @@ def test_the_import_notice_names_the_servers_and_the_env_carriers():
 
     assert "plain" in notice
     assert "2 host MCP server(s)" in notice
-    # The env carrier is called out a second time; the plain one is not.
+
     assert notice.count("tokened") == 2
     assert "readable" in notice
 
@@ -482,11 +444,6 @@ def test_the_import_notice_omits_the_environment_line_when_none_carries_one():
 
 
 def test_imported_servers_report_their_env_carriers_per_client_key(tmp_path):
-    """Claude Code and Codex spell it `env`; opencode spells it `environment`.
-
-    A single spelling would silently under-report on one of the three, which is
-    the failure mode a notice about credentials must not have.
-    """
     claude_source = tmp_path / ".claude.json"
     claude_source.write_text(
         json.dumps(

@@ -21,7 +21,6 @@ from aisan.statedir import (
 
 
 def _planted_link(state: Path, name: str, victim: Path) -> Path:
-    """A symlink the agent leaves at a fixed seed name, aimed at a host file."""
     victim.write_text("SECRET-HOST-CONTENT\n")
     link = state / name
     link.symlink_to(victim)
@@ -34,9 +33,7 @@ def test_prepare_state_dir_is_private(tmp_path):
 
 
 def test_prepare_state_dir_tightens_a_stale_world_readable_dir(tmp_path):
-    # A dir left 0o755 by an older version must be tightened in place, not
-    # trusted and not refused (the path is stable per repo, so refusing would
-    # wedge every future session).
+
     state = tmp_path / "state"
     state.mkdir(mode=0o755)
     assert stat.S_IMODE(state.lstat().st_mode) == 0o755
@@ -58,9 +55,9 @@ def test_write_sealed_does_not_follow_a_planted_symlink(tmp_path):
     victim = tmp_path / "victim"
     link = _planted_link(state, "seed", victim)
     write_sealed(link, "fresh\n")
-    # The host file the link aimed at is untouched...
+
     assert victim.read_text() == "SECRET-HOST-CONTENT\n"
-    # ...and the seed path is now a real 0o600 file with our content.
+
     assert not link.is_symlink()
     assert link.read_text() == "fresh\n"
     assert stat.S_IMODE(link.lstat().st_mode) == 0o600
@@ -78,7 +75,7 @@ def test_read_sealed_text_treats_a_symlink_as_absent(tmp_path):
     state.mkdir()
     victim = tmp_path / "victim"
     link = _planted_link(state, "seed", victim)
-    assert read_sealed_text(link) is None  # not the victim's content
+    assert read_sealed_text(link) is None
     assert read_sealed_text(state / "missing") is None
     real = state / "real"
     real.write_text("data\n")
@@ -124,7 +121,7 @@ def test_seed_state_cannot_overwrite_a_symlink_target(tmp_path):
     victim = tmp_path / "gitconfig"
     _planted_link(state, ".claude.json", victim)
     seed_state(state)
-    # The host file is untouched, and a real config was rebuilt from scratch.
+
     assert victim.read_text() == "SECRET-HOST-CONTENT\n"
     written = state / ".claude.json"
     assert not written.is_symlink()
@@ -138,7 +135,7 @@ def test_seed_settings_cannot_overwrite_a_symlink_target(tmp_path):
     victim = tmp_path / "gitconfig"
     link = _planted_link(state, "settings.json", victim)
     seed_settings(state)
-    # The host file is untouched, and real settings were rebuilt from scratch.
+
     assert victim.read_text() == "SECRET-HOST-CONTENT\n"
     assert not link.is_symlink()
     assert json.loads(link.read_text())["skipDangerousModePermissionPrompt"] is True

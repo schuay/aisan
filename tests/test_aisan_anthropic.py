@@ -1,22 +1,6 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The Anthropic backend: credential isolation, refresh, and request forwarding.
-
-`test_proxy_anthropic.py` covers the transport (the two allowlists, the injected
-bearer). This covers the backend -- the credential file, the preflight decisions,
-and the thing the whole design rests on: **aisan reads this file and never
-writes it itself.**
-
-That last claim needs a test rather than a docstring, because the failure it
-guards against is silent and expensive. The host's own Claude Code owns
-`~/.credentials.json` and atomically replaces it on refresh. Aisan delegates
-near-expiry refresh to that executable through a local inference sink; it never
-handles the refresh token or writes the file itself.
-
-Every fixture credential here is fake by construction -- a literal token string
-with no upstream that would accept it. Nothing in this file reads the host's own.
-"""
 
 from __future__ import annotations
 
@@ -39,9 +23,6 @@ from aisan.egress.anthropic import (
 )
 from aisan.egress.base import PreflightError
 
-# Not a credential: a fixed string, in a file this test wrote, against an
-# upstream that is a local aiohttp handler. Named so a reader does not have to
-# work that out.
 FAKE_TOKEN = "fake-access-token-for-tests"
 FAKE_REFRESH_TOKEN = "fake-refresh-token-for-tests"
 
@@ -53,12 +34,6 @@ def _credentials(
     refresh_token: str | None = None,
     ttl_s: float = 3600,
 ) -> Path:
-    """A credential file in the real shape, with an expiry `ttl_s` from now.
-
-    Epoch MILLISECONDS, which is what Claude Code writes -- a test that used
-    seconds would pass against a backend that also used seconds and fail against
-    the real file, which is the wrong way round.
-    """
     path.write_text(
         json.dumps(
             {
@@ -89,62 +64,31 @@ async def _hello(request: web.Request) -> web.Response:
 
 
 def test_the_box_is_told_a_placeholder_and_a_route_and_nothing_else(tmp_path):
-    """Both variables matter, for different reasons.
-
-    The base URL is the route. The TOKEN is what stops the client looking for a
-    credential the box does not have: with none set, Claude Code reads
-    `~/.claude/.credentials.json`, which is absent in the box, and tries to log
-    in interactively rather than failing. Measured against 2.1.219 for the key
-    dress and 2.1.246 for the subscription one.
-
-    The variable NAME tracks the credential kind, and the credential file here
-    does not exist -- which is the other half of the assertion: a description
-    computed on a host with nothing logged in is still complete, because
-    `explain` and the snapshots run there.
-    """
     env = AnthropicBackend(credentials=tmp_path / "c.json").client_env()
     assert env == {
         "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{PORT}",
         OAUTH_TOKEN_ENV: PLACEHOLDER_KEY,
     }
-    # A placeholder that looked like a credential would be one somebody
-    # eventually believed. It says what it is.
+
     assert "placeholder" in PLACEHOLDER_KEY
 
 
 def test_an_api_key_backend_dresses_the_box_as_an_api_key_client(tmp_path):
-    """The kind picks BOTH halves, and the halves must not drift apart.
-
-    Measured: the client's `anthropic-beta` set differs by dress, and the proxy
-    forwards that header -- so a box dressed for one credential while the proxy
-    attaches the other announces a protocol its credential does not match. This
-    pins the box-facing half of each kind; `test_the_upstream_credential_matches
-    _the_dress` pins the other.
-    """
     env = AnthropicBackend(api_key="sk-ant-not-real").client_env()
     assert env == {
         "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{PORT}",
         API_KEY_ENV: PLACEHOLDER_KEY,
     }
-    # Nothing on disk to protect: the key lives in memory, so there is no path
-    # for the Box's credential-exposure refusal to be given.
+
     assert AnthropicBackend(api_key="sk-ant-not-real").credentials == ()
 
 
 def test_a_backend_holds_exactly_one_credential_kind(tmp_path):
-    """Both would mean an implicit precedence, which is how credentials get mixed up."""
     with pytest.raises(ValueError, match="at most one"):
         AnthropicBackend(credentials=tmp_path / "c.json", api_key="sk-ant-not-real")
 
 
 def test_the_plan_label_is_read_best_effort_and_never_raises(tmp_path):
-    """A display-only label must not be able to break a dry run.
-
-    `client_env` is called by `explain` and by the snapshot tests on hosts with
-    no credential at all. Absent, unreadable and malformed all have to omit the
-    variable rather than raise -- and a present one has to appear, or the label
-    silently stops tracking the account.
-    """
     missing = AnthropicBackend(credentials=tmp_path / "absent.json").client_env()
     assert SUBSCRIPTION_ENV not in missing
 
@@ -164,10 +108,6 @@ def test_the_plan_label_is_read_best_effort_and_never_raises(tmp_path):
 
 
 def test_the_port_is_distinct_from_the_other_backends():
-    """`BoxSpec.__post_init__` asserts injectivity across a spec's backends, but
-    only for the backends that spec actually has. A collision between two
-    backends nobody composed yet is found here or when a box mysteriously
-    reaches the wrong upstream."""
     from aisan.egress.reapi import PORT as REAPI_PORT
     from aisan.egress.vertex import PORT as VERTEX_PORT
 
@@ -187,9 +127,6 @@ async def test_preflight_passes_when_the_credential_and_upstream_are_both_there(
 
 
 async def test_a_missing_credential_refuses_with_the_login_command(tmp_path):
-    """Not logged in HERE, so the fix is a login -- and the message has to
-    carry it. A PreflightError whose fix is wrong is worse than none: it sends
-    an operator to run something that cannot help."""
     up, runner = await _upstream_server(_hello)
     try:
         with pytest.raises(PreflightError) as e:
@@ -251,10 +188,8 @@ async def test_a_token_expiring_inside_the_margin_is_refreshed(tmp_path, monkeyp
 
 
 async def test_a_dead_upstream_says_start_it_not_log_in(tmp_path):
-    """The user's local proxy is not running. There is nothing to log into, and
-    telling them to log in would be the wrong fix confidently stated."""
     up, runner = await _upstream_server(_hello)
-    await runner.cleanup()  # dead address, deliberately
+    await runner.cleanup()
     with pytest.raises(PreflightError) as e:
         await AnthropicBackend(
             credentials=_credentials(tmp_path / "c.json"), upstream=up
@@ -265,18 +200,14 @@ async def test_a_dead_upstream_says_start_it_not_log_in(tmp_path):
 
 
 async def test_no_route_is_reported_as_the_route_not_the_login(tmp_path, monkeypatch):
-    """A host with no network fails BOTH checks, and only one of them names the
-    real fault. The refresh is a network call, so it cannot help here -- and a
-    refusal blaming the login sends an operator after a credential that is fine.
-    This is the unattended case: a timer that fires before DHCP has a lease."""
     import aisan.egress.anthropic as backend_module
 
     async def refresh(command, config_dir):
-        return  # no route, so host Claude writes nothing
+        return
 
     monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
     up, runner = await _upstream_server(_hello)
-    await runner.cleanup()  # dead address, deliberately
+    await runner.cleanup()
     with pytest.raises(PreflightError) as e:
         await AnthropicBackend(
             credentials=_credentials(tmp_path / "c.json", ttl_s=60), upstream=up
@@ -286,9 +217,6 @@ async def test_no_route_is_reported_as_the_route_not_the_login(tmp_path, monkeyp
 
 
 async def test_preflight_does_not_spend_a_model_call(tmp_path):
-    """A connect, not a turn. Asking the upstream something real would spend
-    quota to learn that the hop exists -- and on a metered subscription that is
-    a cost per box start."""
     seen: list[tuple[str, str]] = []
 
     async def upstream(request: web.Request) -> web.Response:
@@ -306,14 +234,8 @@ async def test_preflight_does_not_spend_a_model_call(tmp_path):
 
 
 async def test_a_credential_file_that_is_not_json_names_the_path_only(tmp_path):
-    """The message must never quote the document. Everything under
-    `claudeAiOauth` is a secret or a timestamp, so a parse error that echoed
-    what it failed to parse would put the token wherever that message is
-    logged."""
     bad = tmp_path / "c.json"
-    bad.write_text(
-        '{"claudeAiOauth": {"accessToken": "' + FAKE_TOKEN + '"'
-    )  # truncated
+    bad.write_text('{"claudeAiOauth": {"accessToken": "' + FAKE_TOKEN + '"')
     up, runner = await _upstream_server(_hello)
     try:
         with pytest.raises(PreflightError) as e:
@@ -325,8 +247,6 @@ async def test_a_credential_file_that_is_not_json_names_the_path_only(tmp_path):
 
 
 async def test_the_backend_serves_and_injects_the_credential_it_read(tmp_path):
-    """The two halves joined: `serve` puts the transport on the socket the Box
-    binds, and the bearer that arrives upstream is the one in the file."""
     got: dict[str, str] = {}
 
     async def upstream(request: web.Request) -> web.Response:
@@ -352,8 +272,7 @@ async def test_the_backend_serves_and_injects_the_credential_it_read(tmp_path):
                 ) as r,
             ):
                 assert r.status == 200
-        # Torn down with the block: a proxy surviving its box is an
-        # unauthenticated capability to the credential behind it.
+
         assert not backend.socket_path(runtime).exists()
     finally:
         await up_runner.cleanup()
@@ -380,8 +299,7 @@ async def test_shared_backend_serves_authenticated_tcp_with_per_box_state(tmp_pa
             assert activation.port == int(endpoint.rsplit(":", 1)[1])
             assert client_token.endswith(PLACEHOLDER_KEY[-20:])
             assert client_token != PLACEHOLDER_KEY
-            # Presented the way this dress presents it. The other location is
-            # covered by `test_either_dress_can_present_the_relay_token`.
+
             async with (
                 ClientSession() as session,
                 session.post(
@@ -417,12 +335,6 @@ async def test_one_backend_can_hold_two_shared_activations(tmp_path):
 
 
 async def test_the_backend_never_writes_the_credential(tmp_path):
-    """Aisan reads the file but leaves all writes to the host Claude executable.
-
-    Checked over a fresh credential's full serve-and-request cycle by bytes and
-    mtime. The expiry tests separately replace the file from their fake refresh
-    delegate, which stands in for the one process authorized to write it.
-    """
     up, up_runner = await _upstream_server(_hello)
     creds = _credentials(tmp_path / "c.json")
     before = creds.read_bytes()
@@ -444,21 +356,18 @@ async def test_the_backend_never_writes_the_credential(tmp_path):
 
     assert creds.read_bytes() == before
     assert creds.stat().st_mtime_ns == before_mtime
-    # Still only readable by its owner: nothing here relaxed the mode either.
+
     assert creds.stat().st_mode & 0o777 == 0o600
 
 
 async def test_a_stale_socket_from_a_killed_box_does_not_block_the_next_one(tmp_path):
-    """bind() fails EADDRINUSE forever on a leftover socket file, so a box
-    killed with SIGKILL would poison its own runtime dir. The path is derived
-    from this box, so nothing else owns it and unlinking is safe."""
     up, up_runner = await _upstream_server(_hello)
     runtime = tmp_path / "rt"
     runtime.mkdir()
     backend = AnthropicBackend(
         credentials=_credentials(tmp_path / "c.json"), upstream=up
     )
-    backend.socket_path(runtime).write_bytes(b"")  # stale socket of a killed box
+    backend.socket_path(runtime).write_bytes(b"")
     try:
         async with backend.serve(runtime):
             assert backend.socket_path(runtime).is_socket()
@@ -467,17 +376,6 @@ async def test_a_stale_socket_from_a_killed_box_does_not_block_the_next_one(tmp_
 
 
 async def test_the_upstream_credential_matches_the_dress(tmp_path):
-    """The other half of the pairing: an API-key kind attaches `x-api-key`.
-
-    The subscription kind's bearer is pinned by
-    `test_the_backend_serves_and_injects_the_credential_it_read`. This one pins
-    the second kind, and pins that the box-facing dress and the upstream header
-    are chosen together rather than by two independent settings.
-
-    The host half of this kind is otherwise unmeasured -- no real key was
-    available to answer upstream -- so what is asserted here is the whole of
-    what aisan controls: the header it attaches and the one it never forwards.
-    """
     got: dict[str, str] = {}
 
     async def upstream(request: web.Request) -> web.Response:
@@ -503,20 +401,12 @@ async def test_the_upstream_credential_matches_the_dress(tmp_path):
         await up_runner.cleanup()
 
     assert got["x-api-key"] == "sk-ant-not-real"
-    # The box's own token stopped at the proxy, and no bearer was invented.
+
     assert got["x-api-key"] != client_token
     assert "authorization" not in got
 
 
 async def test_either_dress_can_present_the_relay_token(tmp_path):
-    """The relay authenticates a VALUE, not a location.
-
-    A box dressed for a subscription presents the token in `authorization`, one
-    dressed for a key presents it in `x-api-key` (both measured). The proxy
-    accepts either, so the dress can change without the check having to be told;
-    what it must never accept is a request carrying neither, or the wrong value
-    in either.
-    """
     up, up_runner = await _upstream_server(_hello)
     backend = AnthropicBackend(
         credentials=_credentials(tmp_path / "c.json"), upstream=up
@@ -553,14 +443,6 @@ _WEB_SEARCH = {
 
 
 async def test_the_transport_decides_the_body_policy(tmp_path):
-    """Which policy a box gets is derived from its network mode, not passed.
-
-    `serve` is what the Box calls under `unshare_net` and `serve_shared` is what
-    it calls without it, so the transport already encodes the one fact the
-    relaxation rests on: whether the box can reach the network itself. This pins
-    both directions at the backend, because the policy objects agreeing in
-    isolation would not catch `serve_shared` being wired to the strict one.
-    """
     up, up_runner = await _upstream_server(_hello)
     backend = AnthropicBackend(
         credentials=_credentials(tmp_path / "c.json"), upstream=up
@@ -582,7 +464,6 @@ async def test_the_transport_decides_the_body_policy(tmp_path):
             ):
                 assert response.status == 200
 
-        # Same backend, same body, isolated transport: refused.
         async with backend.serve(runtime):
             sock = backend.socket_path(runtime)
             async with (
@@ -630,8 +511,6 @@ async def test_a_token_that_expires_mid_session_is_refreshed(tmp_path, monkeypat
                 ) as r:
                     assert r.status == 200
 
-                # The token ages out under the running box. The file is intact
-                # and the login is valid -- only the access token is past due.
                 _credentials(credentials, ttl_s=-60)
 
                 async with s.post(
@@ -672,10 +551,6 @@ async def test_concurrent_requests_launch_one_refresh(tmp_path, monkeypatch):
 
 
 async def test_a_still_valid_token_survives_a_failed_refresh(tmp_path, monkeypatch):
-    """Inside the margin the token is refreshed, but a refresh that CANNOT run
-    must not take a working token down with it. Preflight's margin exists to
-    fail before bwrap owns the terminal; mid-session, refusing a bearer that has
-    minutes of life left turns a transient failure into a dead session."""
     import aisan.egress.anthropic as backend_module
 
     credentials = _credentials(tmp_path / "c.json", token="still-good", ttl_s=240)
@@ -692,8 +567,6 @@ async def test_a_still_valid_token_survives_a_failed_refresh(tmp_path, monkeypat
 async def test_an_expired_token_is_still_refused_when_refresh_fails(
     tmp_path, monkeypatch
 ):
-    """The other side of the same rule: once there is no life left there is
-    nothing to fall back to, and the refusal names the failure."""
     import aisan.egress.anthropic as backend_module
 
     credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
@@ -709,8 +582,6 @@ async def test_an_expired_token_is_still_refused_when_refresh_fails(
 
 
 async def test_preflight_still_demands_the_whole_margin(tmp_path, monkeypatch):
-    """`upstream` settling for a token that merely works must not relax the
-    check that runs before the terminal is handed over."""
     import aisan.egress.anthropic as backend_module
 
     credentials = _credentials(tmp_path / "c.json", token="short", ttl_s=240)
@@ -721,8 +592,6 @@ async def test_preflight_still_demands_the_whole_margin(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_module, "_refresh_claude_login", refresh)
     backend = AnthropicBackend(credentials=credentials)
 
-    # The credential kind's own check, not `preflight`: the dead-upstream arm is
-    # a separate question and needs a server this test has no use for.
     with pytest.raises(PreflightError):
         await backend._credential.check("anthropic")
 
@@ -730,9 +599,6 @@ async def test_preflight_still_demands_the_whole_margin(tmp_path, monkeypatch):
 async def test_a_refresh_that_wrote_the_token_then_timed_out_counts(
     tmp_path, monkeypatch
 ):
-    """Success is decided by rereading the file, so a child that refreshed and
-    then overran its timeout has refreshed. Host Claude renews the token before
-    its first model request and can spend time afterwards on work of its own."""
     import aisan.egress.anthropic as backend_module
 
     credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
@@ -750,9 +616,6 @@ async def test_a_refresh_that_wrote_the_token_then_timed_out_counts(
 
 
 async def test_a_failing_refresh_is_shared_by_the_whole_wave(tmp_path, monkeypatch):
-    """A lock that only short-circuits on success gives every queued request its
-    own subprocess when refresh fails -- eight requests, eight sequential
-    `_REFRESH_TIMEOUT_S` waits. The attempt itself is what has to be shared."""
     import aisan.egress.anthropic as backend_module
 
     credentials = _credentials(tmp_path / "c.json", token="still-good", ttl_s=240)
@@ -775,10 +638,6 @@ async def test_a_failing_refresh_is_shared_by_the_whole_wave(tmp_path, monkeypat
 async def test_a_refresh_that_changed_nothing_does_not_blame_the_login(
     tmp_path, monkeypatch
 ):
-    """Claude Code authenticates from an apiKeyHelper setting or an `ant` profile
-    ahead of the claude.ai credential, and neither can be cleared out of a child
-    environment. The child then succeeds and refreshes nothing; telling the
-    operator to log in again sends them after a login that is already fine."""
     import aisan.egress.anthropic as backend_module
 
     credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
@@ -795,9 +654,6 @@ async def test_a_refresh_that_changed_nothing_does_not_blame_the_login(
 
 
 def test_proxy_bypass_keeps_both_spellings_of_no_proxy():
-    """A set-but-empty NO_PROXY must not shadow a populated no_proxy: the child
-    makes real requests, and losing the host's exclusions routes them through a
-    proxy the operator excluded."""
     from aisan.egress.anthropic import _merge_proxy_bypass
 
     assert _merge_proxy_bypass("", "corp.example,10.0.0.1", "127.0.0.1") == [
@@ -805,15 +661,13 @@ def test_proxy_bypass_keeps_both_spellings_of_no_proxy():
         "10.0.0.1",
         "127.0.0.1",
     ]
-    # Deduped and order-preserving, so the sink's own entries are never dropped
-    # and never repeated.
+
     assert _merge_proxy_bypass("a, b", "b", "a") == ["a", "b"]
 
 
 async def test_nonzero_claude_status_is_accepted_after_refresh_and_trapped_locally(
     tmp_path, monkeypatch
 ):
-    """Exercise the real subprocess and sink boundary with a fake host Claude."""
     credentials = _credentials(tmp_path / ".credentials.json", ttl_s=-60)
     marker = tmp_path / "refresh-result.json"
     script = tmp_path / "fake-claude.py"
@@ -912,9 +766,7 @@ raise SystemExit(23)
             "INIT_CWD": None,
         },
     }
-    # Not the launcher's cwd -- normally the repository the boxed agent has been
-    # editing, where a planted CLAUDE.md or settings file would be read by a host
-    # process holding the real credential.
+
     assert result["cwd"] != str(launcher_cwd)
     assert result["base_url"].startswith("http://127.0.0.1:")
     assert reached == ["/api/hello"]
@@ -979,9 +831,6 @@ async def test_claude_refresh_timeout_has_a_host_login_fix(tmp_path, monkeypatch
 async def test_one_request_reads_the_credential_file_exactly_once(
     tmp_path, monkeypatch
 ):
-    """Both values out of one read. Two reads would let the host rewrite the
-    file in between and pair a fresh expiry with the token from before it --
-    which is precisely an expired bearer passing the expiry check."""
     import aisan.egress.anthropic as backend_module
 
     reads = []

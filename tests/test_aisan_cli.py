@@ -110,9 +110,6 @@ def test_claude_defaults_to_the_anthropic_api(monkeypatch):
     [("aisan.cli.claude", "CLAUDE.md"), ("aisan.cli.codex", "AGENTS.md")],
 )
 def test_user_memory_lands_where_the_cli_reads_it(module_name, filename, tmp_path):
-    """The state dir is the box's config dir (CLAUDE_CONFIG_DIR, CODEX_HOME),
-    which is where each client reads user memory -- a mirror anywhere else, the
-    host path included, is a file the box never opens."""
     module = importlib.import_module(module_name)
     state = tmp_path / "state"
     state.mkdir()
@@ -122,7 +119,6 @@ def test_user_memory_lands_where_the_cli_reads_it(module_name, filename, tmp_pat
     module.seed_user_memory(state, source)
     assert (state / filename).read_text() == "host memory\n"
 
-    # The host file is the source of truth: an in-box edit lasts one session.
     (state / filename).write_text("agent memory\n")
     source.write_text("host memory, edited\n")
     module.seed_user_memory(state, source)
@@ -136,8 +132,6 @@ def test_user_memory_lands_where_the_cli_reads_it(module_name, filename, tmp_pat
 def test_a_host_without_user_memory_leaves_the_state_dir_alone(
     module_name, filename, tmp_path
 ):
-    """Nothing here can tell a stale mirror from memory the agent wrote, so a
-    missing source seeds nothing rather than deleting the operator's file."""
     module = importlib.import_module(module_name)
     state = tmp_path / "state"
     state.mkdir()
@@ -161,10 +155,6 @@ def test_a_host_without_user_memory_leaves_the_state_dir_alone(
     ],
 )
 def test_seed_state_rebuilds_malformed_state_instead_of_crashing(tmp_path, malformed):
-    """The .claude.json lives in the box-writable state dir, so its contents are
-    attacker-reachable between sessions. A non-JSON, non-object or wrong-typed
-    nested value used to crash seed_state and wedge every later `aisan claude`
-    on this repo until the operator deleted the cache. It must be repaired."""
     import json
 
     from aisan.cli.claude import seed_state
@@ -181,8 +171,6 @@ def test_seed_state_rebuilds_malformed_state_instead_of_crashing(tmp_path, malfo
 
 
 def test_seed_state_preserves_unrelated_valid_state(tmp_path):
-    """A tolerant rebuild only repairs what is malformed: valid, unrelated keys
-    the CLI wrote survive the reseed."""
     import json
 
     from aisan.cli.claude import seed_state
@@ -201,12 +189,6 @@ def test_seed_state_preserves_unrelated_valid_state(tmp_path):
 
 
 def test_seed_state_lends_the_box_the_hosts_model_menu(tmp_path):
-    """The /model picker's row for a model outside the CLI's compiled-in catalog
-    comes from `additionalModelOptionsCache`, which the CLI fills from a fetch
-    the box cannot make: it goes to the compiled-in api.anthropic.com rather than
-    through ANTHROPIC_BASE_URL, so no proxy allowlist reaches it. Without the
-    host's copy the picker is short those rows while `--model <alias>` still
-    works, which is exactly the reported asymmetry."""
     import json
 
     from aisan.cli.claude import seed_state
@@ -228,19 +210,11 @@ def test_seed_state_lends_the_box_the_hosts_model_menu(tmp_path):
     seed_state(state, host)
 
     config = json.loads((state / ".claude.json").read_text())
-    # Verbatim, the disabled entry included: an entitlement the host does not
-    # have must not become one the box appears to.
+
     assert config["additionalModelOptionsCache"] == options
 
 
 def test_seed_state_lends_the_box_the_hosts_feature_flags(tmp_path):
-    """Claude Code evaluates its feature flags per account, against a server it
-    dials at its compiled-in address, so a box gets no answer and keeps whatever
-    snapshot it last had. One of those flags gates the Fable usage-credit consent
-    dialog on a launch date: once the date passes, a box still holding the old
-    copy demands consent on every model switch while the host, evaluating the
-    flag as disabled, asks for none. The box cannot even remember an answer --
-    the CLI files consent under the account uuid it has no fetch to learn."""
     import json
 
     from aisan.cli.claude import seed_state
@@ -280,16 +254,11 @@ def test_seed_state_lends_the_box_the_hosts_feature_flags(tmp_path):
     assert config["cachedGrowthBookFeatures"] == features
     assert config["cachedGrowthBookFeaturesAt"] == 1788580762611
     assert config["cachedExperimentFeatures"] == ["tengu_copper_fox"]
-    # The four are written by the CLI as a unit; a copy that carried the flags
-    # but not the experiment rows would leave it logging exposures for
-    # variations the mirrored flags no longer hold.
+
     assert config["cachedExperimentData"] == data
 
 
 def test_seed_state_mirrors_each_cache_on_its_own(tmp_path):
-    """A host mid-fetch, or one on a version that has retired a key, lends what
-    it has: a wrong-typed entry must not take the well-formed ones down with it,
-    and must not clear the box's own copy either."""
     import json
 
     from aisan.cli.claude import seed_state
@@ -307,7 +276,7 @@ def test_seed_state_mirrors_each_cache_on_its_own(tmp_path):
             {
                 "additionalModelOptionsCache": "not a menu",
                 "cachedGrowthBookFeatures": features,
-                "cachedGrowthBookFeaturesAt": True,  # a bool is not a timestamp
+                "cachedGrowthBookFeaturesAt": True,
             }
         )
     )
@@ -327,10 +296,6 @@ def test_seed_state_mirrors_each_cache_on_its_own(tmp_path):
 def test_seed_state_keeps_the_boxs_model_menu_when_the_host_lends_none(
     tmp_path, host_state
 ):
-    """A host that has never run Claude Code, or whose config is unreadable or
-    wrong-shaped, leaves the cached menu alone rather than clearing it: a stale
-    menu is a worse failure than none only if it is wrong, and an emptied one is
-    wrong every time."""
     import json
 
     from aisan.cli.claude import seed_state
@@ -352,10 +317,6 @@ def test_seed_state_keeps_the_boxs_model_menu_when_the_host_lends_none(
 
 
 def test_the_model_menu_is_read_from_the_hosts_real_config_dir(tmp_path, monkeypatch):
-    """CLAUDE_CONFIG_DIR moves `.claude.json` off the home directory, and a copy
-    of the resolution rule that forgets it fails silently -- the file is simply
-    not where the mirror looks. `session_mcp` owns the rule; this pins that
-    `cli.claude` uses it rather than a second one."""
     import json
 
     from aisan.cli.claude import host_config, seed_state
@@ -379,8 +340,6 @@ def test_the_model_menu_is_read_from_the_hosts_real_config_dir(tmp_path, monkeyp
 
 
 def test_the_seeded_sources_are_the_hosts_own_user_memory():
-    """The constants the launchers seed FROM, named once so a rename of either
-    host file does not silently turn seeding into a no-op."""
     claude = importlib.import_module("aisan.cli.claude")
     codex = importlib.import_module("aisan.cli.codex")
     assert Path.home() / ".claude" / "CLAUDE.md" == claude.USER_MEMORY
@@ -388,9 +347,6 @@ def test_the_seeded_sources_are_the_hosts_own_user_memory():
 
 
 def test_opencode_mounts_user_memory_where_the_box_reads_it(tmp_path):
-    """opencode's config root is the HOME tmpfs, so its global AGENTS.md is a
-    bind, and the destination is the box's path rather than the host's -- the
-    two differ exactly when the host sets XDG_CONFIG_HOME."""
     opencode = importlib.import_module("aisan.cli.opencode")
     source = tmp_path / "AGENTS.md"
     source.write_text("host memory\n")
@@ -403,19 +359,12 @@ def test_opencode_mounts_user_memory_where_the_box_reads_it(tmp_path):
 
 
 def plugin_entry_point(name, target="aisan.cli:handler_under_test", dist="aisan-corp"):
-    """An `aisan.commands` entry point as the environment would declare it.
-
-    A real EntryPoint, loaded through real import machinery, so the dispatch
-    under test is the one an installed plugin gets. EntryPoint is immutable and
-    `_for` is how importlib.metadata itself attaches the providing distribution.
-    """
     ep = importlib.metadata.EntryPoint(name=name, value=target, group=cli.PLUGIN_GROUP)
     return ep if dist is None else ep._for(SimpleNamespace(name=dist))
 
 
 @pytest.fixture
 def plugin_handler(monkeypatch):
-    """A loadable target for `plugin_entry_point`, recording the argv it got."""
     received = []
 
     def handler(argv):
@@ -439,12 +388,6 @@ def test_a_plugin_command_dispatches_with_its_tokens_untouched(
 
 
 def test_builtin_dispatch_never_looks_at_installed_plugins(monkeypatch):
-    """The core keeps the dispatch it had before plugins existed: `aisan claude`
-    neither scans distribution metadata nor imports a plugin.
-
-    Counted, not raised: discovery swallows exceptions by design, so a seam that
-    failed loudly would be reported as unreadable metadata and prove nothing.
-    """
     scans = []
 
     def scan():
@@ -458,8 +401,6 @@ def test_builtin_dispatch_never_looks_at_installed_plugins(monkeypatch):
 
 
 def test_a_plugin_cannot_take_over_a_builtin_command(monkeypatch, capsys):
-    """Installing a plugin installs its whole dependency closure, and any
-    distribution in it can register here. `aisan claude` stays this package's."""
     monkeypatch.setattr(
         cli,
         "_installed_entry_points",
@@ -471,7 +412,6 @@ def test_a_plugin_cannot_take_over_a_builtin_command(monkeypatch, capsys):
     assert plugins == {}
     assert refused == ["impostor cannot override built-in command 'claude'"]
 
-    # And the refusal is reported rather than presenting as a missing command.
     assert cli.main(["--help"]) == 0
     assert "impostor cannot override built-in command" in capsys.readouterr().err
 
@@ -540,9 +480,6 @@ def test_help_without_plugins_is_unchanged(monkeypatch, capsys):
 
 
 def test_seed_state_never_answers_the_folder_trust_prompt(tmp_path):
-    """Whether this repository's contents are trusted is the operator's call,
-    and the CLI asks it in a dialog that persists in the state dir. The seed
-    must leave it unanswered rather than accept on their behalf."""
     import json
 
     from aisan.cli.claude import seed_state
@@ -557,8 +494,6 @@ def test_seed_state_never_answers_the_folder_trust_prompt(tmp_path):
 
 
 def test_seed_state_keeps_the_trust_answer_given_in_the_box(tmp_path):
-    """Answered once inside the box, it has to survive every later reseed --
-    otherwise the dialog returns on every launch."""
     import json
 
     from aisan.cli.claude import seed_state
@@ -576,9 +511,6 @@ def test_seed_state_keeps_the_trust_answer_given_in_the_box(tmp_path):
 
 
 def test_seed_settings_accepts_the_disclaimer_where_the_cli_reads_it(tmp_path):
-    """2.1.259 reads the bypassPermissions answer from user settings, not from
-    `.claude.json`: seeding the old key only made the CLI run its migration on
-    every launch."""
     import json
 
     from aisan.cli.claude import seed_settings, seed_state
@@ -596,8 +528,6 @@ def test_seed_settings_accepts_the_disclaimer_where_the_cli_reads_it(tmp_path):
 
 
 def test_seed_settings_keeps_the_settings_the_cli_wrote(tmp_path):
-    """The CLI owns this file too. Reseeding must change one key, not truncate
-    the settings a session left behind."""
     import json
 
     from aisan.cli.claude import seed_settings
@@ -617,8 +547,6 @@ def test_seed_settings_keeps_the_settings_the_cli_wrote(tmp_path):
 
 @pytest.mark.parametrize("malformed", ["not json", "[1, 2, 3]", '"a string"'])
 def test_seed_settings_rebuilds_a_mangled_file_instead_of_crashing(tmp_path, malformed):
-    """The file sits in the box-writable state dir, so its contents are
-    attacker-reachable between sessions and must not wedge the next launch."""
     import json
 
     from aisan.cli.claude import seed_settings
@@ -634,9 +562,6 @@ def test_seed_settings_rebuilds_a_mangled_file_instead_of_crashing(tmp_path, mal
 
 
 def test_seed_settings_reads_nothing_through_a_planted_symlink(tmp_path):
-    """Following the link would merge the HOST's own settings into the box --
-    the file reads as absent instead, and the write lands on a fresh regular
-    file (tests/test_aisan_statedir.py covers the write side)."""
     import json
 
     from aisan.cli.claude import seed_settings

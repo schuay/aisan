@@ -65,21 +65,12 @@ def test_staged_directory_removes_only_what_it_created(tmp_path):
 
 
 def _cli(tmp_path, argv, host_path=None):
-    """A launcher run against a HOME of its own.
-
-    The scrub matters: the launchers discover host MCP config through these
-    variables, and one inherited from THIS environment (an aisan box exports
-    OPENCODE_CONFIG) leaks the host's servers into a test that owns only HOME.
-    """
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
     env = {k: v for k, v in os.environ.items() if k not in drop}
     env["HOME"] = str(home)
     if host_path is not None:
-        # Grants discover their tree on the HOST's PATH, so a test asserting
-        # what one contributes has to own it -- otherwise it asserts what this
-        # machine happens to have installed.
         env["PATH"] = str(host_path)
     return subprocess.run(
         [sys.executable, "-m", "aisan.cli.main", *argv],
@@ -122,14 +113,6 @@ def test_net_explain_describes_shared_transport_without_live_secrets(tmp_path, c
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_bind_specs_compose_in_the_order_given(tmp_path, command):
-    """`--binds` is repeatable so a shared tool spec and a per-project one
-    compose without either knowing about the other -- later wins, which is the
-    same rule that governs two entries in one file.
-
-    Through `--explain`, because the merged profile is what the operator
-    reviews: the assertions are on the rendered mounts and on the box's PATH,
-    the two halves a `path` entry has to reach.
-    """
     repo = tmp_path / "repo"
     tools = tmp_path / "tools"
     refs = tmp_path / "refs"
@@ -166,8 +149,7 @@ def test_bind_specs_compose_in_the_order_given(tmp_path, command):
     assert result.returncode == 0, result.stderr
     assert str(tools) in result.stdout
     assert str(refs) in result.stdout
-    # Both files are named as inputs, so the artifact says what it was merged
-    # from rather than only what came out.
+
     assert str(first) in result.stdout and str(second) in result.stdout
     path_line = next(
         line for line in result.stdout.splitlines() if line.strip().startswith("PATH=")
@@ -177,8 +159,6 @@ def test_bind_specs_compose_in_the_order_given(tmp_path, command):
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_a_refused_bind_spec_stops_the_launch(tmp_path, command):
-    """The refusal reaches the operator as a nonzero exit and the file's name,
-    not as a box quietly missing what the file asked for."""
     repo = tmp_path / "repo"
     repo.mkdir()
     home = tmp_path / "home"
@@ -217,17 +197,13 @@ def test_an_egress_profile_reaches_the_box(tmp_path, command):
     result = _cli(tmp_path, [command, "--egress", "v8-rbe", "--explain", str(repo)])
 
     assert result.returncode == 0, result.stderr
-    # The backend's own line in the egress section, not any path that
-    # happens to spell it.
+
     assert "rbe.sock" in result.stdout
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_an_egress_profile_refuses_the_shared_network(tmp_path, command):
-    # The backend has no authenticated host-loopback path, so on a shared
-    # namespace its relay port would be a credential capability for everything
-    # on the machine. BoxSpec already refuses that mix; this refuses it in the
-    # operator's terms, before anything is assembled.
+
     repo = tmp_path / "repo"
     (repo / "build" / "config" / "siso").mkdir(parents=True)
     (repo / "build" / "config" / "siso" / ".sisoenv").write_text("SISO_PROJECT=x\n")
@@ -250,9 +226,7 @@ def test_an_unknown_egress_profile_is_refused_by_name(tmp_path, command):
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_a_profile_that_finds_nothing_says_so(tmp_path, command):
-    # A tree the profile has nothing for is not a refusal, but silence would
-    # leave a box that looks identical to a working one: the operator asked for
-    # a route and got none.
+
     repo = tmp_path / "repo"
     repo.mkdir()
 
@@ -265,8 +239,7 @@ def test_a_profile_that_finds_nothing_says_so(tmp_path, command):
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_naming_one_profile_twice_is_not_two_of_it(tmp_path, command):
-    # Two of one backend collide on name and port, and BoxSpec refuses the mix.
-    # The operator typed a repeat, not a request for a second route.
+
     repo = tmp_path / "repo"
     (repo / "build" / "config" / "siso").mkdir(parents=True)
     (repo / "build" / "config" / "siso" / ".sisoenv").write_text("SISO_PROJECT=x\n")
@@ -282,8 +255,7 @@ def test_naming_one_profile_twice_is_not_two_of_it(tmp_path, command):
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_the_shared_net_profile_is_the_one_that_survives_net(tmp_path, command):
-    # The other profile refuses --net; this one exists for it. What it grants is
-    # a mount of the credential store, so the launch has to say so.
+
     repo = tmp_path / "repo"
     repo.mkdir()
     (tmp_path / "home" / ".config" / "chrome_infra" / "auth").mkdir(parents=True)
@@ -307,10 +279,7 @@ def test_the_shared_net_profile_is_the_one_that_survives_net(tmp_path, command):
 
 @pytest.mark.parametrize("command", ["claude"])
 def test_the_two_rbe_profiles_are_mutually_exclusive(tmp_path, command):
-    # One keeps the credential on the host and serves a proxy; the other hands
-    # the box the credential. Together they would serve a proxy to a box that
-    # already holds what the proxy exists to withhold, and the credential guard
-    # is what says so.
+
     repo = tmp_path / "repo"
     (repo / "build" / "config" / "siso").mkdir(parents=True)
     (repo / "build" / "config" / "siso" / ".sisoenv").write_text("SISO_PROJECT=x\n")
@@ -331,16 +300,13 @@ def test_the_two_rbe_profiles_are_mutually_exclusive(tmp_path, command):
 
     assert "REFUSED" in result.stdout + result.stderr
     assert "expose the rbe backend's credential" in result.stdout + result.stderr
-    # A refused profile is a failed review: --explain must exit nonzero so a
-    # scripted `--explain && run` does not read this as a pass.
+
     assert result.returncode == 2, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_a_missing_binds_file_is_refused_not_a_traceback(tmp_path, command):
-    # `userbinds.load` lets FileNotFoundError propagate for the launcher to name;
-    # a typo'd --binds path must reach the operator as the return-2 convention,
-    # not a stack trace with exit 1.
+
     repo = tmp_path / "repo"
     repo.mkdir()
     result = _cli(
@@ -353,7 +319,6 @@ def test_a_missing_binds_file_is_refused_not_a_traceback(tmp_path, command):
 
 
 def _write_host_mcp(home: Path, command: str, name: str = "ghost") -> None:
-    """A host MCP config for each client, naming one server by its `command`."""
     home.mkdir(exist_ok=True)
     (home / ".claude.json").write_text(
         json.dumps({"mcpServers": {name: {"type": "stdio", "command": command}}})
@@ -370,9 +335,7 @@ def _write_host_mcp(home: Path, command: str, name: str = "ghost") -> None:
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_an_uninstalled_mcp_server_is_refused_not_a_traceback(tmp_path, command):
-    # A host MCP config nobody re-reads at launch, naming one server whose command
-    # is not installed, must not brick every invocation (including --explain) with
-    # a traceback: it is a refusal, so exit 2 and name the missing command.
+
     _write_host_mcp(tmp_path / "home", "aisan-definitely-absent-mcp")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -384,9 +347,7 @@ def test_an_uninstalled_mcp_server_is_refused_not_a_traceback(tmp_path, command)
 
 
 def test_a_missing_client_binary_is_reported_on_stderr(tmp_path):
-    # The run path's "no `claude` on PATH" refusal is a diagnostic, not the
-    # profile the operator asked to see: it belongs on stderr like every sibling,
-    # so a caller piping stdout does not mistake it for output.
+
     repo = tmp_path / "repo"
     repo.mkdir()
     home = tmp_path / "home"
@@ -412,10 +373,7 @@ def test_a_missing_client_binary_is_reported_on_stderr(tmp_path):
 async def test_the_run_path_routes_an_assembly_refusal_to_return_2(
     tmp_path, monkeypatch, capsys
 ):
-    # After preflight, assembly can still refuse (a bind-over whose source is
-    # gone, or wrapper() finding the egress binds did not survive resolution).
-    # Those arrive as exceptions, not a child return code, so the run path must
-    # route them rather than let one traceback out with exit 1.
+
     class _RefusingBox:
         def __init__(self, spec, *, box_id):
             self.spec = spec
@@ -451,10 +409,7 @@ async def test_the_run_path_routes_an_assembly_refusal_to_return_2(
 async def test_the_run_path_normalizes_a_signal_death_to_shell_status(
     tmp_path, monkeypatch
 ):
-    # subprocess.run reports a signal-killed child as `-N`; the unattended
-    # launcher normalizes that to `128 + N`, and the interactive run path must
-    # report the same number rather than a raw negative status a caller reads
-    # as a huge unsigned exit code.
+
     class _Box:
         def __init__(self, spec, *, box_id):
             self.spec = spec
@@ -508,10 +463,6 @@ async def test_the_run_path_normalizes_a_signal_death_to_shell_status(
 async def test_a_credential_written_inside_a_box_refuses_the_next_launch(
     tmp_path, monkeypatch, capsys, client, relative
 ):
-    """A `--net` session can complete a login inside the box, and the box's
-    config directory IS the rw state dir -- so the token it writes would be
-    handed to every later box for the repository. Nothing about that shows up in
-    the mounts, which is why the launch checks the directory itself."""
     started = False
 
     class _Box:
@@ -570,10 +521,7 @@ async def test_a_credential_written_inside_a_box_refuses_the_next_launch(
 def test_git_config_binds_only_the_file_never_the_credential_store(
     tmp_path, monkeypatch
 ):
-    # H6: the launchers bound the whole ~/.config/git for user.name/email, which
-    # also handed the box git-credential-store's `credentials` (plaintext
-    # user:token) and any config extraHeader. git_config_binds names ONLY the
-    # config file, so the sibling credentials store is never mounted.
+
     home = tmp_path / "home"
     (home / ".config" / "git").mkdir(parents=True)
     (home / ".config" / "git" / "config").write_text("[user]\n  name = Jane\n")
@@ -582,7 +530,7 @@ def test_git_config_binds_only_the_file_never_the_credential_store(
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
     binds = git_config_binds()
-    # Exactly the config file, ro; nothing that names the directory or the store.
+
     assert binds == [Bind(home / ".config" / "git" / "config", RO)]
     named = {getattr(b, "path", None) or getattr(b, "src", None) for b in binds}
     assert home / ".config" / "git" / "credentials" not in named
@@ -590,9 +538,7 @@ def test_git_config_binds_only_the_file_never_the_credential_store(
 
 
 def test_git_config_binds_is_xdg_aware_on_the_source(tmp_path, monkeypatch):
-    # H6: the host may keep the file under $XDG_CONFIG_HOME, but the box reads
-    # ~/.config/git/config (its cleared env sets no XDG). A BindOver substitutes
-    # the host's real file at the path the box reads.
+
     home = tmp_path / "home"
     xdg = tmp_path / "xdg"
     (xdg / "git").mkdir(parents=True)
@@ -613,8 +559,6 @@ def test_git_config_binds_empty_without_a_config(tmp_path, monkeypatch):
 
 
 def _fake_depot_tools(tmp_path):
-    """A depot_tools directory as `depot_tools_grant` finds one: by `autoninja`
-    on the PATH. Returned for the caller to pass as the box's PATH."""
     depot_tools = tmp_path / "depot_tools"
     depot_tools.mkdir()
     autoninja = depot_tools / "autoninja"
@@ -625,10 +569,6 @@ def _fake_depot_tools(tmp_path):
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_a_grant_brings_its_mounts_its_path_and_its_environment(tmp_path, command):
-    """The env half is the reason the flag exists: depot_tools bound read-only
-    into a box with no route tries to `git fetch` itself on every gclient
-    invocation and exits 255, which reads as a broken checkout rather than as a
-    missing network."""
     repo = tmp_path / "repo"
     repo.mkdir()
     depot_tools = _fake_depot_tools(tmp_path)
@@ -652,8 +592,7 @@ def test_a_grant_brings_its_mounts_its_path_and_its_environment(tmp_path, comman
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_a_grant_this_host_lacks_says_so(tmp_path, command):
-    # Same reasoning as the egress profile that finds nothing: not a refusal,
-    # but a box quietly missing what was asked for looks like a working one.
+
     repo = tmp_path / "repo"
     repo.mkdir()
     empty = tmp_path / "empty-path"
@@ -672,8 +611,6 @@ def test_a_grant_this_host_lacks_says_so(tmp_path, command):
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_a_user_bind_file_still_shadows_a_grant(tmp_path, command):
-    """Grants are applied before `--binds`, so the operator's file keeps the
-    last word -- the same precedence a bind file has over the preset."""
     repo = tmp_path / "repo"
     repo.mkdir()
     depot_tools = _fake_depot_tools(tmp_path)
@@ -695,9 +632,7 @@ def test_a_user_bind_file_still_shadows_a_grant(tmp_path, command):
     )
 
     assert result.returncode == 0, result.stderr
-    # On the classification, not on the presence of a line: both mounts are in
-    # the list either way, and only the classifier says which one the box ends
-    # up with. The profile's ro bind is the shadowed one.
+
     assert f"ro-shadow {depot_tools}" in result.stdout
     assert f"rw        {depot_tools}" in result.stdout
 

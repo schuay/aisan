@@ -1,26 +1,6 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The Anthropic transport: two allowlists, and the credential the box never has.
-
-`vertex.py` has one policy surface (which paths) because it forwards no headers
-at all. This has two, and the second exists because a measurement forced it: real
-Claude Code's `anthropic-version` and `anthropic-beta` select API behaviour, and
-an upstream answered from our own headers only refuses the first request. So
-"which headers" became a decision, and a decision on a security boundary needs
-its adversarial cases written down.
-
-Most of this file is therefore refusals and drops. The happy path is one test;
-the rest are the things that must NOT reach the upstream -- above all the box's
-own relay token -- which arrives in `x-api-key` or `authorization` depending on
-the dress its credential kind chose, is a per-box string by construction, and
-would be an attacker-chosen string if a prompt-injected agent set one. Both are
-dropped unconditionally, so which one carried it changes nothing here.
-
-Everything here talks to the proxy over its UNIX socket directly. The relay's
-loopback half is `test_proxy.py`'s, and the claim that a REAL `claude` reaches a
-model through the whole chain needs a real box -- `test_aisan_claude_code.py`.
-"""
 
 from __future__ import annotations
 
@@ -52,13 +32,8 @@ def test_path_allowlist_permits_exactly_what_a_turn_needs():
 @pytest.mark.parametrize(
     ("method", "path", "why"),
     [
-        # The prefix trap an unanchored match would fall into, on an upstream we
-        # do not control.
         ("POST", "/v1/messages_evil", "prefix"),
         ("POST", "/v1/messages/", "trailing slash"),
-        # The subscription bearer opens far more of the API than a model call
-        # needs. These are what the allowlist is FOR: the box's capability is
-        # "talk to a model", not "act as the user".
         ("GET", "/v1/organizations/me", "not a model call"),
         ("POST", "/v1/files", "not a model call"),
         ("GET", "/v1/messages", "wrong method"),
@@ -71,23 +46,22 @@ def test_path_allowlist_refuses(method, path, why):
 
 def test_header_allowlist_forwards_protocol_and_drops_everything_else():
     h = HeaderAllowlist()
-    # Protocol: measured required against the real API.
+
     assert h.permits("anthropic-version")
-    assert h.permits("Anthropic-Version")  # the client sends mixed case
+    assert h.permits("Anthropic-Version")
     assert h.permits("anthropic-beta")
     assert h.permits("accept")
-    # Credentials: always ours, never the box's.
+
     assert not h.permits("x-api-key")
     assert not h.permits("authorization")
-    # An identifier, not protocol: forwarded so a session-keyed upstream can
-    # tell two boxed sessions apart, at the cost of the box choosing the value.
+
     assert h.permits("x-claude-code-session-id")
-    # Telemetry describing a machine that is not the host.
+
     assert not h.permits("x-stainless-os")
     assert not h.permits("x-stainless-runtime-version")
     assert not h.permits("user-agent")
     assert not h.permits("x-app")
-    # Framing the host half's own connection computes for itself.
+
     assert not h.permits("host")
     assert not h.permits("content-length")
 
@@ -102,8 +76,6 @@ async def _upstream_server(handler) -> tuple[str, web.AppRunner]:
 
 
 class _Proxy:
-    """The proxy on a socket, plus a session that dials it. Async CM."""
-
     def __init__(self, tmp_path, **kwargs) -> None:
         self._sock = tmp_path / "anthropic.sock"
         self._kwargs = kwargs
@@ -118,8 +90,6 @@ class _Proxy:
         await self._runner.cleanup()
 
 
-# The socket connector needs a host in the URL and ignores it. Named so a reader
-# does not go looking for what resolves it.
 URL = "http://anthropic.invalid"
 
 
@@ -151,10 +121,6 @@ async def test_shared_proxy_requires_one_exact_x_api_key(tmp_path, headers):
 
 
 async def test_a_percent_encoded_path_is_refused(tmp_path):
-    """W7: the allowlist gates the RAW path now, the same bytes the forward
-    sends. `/v1%2Fmessages` decodes to the permitted `/v1/messages`, but the
-    upstream would receive the raw encoded form and route it elsewhere -- so it
-    must be refused, not permitted-then-forwarded-differently."""
     reached = []
 
     async def upstream(request: web.Request) -> web.Response:
@@ -163,8 +129,6 @@ async def test_a_percent_encoded_path_is_refused(tmp_path):
 
     up, up_runner = await _upstream_server(upstream)
     try:
-        # encoded=True keeps the client from normalising %2F away before it
-        # reaches the proxy.
         async with (
             _Proxy(tmp_path, token=_token, upstream=up) as s,
             s.post(YURL(f"{URL}/v1%2Fmessages", encoded=True)) as r,
@@ -176,9 +140,6 @@ async def test_a_percent_encoded_path_is_refused(tmp_path):
 
 
 async def test_repeated_anthropic_beta_headers_all_survive(tmp_path):
-    """W3: `anthropic-beta` is a list the client may send as several headers,
-    each selecting API behaviour the request then expects. A dict-keyed forward
-    kept only the last; every one must reach the upstream."""
     got: list[str] = []
 
     async def upstream(request: web.Request) -> web.Response:
@@ -206,9 +167,6 @@ async def test_repeated_anthropic_beta_headers_all_survive(tmp_path):
 
 
 async def test_diagnostic_response_headers_are_relayed(tmp_path):
-    """L4: a 429/529 without retry-after or the ratelimit headers makes the
-    client retry blind. Those and a request id are relayed; the upstream's own
-    transport headers are not."""
 
     async def upstream(request: web.Request) -> web.Response:
         return web.json_response(
@@ -238,12 +196,6 @@ async def test_diagnostic_response_headers_are_relayed(tmp_path):
 
 
 async def test_the_boxs_key_is_dropped_and_the_real_bearer_attached(tmp_path):
-    """The whole design, in one request.
-
-    The box holds a placeholder; the upstream must see the credential and no
-    trace of what the box presented. A test that only checked the bearer would
-    pass while the placeholder rode along beside it.
-    """
     got: dict[str, str] = {}
 
     async def upstream(request: web.Request) -> web.Response:
@@ -277,17 +229,13 @@ async def test_the_boxs_key_is_dropped_and_the_real_bearer_attached(tmp_path):
     assert got["anthropic-version"] == "2023-06-01"
     assert got["anthropic-beta"] == "claude-code-20250219"
     assert "x-stainless-os" not in got
-    # Forwarded VERBATIM, which is the trade: an upstream keying state off it
-    # can tell boxed sessions apart, and the value is whatever the box sent.
+
     assert got["x-claude-code-session-id"] == "a-session-the-box-opened"
-    # aiohttp sets its own user-agent on the outbound request, so the assertion
-    # is that the BOX's did not survive, not that the header is absent.
+
     assert got.get("user-agent", "") != "claude-cli/2.1.219"
 
 
 async def test_a_refused_path_never_reaches_the_upstream(tmp_path):
-    """Refused before forwarding, not merely refused. The allowlist would be
-    decorative if the request had already been made by the time it answered."""
     reached = []
 
     async def upstream(request: web.Request) -> web.Response:
@@ -306,17 +254,13 @@ async def test_a_refused_path_never_reaches_the_upstream(tmp_path):
         await up_runner.cleanup()
 
     assert reached == []
-    # The API's own error shape: the SDK surfaces `error.message` and fails to
-    # parse anything else, so a refusal in the wrong shape is a refusal the
-    # agent cannot read.
+
     assert body["type"] == "error"
     assert body["error"]["type"] == "permission_error"
     assert "not permitted" in body["error"]["message"]
 
 
 async def test_a_path_allowlist_that_raises_denies(tmp_path, caplog):
-    """`policy.permits` is the fail-closed wrapper, and this is what it buys:
-    a buggy predicate is an outage, not an approval nobody gave."""
 
     class Boom(PathAllowlist):
         def permits(self, method: str, path: str) -> bool:
@@ -337,12 +281,6 @@ async def test_a_path_allowlist_that_raises_denies(tmp_path, caplog):
 
 
 async def test_a_header_allowlist_that_raises_drops_only_that_header(tmp_path):
-    """Per-header, so one bad decision costs one header rather than the request.
-
-    The alternative -- a filter over the whole mapping inside one `permits` call
-    -- fails the turn on a matcher bug, which is a worse outcome than dropping a
-    protocol header and getting a legible 400 from the upstream.
-    """
     got: dict[str, str] = {}
 
     async def upstream(request: web.Request) -> web.Response:
@@ -378,9 +316,6 @@ async def test_a_header_allowlist_that_raises_drops_only_that_header(tmp_path):
 
 
 async def test_the_token_is_read_per_request_not_captured(tmp_path):
-    """The host's own Claude Code rewrites the credential file on its own
-    schedule, so a value captured at startup goes stale inside one session --
-    while a re-read picks the new one up for free."""
     seen: list[str] = []
     tokens = iter(["t-1", "t-2", "t-3"])
 
@@ -406,9 +341,6 @@ async def test_the_token_is_read_per_request_not_captured(tmp_path):
 async def test_a_credential_that_cannot_be_read_is_an_error_not_a_traceback(
     tmp_path,
 ):
-    """The file went away mid-session. The agent gets a reason it can act on,
-    and the reason names a path -- there is no value to leak here by
-    construction, but the assertion pins that."""
 
     async def upstream(request: web.Request) -> web.Response:
         return web.json_response({"ok": True})
@@ -431,15 +363,12 @@ async def test_a_credential_that_cannot_be_read_is_an_error_not_a_traceback(
 
 
 async def test_a_dead_upstream_is_502_not_a_torn_connection(tmp_path):
-    """The upstream is the user's OWN local proxy, which they may restart under
-    a running box. One turn fails with a legible reason; the client is not left
-    retrying into a connection that was reset."""
 
     async def upstream(request: web.Request) -> web.Response:
         return web.json_response({"ok": True})
 
     up, up_runner = await _upstream_server(upstream)
-    await up_runner.cleanup()  # the address is now dead, deliberately
+    await up_runner.cleanup()
 
     async with (
         _Proxy(tmp_path, token=_token, upstream=up) as s,
@@ -451,13 +380,6 @@ async def test_a_dead_upstream_is_502_not_a_torn_connection(tmp_path):
 
 
 async def test_an_upstream_redirect_is_refused_not_followed(tmp_path):
-    """The credential goes to the upstream the operator named, and nowhere else.
-
-    aiohttp drops `authorization` when a redirect crosses origins but keeps
-    `x-api-key`, so a followed 307 hands a key-dressed credential -- and the
-    body -- to a host nobody approved. The named upstream is not always
-    Anthropic: `--upstream` points at local gateways.
-    """
     second_hits: list[dict[str, str]] = []
 
     async def second(request: web.Request) -> web.Response:
@@ -509,9 +431,6 @@ async def test_the_rate_limit_refuses_in_the_apis_own_shape(tmp_path):
 
 
 async def test_the_response_body_is_streamed_back_intact(tmp_path):
-    """An SSE turn is many chunks, and the client parses them as they arrive.
-    Byte-correctness across the chunk boundary is what makes the proxy
-    invisible to it."""
     payload = b"".join(f"event: {i}\ndata: {'x' * 999}\n\n".encode() for i in range(64))
 
     async def upstream(request: web.Request) -> web.StreamResponse:
@@ -540,17 +459,6 @@ async def test_the_response_body_is_streamed_back_intact(tmp_path):
     assert got == payload
 
 
-# --- the body as an egress channel -----------------------------------------
-#
-# The path and header allowlists gate the envelope; these gate what the body
-# asks the UPSTREAM to do. Measured against claude-cli 2.1.219 and the real API
-# (see EGRESS-BODY.md): `tools` is a discriminated union keyed on `type`, an
-# absent `type` resolves to the `custom` variant, and the client declares 646
-# tools across every mode without one typed declaration among them.
-
-# The shape a real turn sends, reduced to what the policy reads. Kept as a
-# literal so a policy that started refusing real traffic fails here rather than
-# in a session.
 _REAL_TOOL = {
     "name": "Bash",
     "description": "Executes a bash command",
@@ -559,8 +467,6 @@ _REAL_TOOL = {
 
 
 def test_body_policy_permits_a_real_claude_code_body():
-    """The negative control. A policy that refuses everything would pass every
-    other test in this section."""
     body = json.dumps(
         {
             "model": "claude-opus-4",
@@ -582,28 +488,14 @@ def test_body_policy_permits_a_real_claude_code_body():
 @pytest.mark.parametrize(
     ("kind", "why"),
     [
-        # The two whose whole purpose is to make the upstream fetch a URL. The
-        # URL is the payload: the request having been made IS the exfiltration,
-        # so the verb being a read constrains nothing.
         ("web_fetch_20250910", "upstream fetches a URL"),
         ("web_search_20250305", "upstream issues a query"),
-        # Newer versions of the same capability. The reason this is an allowlist
-        # of client types rather than a denylist of these: both of these tags
-        # were live on the upstream and newer than anything the API reference
-        # showed, so a hand-written denylist was already short on day one.
         ("web_fetch_20260318", "a version no denylist would have listed"),
         ("web_search_20260318", "a version no denylist would have listed"),
         ("code_execution_20260521", "runs in a container upstream"),
-        # Bidirectional: results come back INTO the conversation and the far
-        # side executes.
         ("mcp_toolset", "opens a session with a named server"),
-        # The client-side typed family. Refused deliberately -- this client
-        # declares none of them, and allowing them on the API reference alone is
-        # the guess the policy exists to avoid.
         ("bash_20250124", "client-side, but unmeasured on this client"),
         ("memory_20250818", "client-side, but unmeasured on this client"),
-        # Not in the upstream's union at all. Fails closed, which is the whole
-        # point of naming what runs here rather than what does not.
         ("some_tool_type_invented_next_year", "unknown to us and to the upstream"),
     ],
 )
@@ -611,27 +503,16 @@ def test_body_policy_refuses_tools_that_execute_upstream(kind, why):
     body = json.dumps({"tools": [{"type": kind, "name": "t"}]}).encode()
     reason = BodyPolicy().refuse(body)
     assert reason is not None, why
-    assert kind in reason  # the refusal names what it refused
+    assert kind in reason
 
 
 def test_body_policy_permits_the_two_spellings_of_the_client_variant():
-    """Absent and "custom" are one variant, not two rules.
-
-    Measured from the upstream's own validation errors: an untyped tool is
-    reported as `tools.0.custom.*`, so absent SELECTS custom. Refusing the
-    explicit spelling would be a false positive waiting for the day the client
-    starts sending it.
-    """
     assert BodyPolicy().refuse(json.dumps({"tools": [_REAL_TOOL]}).encode()) is None
     explicit = {**_REAL_TOOL, "type": "custom"}
     assert BodyPolicy().refuse(json.dumps({"tools": [explicit]}).encode()) is None
 
 
 def test_body_policy_refuses_an_explicit_null_type():
-    """Absent and null are different to the upstream -- absent selects `custom`,
-    null is refused outright as `Input tag 'None'` -- so null can never reach a
-    server-side variant. Refused here as the fail-closed reading of a type this
-    policy cannot resolve, rather than silently treated as absent."""
     body = json.dumps({"tools": [{**_REAL_TOOL, "type": None}]}).encode()
     assert BodyPolicy().refuse(body) is not None
 
@@ -645,12 +526,6 @@ def test_body_policy_refuses_upstream_keys(key):
 
 
 def test_body_policy_refuses_shapes_it_cannot_classify():
-    """The old "no opinion" leniency assumed this parser and the upstream's
-    agree on what is malformed, and a streaming decoder does not: it reads
-    `{...}{}` value by value and honors the tools in the first object, which
-    this policy never inspected. So an unreadable body is refused, and only an
-    EMPTY body -- the hello routes send none -- keeps the old answer.
-    """
     p = BodyPolicy()
     assert p.refuse(b"") is None
     assert p.refuse(b"{}") is None
@@ -658,8 +533,7 @@ def test_body_policy_refuses_shapes_it_cannot_classify():
     assert p.refuse(b'["an", "array"]') is not None
     assert p.refuse(json.dumps({"tools": "not a list"}).encode()) is not None
     assert p.refuse(json.dumps({"tools": ["not an object"]}).encode()) is not None
-    # The demonstrated smuggle: a strict-side parse failure whose first value
-    # carries a server-side tool.
+
     smuggle = b'{"tools": [{"type": "web_search_20250305", "name": "w"}]}{}'
     reason = p.refuse(smuggle)
     assert reason is not None
@@ -667,13 +541,6 @@ def test_body_policy_refuses_shapes_it_cannot_classify():
 
 
 def test_body_policy_refuses_duplicate_keys_at_any_depth():
-    """A repeated key resolves one way here and possibly another upstream.
-
-    Python keeps the LAST value, so a benign `custom` declaration written after
-    a server-side one is what this policy would inspect while a first-wins
-    upstream runs the tool it never saw. Both spellings of the seam are refused:
-    a `tools` stated twice, and a `type` stated twice inside one declaration.
-    """
     bodies = [
         b'{"tools": [{"type": "web_search_20250305"}], "tools": [{"type": "custom"}]}',
         b'{"tools": [{"type": "web_search_20250305", "type": "custom"}]}',
@@ -686,14 +553,6 @@ def test_body_policy_refuses_duplicate_keys_at_any_depth():
 
 
 def test_body_policy_refuses_a_lenient_json_constant():
-    """`NaN` and the infinities read one way here and another upstream.
-
-    Python's parser accepts them as floats; a strict parser rejects them. So a
-    body carrying one is the same capability disagreement as a repeated key: the
-    reading this side inspects is not necessarily the one the upstream acts on.
-    Refused, and in particular a refused key does not become permitted by
-    padding the body with a `NaN` the old parser would have quietly accepted.
-    """
     p = BodyPolicy()
     for body in (b'{"pad": NaN}', b'{"x": Infinity}', b'{"y": -Infinity}'):
         reason = p.refuse(body)
@@ -704,12 +563,6 @@ def test_body_policy_refuses_a_lenient_json_constant():
 
 
 def test_body_policy_permits_a_measured_tool_round_trip_history():
-    """The negative control for the content gate, measured from claude-cli
-    2.1.246 driving a stub through a full tool round trip: text and thinking
-    blocks in the assistant turn, tool_use, and tool_result carrying both its
-    measured shapes (a plain string, and an array of text blocks). A content
-    allowlist that refused any of these would break every agentic session on
-    its second request."""
     body = json.dumps(
         {
             "model": "claude-opus-4",
@@ -791,10 +644,6 @@ def test_body_policy_permits_a_measured_tool_round_trip_history():
     ],
 )
 def test_body_policy_refuses_content_that_asks_the_upstream_to_fetch(block, why):
-    """The body's third gate. `unshare_net` stops the box dialling out; an
-    `image` url source asks ANTHROPIC to dial for it, and the request having
-    been made IS the exfiltration -- so the block types are an allowlist, the
-    posture `openai_responses` took on day one."""
     body = json.dumps({"messages": [{"role": "user", "content": [block]}]}).encode()
     reason = BodyPolicy().refuse(body)
     assert reason is not None, why
@@ -802,13 +651,6 @@ def test_body_policy_refuses_content_that_asks_the_upstream_to_fetch(block, why)
 
 
 def test_body_policy_permits_the_measured_inline_image_and_document():
-    """The finer split the source types buy, measured on claude-cli 2.1.259
-    against a recording pass-through: a Read of a PNG comes back as an `image`
-    and a Read of a PDF as a `document`, both base64 inside the tool_result,
-    and a pasted image is the same block directly in the user turn. None of
-    them names a URL, so none of them asks the upstream to fetch anything --
-    refusing them would have cost every screenshot and PDF in a boxed session
-    and bought nothing."""
     png = {
         "type": "image",
         "source": {"type": "base64", "data": "iVBOR", "media_type": "image/png"},
@@ -857,15 +699,6 @@ def test_body_policy_permits_the_measured_inline_image_and_document():
 
 
 def test_body_policy_refuses_a_source_that_carries_two_answers():
-    """A gate that reads only `source.type` takes the tag's word for where the
-    bytes come from, and a source can name both: base64 data AND a url.
-
-    Defence in depth, and worth saying so rather than overclaiming: measured,
-    the client strips the extra key before the socket sees it and the upstream
-    answers this exact body with `400 ... source.base64.url: Extra inputs are
-    not permitted`. Neither is the boundary. A box holds the relay token and
-    can post what its client would not, and upstream validation is the
-    upstream's to loosen."""
     hybrid = {
         "type": "image",
         "source": {
@@ -883,11 +716,6 @@ def test_body_policy_refuses_a_source_that_carries_two_answers():
 
 
 def test_every_permitted_content_type_is_inert_or_source_gated():
-    """The invariant behind the union, asserted rather than trusted: a type is
-    permitted because it carries nothing by reference, or because the source
-    gate covers it. A future tag added to one set and not the other would
-    arrive permitted and ungated, which is the shape of the hole this whole
-    gate exists to close."""
     from aisan.proxy.anthropic import (
         ALLOWED_CONTENT_TYPES,
         INERT_CONTENT_TYPES,
@@ -905,9 +733,6 @@ def test_every_permitted_content_type_is_inert_or_source_gated():
 
 
 def test_a_refusal_never_lets_the_box_write_the_host_log():
-    """The refusals name what they refused, and the box picks that string. A
-    raw newline in a field name would write the operator's log a line of the
-    box's choosing, so the names go through `repr`."""
     injected = "x\nanthropic proxy: forwarded body: fine"
     unknown_key = json.dumps({"messages": [], injected: 1}).encode()
     bad_source = json.dumps(
@@ -938,8 +763,6 @@ def test_a_refusal_never_lets_the_box_write_the_host_log():
 
 
 def test_the_content_gate_reaches_tool_results_and_system():
-    """The two places a naive walk misses: a block nested in a tool_result's
-    own content, and the `system` field, which takes the same block shape."""
     p = BodyPolicy()
     url_image = {"type": "image", "source": {"type": "url", "url": "https://x.test/e"}}
     nested = json.dumps(
@@ -964,10 +787,6 @@ def test_the_content_gate_reaches_tool_results_and_system():
 
 
 def test_body_policy_refuses_an_unmeasured_top_level_key():
-    """The keys are an allowlist too: not every server-acting capability
-    declares itself as a tool (`web_search_options` on the chat-completions
-    family did not). The refusal names the key, for the operator reading the
-    log and the agent reading the refusal."""
     body = json.dumps(
         {"model": "m", "messages": [], "a_key_invented_next_year": 1}
     ).encode()
@@ -977,12 +796,6 @@ def test_body_policy_refuses_an_unmeasured_top_level_key():
 
 
 async def test_a_refused_body_never_reaches_the_upstream_or_the_credential(tmp_path):
-    """Both halves of the claim, and the second is the easy one to lose.
-
-    The check runs before `token()`, so a refused request does not cause the
-    host's credential file to be read at all -- there is no reason to handle a
-    secret for a request that is not going anywhere.
-    """
     reached, tokens_read = [], []
 
     async def upstream(request: web.Request) -> web.Response:
@@ -1016,9 +829,6 @@ async def test_a_refused_body_never_reaches_the_upstream_or_the_credential(tmp_p
 
 
 async def test_the_body_check_covers_count_tokens_too(tmp_path):
-    """Gating the body rather than the route is what buys this: `count_tokens`
-    takes the same tool declarations, and a route-shaped check would have needed
-    to name it separately."""
     reached = []
 
     async def upstream(request: web.Request) -> web.Response:
@@ -1041,8 +851,6 @@ async def test_the_body_check_covers_count_tokens_too(tmp_path):
 
 
 async def test_a_real_body_still_reaches_the_upstream(tmp_path):
-    """The end-to-end negative control: the policy is in the request path and a
-    legitimate turn is unaffected by it."""
     reached = []
 
     async def upstream(request: web.Request) -> web.Response:
@@ -1059,14 +867,11 @@ async def test_a_real_body_still_reaches_the_upstream(tmp_path):
             assert r.status == 200
     finally:
         await up_runner.cleanup()
-    # Forwarded verbatim: the policy refuses or permits, it never edits.
+
     assert reached == [payload]
 
 
 async def test_a_body_policy_that_raises_denies(tmp_path, caplog):
-    """Same fail-closed contract as the path allowlist, over a check that
-    returns a reason rather than a bool -- `policy.refusal` rather than
-    `policy.permits`. A policy bug is an outage, not an approval nobody gave."""
     reached = []
 
     class Boom(BodyPolicy):
@@ -1092,17 +897,6 @@ async def test_a_body_policy_that_raises_denies(tmp_path, caplog):
 
 
 async def test_an_interrupted_turn_is_not_an_upstream_outage(tmp_path, caplog):
-    """The interrupt window BEFORE the first response byte, faithfully.
-
-    The client aborts its fetch while the upstream is still thinking -- the
-    upstream holds the request and has answered nothing -- so the proxy's
-    first write to the closing socket is the response's own header line in
-    `prepare`, not a body chunk. aiohttp raises ClientConnectionResetError
-    there, a ClientError by inheritance as well as a ConnectionResetError,
-    and unguarded that write surfaced as "upstream ... unreachable: Cannot
-    write to closing transport" -- a cancelled turn logged as a dead
-    upstream, plus a 502 written to a socket nobody is reading.
-    """
     import asyncio
     import logging
 
@@ -1110,7 +904,7 @@ async def test_an_interrupted_turn_is_not_an_upstream_outage(tmp_path, caplog):
 
     async def upstream(request: web.Request) -> web.Response:
         arrived.set()
-        await asyncio.sleep(0.3)  # the turn is "thinking"; outlive the client
+        await asyncio.sleep(0.3)
         return web.json_response({"ok": True})
 
     up, up_runner = await _upstream_server(upstream)
@@ -1127,8 +921,8 @@ async def test_an_interrupted_turn_is_not_an_upstream_outage(tmp_path, caplog):
                 )
                 await w.drain()
                 await asyncio.wait_for(arrived.wait(), 5)
-                w.transport.abort()  # the interrupt, before any response byte
-                await asyncio.sleep(0.6)  # let the upstream answer into the void
+                w.transport.abort()
+                await asyncio.sleep(0.6)
             finally:
                 await runner.cleanup()
     finally:
@@ -1137,15 +931,11 @@ async def test_an_interrupted_turn_is_not_an_upstream_outage(tmp_path, caplog):
     assert not [rec for rec in caplog.records if "unreachable" in rec.getMessage()], (
         "a cancelled turn logged as an upstream outage"
     )
-    # The disconnect is attributed to the leg that broke.
+
     assert any("downstream closed" in rec.getMessage() for rec in caplog.records)
 
 
 async def test_refusal_warnings_are_rate_limited(tmp_path, caplog):
-    """The amplification loop: the path refusal is logged before the request
-    limiter runs, so a box loop on a denied path emitted one WARNING per
-    request forever, burying the refusal that mattered. The gate bounds the
-    logging; every request is still refused."""
 
     async def upstream(request: web.Request) -> web.Response:
         return web.json_response({"ok": True})
@@ -1165,8 +955,6 @@ async def test_refusal_warnings_are_rate_limited(tmp_path, caplog):
     assert len(warnings) <= 13, f"{len(warnings)} warnings for 40 refusals"
 
 
-# The web-search request as claude-cli 2.1.246 actually sends it: a dedicated
-# single-shot call carrying only the server tool and a tool_choice forcing it.
 _WEB_SEARCH_BODY = {
     "model": "m",
     "max_tokens": 1024,
@@ -1182,12 +970,6 @@ _WEB_SEARCH_BODY = {
 
 
 def test_the_isolated_policy_still_refuses_the_web_search_request():
-    """The default is unchanged, and that is the half that matters.
-
-    A box under `unshare_net` has no route off the machine, so asking the
-    upstream to run a query it chose IS the route. Both gates catch this body;
-    the key gate happens to answer first.
-    """
     reason = BodyPolicy().refuse(json.dumps(_WEB_SEARCH_BODY).encode())
     assert reason is not None
     assert "tool_choice" in reason
@@ -1198,12 +980,6 @@ def test_the_isolated_policy_still_refuses_the_web_search_request():
 
 
 def test_the_shared_network_policy_permits_the_web_search_request():
-    """Permitted on the strength of the box's network mode and nothing else.
-
-    A box outside `unshare_net` sits in the host's namespace with the host's
-    connectivity, so it can dial the query's destination itself; refusing to let
-    it ask the upstream instead protects nothing and breaks web search.
-    """
     assert (
         BodyPolicy.for_shared_network().refuse(json.dumps(_WEB_SEARCH_BODY).encode())
         is None
@@ -1234,13 +1010,6 @@ def test_the_shared_network_policy_permits_the_web_search_request():
     ],
 )
 def test_the_shared_network_policy_relaxes_two_tags_and_no_others(patch, needle):
-    """Two measured additions, not an open door.
-
-    Everything else stays refused even here. Not because a box with the host's
-    network could not reach the network -- it plainly can -- but because
-    relaxing a tag nothing was measured needing trades a refusal that names
-    itself for a hole nobody is watching, and buys that box nothing.
-    """
     body = json.dumps({**_WEB_SEARCH_BODY, **patch}).encode()
     reason = BodyPolicy.for_shared_network().refuse(body)
     assert reason is not None
