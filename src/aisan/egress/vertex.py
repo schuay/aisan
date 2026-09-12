@@ -38,7 +38,7 @@ class _Token:
     """Mint on demand and cache the token until close to expiry.
 
     Jobs can outlive one-hour tokens, so the proxy reads this provider for every
-    request. Lazy refresh needs no background task.
+    request. Lazy refresh doesn't require a background task.
     """
 
     def __init__(self, fetch) -> None:

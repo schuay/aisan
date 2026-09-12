@@ -296,8 +296,8 @@ class Session:
         """Return a gRPC status trailer instead of an HTTP error.
 
         Siso treats an HTTP error as a retryable transport failure. A gRPC status
-        reports the policy or authentication failure and stops retries. The
-        message is written for the build log rather than naming internal code.
+        reports the policy or authentication failure and stops retries. Write
+        the message for the build log and omit internal code names.
         """
         down.send_headers(
             stream_id,

@@ -128,7 +128,7 @@ def request_path(request) -> str:
 class RateLimit:
     """Use a token bucket to bound requests from a runaway client.
 
-    This limits faulty loops rather than allocating quota fairly. A monotonic
+    This bounds faulty loops; it doesn't allocate quota fairly. A monotonic
     clock prevents wall-clock changes from creating tokens.
     """
 

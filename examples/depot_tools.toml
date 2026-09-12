@@ -1,46 +1,29 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-# A user bind spec for a Chromium depot_tools checkout, as a worked example of
-# what the four keys are for. Pass it with `aisan claude --binds`, repeat the
-# flag to compose it with a per-project spec, and check the result with
-# `--explain` before it owns a terminal.
+# Example user binds for a Chromium depot_tools checkout. Pass this file with
+# `aisan claude --binds` and inspect the result with `--explain`.
 #
-# Nothing here is knowledge aisan has: the library sees four lists of paths.
-# Adjust them to this host and keep the file wherever your own configuration
-# lives -- it is data, not a preset.
+# Adjust these paths for the host. Repeat `--binds` to add a project-specific file.
 #
-# FOR DEPOT_TOOLS ITSELF, PREFER THE BUILT-IN GRANT:
+# Prefer the built-in depot_tools grant:
 #
 #     aisan claude /path/to/v8 --grant depot_tools
 #
-# It grants everything below -- found on this host rather than written down --
-# plus the environment no bind spec can express: depot_tools' wrappers run
-# `update_depot_tools` on every invocation, which is a `git fetch` the box
-# cannot make, and `gclient --version` then exits 255 with "Couldn't fetch main
-# branch". Turning that off is a value rather than a mount, so it lives in the
-# grant (see `aisan.presets.depot_tools_job.depot_tools_grant`) and not here.
-#
-# This file remains the example of composing your OWN paths, and of what to
-# write when a tree has no grant.
+# The grant discovers these paths and disables depot_tools network updates.
 
 ro = [
     "~/depot_tools",
 ]
 
 overlay = [
-    # vpython's venv store: ~4 GB of interpreters that every `git cl` executes,
-    # shared with the host. ro fails (it takes a lock file even to read) and
-    # absent HANGS (it rebuilds the venv, with no network to do it over), so
-    # warm-to-read and writable-then-discarded is the only binding that works.
-    # The `.1000` suffix is a UID -- replace it with your own (`id -u`), or the
-    # overlay source does not exist and assembly refuses with a named
-    # "tmp-overlay source missing" rather than serving.
+    # vpython locks this cache even for reads. The overlay supplies the warm host
+    # cache, keeps box writes private, and avoids an offline rebuild. Replace
+    # `.1000` with the local uid from `id -u`.
     "~/.cache/vpython-root.1000",
 ]
 
 path = [
-    # Bound and unresolvable is half a grant: without this, `git cl` is not a
-    # command and `vpython3` is not on the PATH the wrappers look it up on.
+    # Make the mounted depot_tools commands discoverable.
     "~/depot_tools",
 ]

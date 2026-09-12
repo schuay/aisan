@@ -314,8 +314,8 @@ class Box:
             )
 
         # Check credentials against the finished mount list, including the fixed
-        # system surface and library-added binds. Backends own the protected
-        # paths, so this check belongs after composition rather than in BoxSpec.
+        # system surface and library-added binds. This runs after composition
+        # because backends own the protected paths.
         for backend in self.spec.egress:
             hit = sandbox.exposed_path(backend.credentials)
             if hit is not None:

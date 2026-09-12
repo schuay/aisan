@@ -179,8 +179,8 @@ class ReapiBackend(Backend):
     async def serve(self, runtime_dir: Path) -> AsyncIterator[None]:
         """Serve RBE for the duration of the box.
 
-        Fail startup rather than silently forcing offline builds that may take
-        10 to 30 minutes longer.
+        Raise during startup so builds don't silently fall back to an offline
+        mode that may take 10 to 30 minutes longer.
         """
         sock = self.socket_path(runtime_dir)
         sock.unlink(missing_ok=True)

@@ -43,8 +43,8 @@ absent shared tool cache can cause an offline rebuild to hang. Cases requiring
 different behavior use the Python API; the TOML format has no per-path
 `optional` setting.
 
-`path` names directories rather than arbitrary environment values. Every entry
-must be covered by a mount from the merged include tree, so it adds no filesystem
+`path` accepts only directories. Every entry must be covered by a mount from the
+merged include tree, so it adds no filesystem
 access. It only makes an already mounted tool discoverable without symlinks that
 could break argv0-relative bootstrap logic.
 
@@ -59,8 +59,8 @@ hide the credential. `Box._sandbox` separately evaluates the finished mount
 order, covering both user files and hand-built specs.
 
 The guard also rejects credentials owned by other known backends. For example,
-a Claude box must not receive `~/.codex` simply because Codex is absent from its
-egress tuple. It applies the same rule to `~/.ssh` and `~/.gnupg`.
+a Claude box must keep `~/.codex` out even when Codex isn't in its egress tuple.
+The same rule covers `~/.ssh` and `~/.gnupg`.
 
 This loader does not add Git-specific binds. Interactive sessions treat the
 entire root as belonging to the session. Hand-built specs that need a linked
@@ -203,7 +203,7 @@ def _load(
     # Because keys emit in fixed order, a broad writable path could cover an
     # earlier nested read-only path or overlay. That would make the nested path
     # writable and could send overlay writes to the host. Reject overlaps within
-    # one file rather than guessing a different order. Cross-file shadowing
+    # one file so its fixed key order stays unambiguous. Cross-file shadowing
     # remains the documented include behavior.
     emitted = [
         (key, p, Path(os.path.normpath(p))) for key in _MOUNT_KEYS for p in mounts[key]

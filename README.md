@@ -1,25 +1,22 @@
 # aisan
 
-aisan runs a coding agent with everything in the box: the harness, its
-state, and your repo. Nothing else. The box has no network route and
-holds no credential. Model calls still work: each harness gets a host-side
-proxy that checks requests against an allowlist and attaches the real
-credential to traffic the box never sees.
+aisan runs a coding agent, its state, and your repository inside a box. The box
+has no network route or credentials. Model calls pass through a host-side proxy
+that checks each request and adds the real credential.
 
 ```sh
 python -m pip install aisan   # or: uv tool install aisan
 aisan claude /path/to/repo
 ```
 
-That is a normal interactive Claude Code session (`aisan codex` and
-`aisan opencode` work the same way), with three differences:
+The command starts an interactive Claude Code session. `aisan codex` and
+`aisan opencode` provide the same confinement:
 
-- **Zero credentials in the box.** `~/.claude/.credentials.json` is never
-  mounted. The token the client sees is a per-box placeholder; the proxy
-  drops it and attaches the host's real credential: the subscription login
-  by default, or a static API key with `--api-key`. A test asserts from
-  inside a real box that the credential file does not exist.
-- **Zero network by default.** The box gets its own network namespace with no
+- **No credentials in the box.** `~/.claude/.credentials.json` is never
+  mounted. The client sends a per-box placeholder, and the proxy replaces it
+  with the host subscription login or the static API key selected by
+  `--api-key`.
+- **No network by default.** The box gets its own network namespace with no
   route off the machine. The one egress is a loopback relay to the model
   proxy over a Unix socket. `--net` opts back into host networking when a
   task needs it; credential files stay unmounted and model calls still pass
@@ -39,7 +36,7 @@ The same three commands, run on the host and then from inside the box:
        alt="On the host, reading the credential file, listing ~/.ssh, and fetching https://example.com all succeed. Inside an aisan box with permissions bypassed, the agent runs the same three and each one fails: no credential file, no key directory, no DNS.">
 </p>
 
-## Nothing on faith: `--explain`
+## Inspecting profiles with `--explain`
 
 Every launcher takes `--explain`: it prints the resolved profile and the
 exact Bubblewrap argv from the same `Box` object used to launch, then exits.
@@ -97,34 +94,27 @@ overlay = ["~/.cache/vpython-root.1000"]
 path    = ["~/depot_tools"]
 ```
 
-The `path` key grants nothing on its own: every entry must be covered by a
-mount the same file names. `include` pulls in other spec files, expanded in
-place and before the including file's own keys, so a growing collection
-composes in an order the files state rather than one the command line
-implies. [`examples/depot_tools.toml`](examples/depot_tools.toml) is a worked
-example with the reasoning written down.
+The `path` key grants no filesystem access. Each entry must be covered by a
+mount in the same file. `include` expands other spec files in place before the
+including file's keys, which makes precedence explicit.
+[`examples/depot_tools.toml`](examples/depot_tools.toml) shows a complete file.
 
 ## As a library: unattended API jobs
 
-The same mechanism drives headless workloads. A preset is a pure
-`args -> BoxSpec` function; `Box` compiles the spec, starts the backends, and
-returns argv. The Vertex backend mints short-lived tokens host-side through
-ADC impersonation, so a batch job's box carries no Google credential either.
-This package was extracted from an autonomous patch pipeline that runs
-model-driven build/test jobs against V8 worktrees; that pipeline remains its
-first consumer.
+The same mechanism supports headless workloads. A preset maps arguments to a
+`BoxSpec`; `Box` compiles the spec, starts its backends, and returns the command
+arguments. The Vertex backend uses ADC impersonation to mint short-lived tokens
+on the host, so batch boxes don't receive Google credentials.
 
-The REAPI transport is the largest specialized core component. Remote build
-clients such as siso can speak plaintext HTTP/2 to a local endpoint while the
-real bearer stays on the host. It checks `:authority` and `:path` together,
-injects credentials per HTTP/2 stream, and refuses in gRPC's own terms so a
-policy decision is not mistaken for a retryable network failure.
+Remote build clients such as Siso use plaintext HTTP/2 to a local REAPI
+endpoint while the bearer stays on the host. The proxy checks `:authority` and
+`:path`, adds credentials per stream, and returns policy refusals as gRPC
+errors.
 
 ## Design rules
 
-- **`BoxSpec`** is frozen, non-defaulting data. A reviewer can read a call site
-  and see what is mounted without simulating default resolution. `Limits` is
-  the exception: an unset resource cap is not an unstated mount.
+- **`BoxSpec`** is frozen, non-defaulting data. Call sites state every mount.
+  `Limits` may leave resource caps unset.
 - **One ordered bind list, later wins**, matching Bubblewrap's mount behavior.
   `Bind`, `Seal`, `Overlay`, and `BindOver` read top to bottom.
 - **Credential-aware egress in both network modes.** Isolated boxes reach host
@@ -133,16 +123,13 @@ policy decision is not mistaken for a retryable network failure.
   a private runtime file supplies the per-session proxy token without placing it
   in process arguments.
 - **Fail-closed request policy.** A policy exception denies the request. Refusal
-  messages name the policy reason rather than an internal callback.
-- **Presets as pure `args -> BoxSpec` functions**, rather than project switches
-  hidden inside the sandbox compiler.
+  messages state the policy reason and omit internal callback names.
+- **Presets are pure functions** from arguments to `BoxSpec` values.
 
-The model- and client-neutral core is roughly 3,100 lines of Python. That count
-covers `BoxSpec`, the sandbox compiler, git bind policy, lifecycle and launcher,
-inspection, the backend interface, relay, fail-closed policy, and the REAPI
-transport. Provider/client adapters, presets, interactive session launchers,
-and MCP importers are integrations outside that core count. The number is an
-audit bound, not a comparison with another project's total source size.
+The model-neutral core covers `BoxSpec`, sandbox compilation, Git bind policy,
+lifecycle, inspection, backend interfaces, relays, request policy, and REAPI.
+Provider adapters, client presets, interactive launchers, and MCP importers are
+separate integrations.
 
 ## Requirements
 
@@ -198,16 +185,10 @@ some tree needs inside a box with no network route.
 aisan claude /path/to/v8 --grant depot_tools
 ```
 
-Today the one grant is `depot_tools`, which supplies the checkout found through
-`autoninja` on your PATH, vpython's venv store as an overlay, and the two
-variables that stop depot_tools reaching for a network it has not got --
-without the first of them `gclient` exits 255 on a `git fetch` it cannot make,
-which reads as a broken checkout. The environment is why this is a grant rather
-than a bind spec: a `--binds` file names paths, and the value that turns off an
-auto-update is not one. Grants are applied before `--binds`, so a user file
-still shadows them, and `--explain` renders the result. The name is not
-tool-specific on purpose -- a CA bundle and the variable naming it, or a device
-node and the library path that finds it, are the same shape.
+The `depot_tools` grant finds the checkout through `autoninja`, overlays the
+vpython cache, and disables network-dependent updates and presubmit checks.
+These environment settings require a grant because bind files contain paths
+only. Grants apply before `--binds`, so user files retain precedence.
 
 Runtime dependencies are limited to `aiohttp` and `h2`. The Google credential
 chain is optional. A boundary test walks the package AST and fails when a module
@@ -254,26 +235,20 @@ taking the tokens after the command name and returning an exit status, with
 `LaunchRefused` handled by the dispatcher. Everything else a plugin imports
 from `aisan` is internal and may change between versions.
 
-Four rules the dispatcher enforces:
+The dispatcher enforces four rules:
 
-- **Built-ins are not overridable.** Installing a plugin installs its whole
-  dependency closure, and any distribution in it can register in this group
-  though only the plugin was trusted. A claim on `claude`, `codex`, `opencode`
-  or `explain` is refused and reported.
+- **Plugins can't override built-ins.** Claims on `claude`, `codex`, `opencode`,
+  or `explain` are refused and reported.
 - **Discovery costs nothing on the built-in path.** The group is read only when
   the first token names no built-in, and when help is printed. `aisan claude`
   scans no metadata and imports no plugin.
-- **A broken plugin is not a broken aisan.** The import happens on the path
-  that asked for it; a failure names the plugin and leaves every other command
-  working.
-- **Duplicate names resolve by sorting**, not by `sys.path` order, and the
-  plugin that loses is named.
+- **Plugin failures are isolated.** A failed import names the plugin and leaves
+  other commands working.
+- **Duplicate names resolve by provider name.** The losing plugin is reported.
 
-Plugins get no separate audit path: `--explain` belongs to the launcher, so a
-plugin that builds a box should accept it and print the resolved profile the
-same way the built-in launchers do. Note also that aisan binds its own venv
-read-only into every box with egress, so a plugin installed beside it is
-readable from inside the box.
+Plugins that build boxes should support `--explain` and print the resolved
+profile like built-in launchers. Aisan's read-only runtime binds also make
+plugins installed in the same environment readable inside boxes with egress.
 
 ## Relationship to sandbox-runtime
 

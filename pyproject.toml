@@ -18,31 +18,22 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
 ]
-# Deliberately thin and standalone: the package owns its bind model and
-# resolves without a sibling checkout.
+# Keep the package installable without a sibling checkout.
 dependencies = [
-    # aiohttp serves allowlisted HTTP proxies; h2 serves the plaintext HTTP/2
-    # REAPI transport. h2 pulls hpack itself, which we do not import directly.
+    # aiohttp serves HTTP proxies; h2 serves the plaintext REAPI transport.
     "aiohttp>=3.9",
     "h2>=4.1",
 ]
 
 [project.optional-dependencies]
-# Google ADC impersonation for Vertex. RBE credential minting invokes the
-# external luci-auth command and does not need this Python extra.
+# Vertex uses Google ADC impersonation. RBE invokes external luci-auth.
 google-auth = [
-    # The [requests] extra, not bare google-auth: `mint` refreshes the
-    # impersonated credential through google.auth.transport.requests, which
-    # raises ImportError at IMPORT time when the requests package is absent.
-    # google-auth does not pull it in itself, and inside a workspace something
-    # else always had, so this only shows up on a standalone install -- which is
-    # the one this package claims to support.
+    # Credential refresh imports google.auth.transport.requests at import time.
     "google-auth[requests]>=2.0",
 ]
 
 [project.scripts]
-# The box uses its in-package launcher by absolute interpreter path. `aisan`
-# is the human-facing entry point; the box launcher remains a low-level helper.
+# Boxes invoke the low-level launcher through an absolute interpreter path.
 aisan = "aisan.cli.main:main"
 aisan-box-launch = "aisan.launch:main"
 
@@ -62,19 +53,13 @@ build-backend = "hatchling.build"
 packages = ["src/aisan"]
 
 [tool.hatch.build.targets.sdist]
-# Harness instruction files are checkout-local guidance commonly kept in
-# .git/info/exclude. Hatchling's sdist discovery does not honor that
-# per-checkout exclude file.
+# Hatchling doesn't honor checkout-local .git/info/exclude entries.
 exclude = ["/AGENTS.md", "/CLAUDE.md", "/GEMINI.md"]
 
-# Lint policy is carried here so standalone checkouts apply it consistently.
-#
-# Ruff is deliberately not pinned, so a new release can surface findings in code
-# that has not changed. The backlog stays at zero; rules this project does not
-# adopt are disabled here with a reason rather than scattered inline suppressions.
+# Keep lint policy in one place and allow new Ruff releases to surface findings.
 [tool.ruff.lint]
 extend-select = [
-    "B",      # bugbear: real mistakes, not style
+    "B",      # bugbear correctness checks
     "BLE",    # blind except -- see the ignore below
     "C4",     # comprehension misuse
     "DTZ",    # naive datetimes: this codebase has been bitten by expiry handling
@@ -89,69 +74,44 @@ extend-select = [
     "UP",     # pyupgrade
 ]
 ignore = [
-    # Blind `except Exception` is the intended shape at this codebase's
-    # boundaries: callbacks that must not fail a turn, best-effort artifact
-    # writes, or input that must be quarantined rather than crash the loop.
-    # Every such site logs and explains itself; narrowing them would mean
-    # enumerating exception types from libraries that do not document them, and
-    # the failure mode of missing one is exactly what these guards exist to stop.
-    # S110 (try/except/pass) stays ENABLED -- silent is the part we do not want.
+    # Boundary callbacks and best-effort cleanup must contain undocumented
+    # library exceptions. S110 still rejects silent handlers.
     "BLE001",
     # Asserts in tests are the point.
     "S101",
-    # Function-level imports keep optional dependencies optional and break
-    # otherwise-unnecessary import cycles at process boundaries.
+    # Local imports preserve optional dependencies and process-boundary cycles.
     "PLC0415",
-    # A literal in an assertion IS the specification; naming it moves the fact
-    # away from the check that reads it.
+    # Assertion literals state expected values directly.
     "PLR2004",
-    # Message-in-raise is how these exceptions are read in logs and tracebacks;
-    # hoisting every one to a constant would make them harder to follow, not
-    # easier.
+    # Inline exception messages stay beside their conditions.
     "TRY003",
-    # Argument counts, branch/statement counts: these flag real complexity, but
-    # the fix is a refactor with its own risk. Left off rather than suppressed
-    # inline, so the decision is visible and revisitable in one place.
+    # Complexity refactors need separate review instead of inline suppressions.
     "PLR0913",
     "PLR0917",
     "PLR0912",
     "PLR0915",
     "PLR0911",
-    # log.error vs log.exception is a judgement call the rule cannot make: a
-    # timeout has no informative traceback, and the parse-error sites already
-    # carry the exception in the message.
+    # Timeouts have no useful traceback; parse errors already include the error.
     "TRY400",
     # google-auth exposes credential expiry as naive UTC. Normalising that
     # third-party value is safer than mixing aware and naive datetimes.
     "DTZ001",
     "DTZ006",
     "DTZ007",
-    # Unicode dashes appear only as DATA -- a regex character class that
-    # normalizes them, and the test asserting it does.
+    # A normalization regex intentionally contains Unicode dash data.
     "RUF001",
-    # dict(...) with kwargs is sometimes the clearer form, e.g. when it mirrors
-    # the attribute names of the thing it fakes.
+    # Keyword-form dicts can mirror the attributes of test doubles.
     "C408",
-    # subprocess with a bare "git" and a constructed argv: PATH lookup is
-    # intended (the box and the host resolve different git binaries), and every
-    # argv here is built from validated internal values, not user input.
+    # Host and box commands intentionally resolve Git through different PATHs.
     "S603",
     "S607",
-    # B027 wants @abstractmethod on Backend.prepare/preflight. They are empty ON
-    # PURPOSE -- the docstrings say so -- because most backends need neither, and
-    # making them abstract would force every backend to write two empty overrides
-    # to say "nothing to prepare". A backend that mints overrides preflight
-    # because it has something to check, not because the base class compels it.
+    # Most backends need no prepare or preflight override.
     "B027",
-    # SIM102 fires on one `elif isinstance(...)` arm of the h2 event dispatch
-    # whose body is `if cid is not None:`. Every sibling arm has the same shape,
-    # and collapsing this one alone would hide that they are the same dispatch.
+    # Keep every h2 event-dispatch arm in the same visual form.
     "SIM102",
 ]
 
-# Per-path exceptions, kept narrow. A rule switched off for src/ too would be a
-# real loss of coverage; these are cases where the rule's assumption does not
-# hold for test code.
+# Keep test-only exceptions from reducing source coverage.
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = [
     "S105",  # "token"/"password" literals in fixtures are fake by construction
@@ -160,20 +120,16 @@ ignore = [
     "S103",  # chmod 0o755 to set up a permissions fixture
     "S603",  # subprocess in a test harness, with fixed argv
     "S607",
-    "B017",  # a bare-Exception assertRaises is sometimes exactly the assertion
-    "RUF012",  # dataclass-ish test doubles carry mutable defaults by design
-    "ASYNC221",  # a git fixture in an async test is setup, not I/O under test
+    "B017",  # some tests assert an arbitrary callback failure
+    "RUF012",  # test doubles use shared mutable fixtures
+    "ASYNC221",  # synchronous Git calls prepare async tests
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-# A default run asserts on this package, never on whichever build of a vendor's
-# agent CLI the host happens to have. Those tests measure a moving wire format
-# against a binary nobody here upgraded, so an unrelated release turns the suite
-# red for code that did not change -- and a machine with an older build turns it
-# green for a shape that no longer ships. Run them deliberately, when pinning a
-# new client version: `pytest -m live` (a command-line -m replaces this one).
+# Default runs exclude host-installed agent CLIs with version-dependent wire
+# formats. Run them while pinning a client version with `pytest -m live`.
 addopts = "-m 'not live'"
 markers = [
     "live: spawns a third-party agent CLI installed on the host",

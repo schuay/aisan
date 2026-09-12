@@ -41,7 +41,7 @@ DEFANG_ENV = {
 }
 
 # An inner aisan needs a private root outside the sealed host default. Keep this
-# separate from DEFANG_ENV because it serves nesting rather than build tools.
+# separate from DEFANG_ENV because it serves nested boxes.
 # The spec applies it explicitly so `explain` shows the effective value.
 NESTING_ENV = {"AISAN_PRIVATE_ROOT": str(nested_root())}
 
@@ -81,8 +81,7 @@ class Grant:
 
     `env` carries requirements that mounts cannot express. For example, an
     offline tool may need an environment variable that disables its updater.
-    Such settings belong with the tool's mounts rather than in each operator's
-    configuration.
+    Keep these settings with the tool's mounts so operators don't duplicate them.
     """
 
     binds: tuple[BindSpec, ...] = ()

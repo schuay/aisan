@@ -264,8 +264,8 @@ def _reachable_through(mounts: list[Mount], path: Path) -> tuple[Path, ...]:
 
     Resolve sources because they belong to the host filesystem, where symlink
     aliases identify the same data. Keep destinations literal because they
-    belong to the box. bwrap rejects a symlink destination rather than following
-    it, so host-side resolution would invent masks that the box never receives.
+    belong to the box. bwrap rejects symlink destinations, so host-side
+    resolution would invent masks that the box never receives.
     """
     target = _resolved(path)
     visible: dict[Path, Path] = {}
@@ -464,8 +464,7 @@ class Sandbox:
         * A requested `/usr` bind compiles to no operation because the system
           surface already mounted it.
 
-        The final mount order, rather than a bind's spelling, therefore decides
-        whether to refuse the box.
+        The final mount order decides whether to refuse the box.
         """
         mounts = [*_system_mounts(), *self.resolve()]
         allowed = tuple(_resolved(p) for p in allowed_sources)

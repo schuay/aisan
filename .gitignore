@@ -5,9 +5,8 @@ __pycache__/
 .ruff_cache/
 .coverage
 
-# Personal commit-message policy; kept local while core.hooksPath is .githooks.
+# Keep personal commit-message policy local while using .githooks.
 /.githooks/commit-msg
 
-# This library does not publish a locked application environment. Regenerated
-# locally by uv sync.
+# This library doesn't publish an application lockfile. `uv sync` regenerates it.
 /uv.lock

@@ -114,8 +114,8 @@ def read_sealed_object(path: Path) -> dict:
     """Read a JSON object safely, returning an empty object for invalid input.
 
     Seed writers merge their keys into files that boxed clients can also change.
-    Missing, replaced, malformed, and non-object files are rebuilt rather than
-    preventing every later launch.
+    Rebuild missing, replaced, malformed, and non-object files so later launches
+    can continue.
     """
     text = read_sealed_text(path)
     if not text:

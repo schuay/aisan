@@ -33,7 +33,7 @@ CLIENT_ENV_NAME = "client-env.json"
 def runtime_dir(box_id: str) -> Path:
     """Return the box's runtime directory, named with a digest of its ID.
 
-    The digest bounds path length rather than hiding the ID. Linux limits UNIX
+    The digest bounds path length; it doesn't conceal the ID. Linux limits Unix
     socket paths to 108 bytes, while caller-provided IDs are unbounded. A path
     such as ``/tmp/aisan-UID/proxy-XXXX`` leaves room for socket file names.
 
@@ -64,7 +64,7 @@ def cleanup_runtime_dir(box_id: str) -> None:
     """Remove the directory once its last file is gone.
 
     Removal is best-effort and succeeds only when the directory is empty. An
-    unexpected file is preserved rather than deleted.
+    unexpected file prevents removal and remains intact.
     """
     with contextlib.suppress(OSError):
         runtime_dir(box_id).rmdir()
