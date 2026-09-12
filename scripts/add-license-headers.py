@@ -2,11 +2,9 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Stamp the MIT header onto every source file that can carry a comment.
+"""Add the MIT header to tracked source files that support comments.
 
-Run over a repo root; idempotent, so it doubles as the tool you re-run after
-adding files. Only formats with `#` comments are touched. JSON and Markdown do
-not receive inline headers; the top-level LICENSE covers them.
+The operation is idempotent. JSON and Markdown rely on the top-level LICENSE.
 
     scripts/add-license-headers.py .. --check     # CI/pre-commit: report only
 """
@@ -21,41 +19,32 @@ from pathlib import Path
 
 HEADER = "# Copyright 2026 The aisan developers\n# SPDX-License-Identifier: MIT\n"
 
-# The marker that makes a re-run a no-op. Matching on the SPDX line rather than
-# the whole header means a file whose copyright line was later edited by hand
-# (a vendored file, a different holder) is left alone instead of accumulating a
-# second header. Anchored to a comment at line start because a file that merely
-# names the marker in prose has no header -- this one did exactly that and went
-# unstamped.
+# Match the anchored SPDX line so edited copyright holders don't receive a
+# duplicate header. Mentions of SPDX elsewhere in the file don't count.
 MARKER = re.compile(r"^# SPDX-License-Identifier:")
 
-# How far into a file a header may start (shebang, or an already-correct header).
+# Allow room for a shebang before the header.
 HEAD_LINES = 4
 
 SUFFIXES = {".py", ".toml", ".sh", ".service"}
 NAMES = {"Dockerfile"}
 
-# Generated, so a header would be clobbered on regeneration.
+# Generated files lose manual headers during regeneration.
 EXCLUDE_NAMES = {"uv.lock"}
 
 
 def is_candidate(path: Path) -> bool:
-    """Whether this file takes a header at all.
-
-    The single home of that rule, so the pre-commit hook can hand over every
-    staged path and let this decide rather than re-encoding the format list in
-    bash, where it would drift.
-    """
+    """Return whether ``path`` should carry a header."""
     if path.name in EXCLUDE_NAMES:
         return False
-    # Submodule contents are the other repo's business -- it gets its own run.
+    # Vendored sources retain their upstream headers.
     if "vendor" in path.parts:
         return False
     return path.suffix in SUFFIXES or path.name in NAMES
 
 
 def problem(path: Path) -> str | None:
-    """The header defect in this file, or None if it is correct."""
+    """Return the header defect in ``path``, if any."""
     lines = path.read_text().split("\n")
     for i, line in enumerate(lines[:HEAD_LINES]):
         if MARKER.match(line):
@@ -66,9 +55,8 @@ def problem(path: Path) -> str | None:
 
 
 def targets(root: Path) -> list[Path]:
-    # -z and split on NUL: `ls-files` output split on whitespace breaks any path
-    # with a space in it. is_file() drops entries git lists but the tree does not
-    # have (a deleted-but-staged file, a submodule).
+    # NUL separation preserves spaces. is_file() drops deleted index entries and
+    # submodules.
     out = subprocess.run(
         ["git", "ls-files", "-z"],
         cwd=root,
@@ -84,23 +72,20 @@ def targets(root: Path) -> list[Path]:
 
 
 def stamp(path: Path) -> bool:
-    """Insert the header. Returns False if the file already had a correct one."""
+    """Insert or repair the header and report whether the file changed."""
     text = path.read_text()
-    # A shebang has to stay on line 1 or the kernel stops honouring it.
+    # The kernel requires the shebang on the first line.
     prefix = ""
     if text.startswith("#!"):
         shebang, _, text = text.partition("\n")
         prefix = f"{shebang}\n"
 
     lines = text.split("\n")
-    # Only the head matters: a file that mentions SPDX further down is quoting
-    # it (a test fixture, a doc string), not carrying a header.
+    # SPDX text below the header area may be documentation or test data.
     for i, line in enumerate(lines[:HEAD_LINES]):
         if not MARKER.match(line):
             continue
-        # Already stamped, so the only thing left to enforce is the separator.
-        # This branch is what migrates the files stamped before the blank line
-        # was the convention; it is a no-op on everything else.
+        # Add the separator required after an existing header.
         if i + 1 < len(lines) and lines[i + 1].strip():
             lines.insert(i + 1, "")
             path.write_text(prefix + "\n".join(lines))
@@ -135,16 +120,12 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.files is not None:
-        # An empty --files means the caller's paths were swallowed by another
-        # flag rather than that there was nothing to check: a greedy nargs="*"
-        # option takes nothing when the next token is an option, and the paths
-        # then fall through to the `root` positional. Exiting 0 there would make
-        # the hook a silent no-op -- the one failure a guard must not have.
+        # Empty --files usually means argparse assigned paths to another greedy
+        # option. Refuse instead of silently skipping the hook.
         if not args.files:
             ap.error("--files got no paths; pass them last, after every flag")
         bad = 0
-        # A staged path can be gone by now (renamed, or a hook run on a partial
-        # index), which is not a header defect -- skip rather than crash.
+        # Skip staged paths deleted or renamed before the hook runs.
         for path in args.files:
             if not is_candidate(path) or not path.is_file():
                 continue
@@ -153,8 +134,7 @@ def main() -> int:
                 bad += 1
                 if args.fix:
                     stamp(path)
-        # Nonzero even after --fix: the fix landed in the worktree, not the
-        # index, so committing now would still record the unstamped blob.
+        # --fix changes the worktree; fail so callers re-stage the file.
         return 1 if bad else 0
 
     if not args.root:
