@@ -1,27 +1,12 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Say what a box is, in the terms bwrap will actually apply.
+"""Describe the effective bubblewrap confinement profile.
 
-The audit artifact. A confinement profile is only as good as somebody's ability
-to check it against intent, and a bind list in Python source is not that: the
-question is always "what does the box END UP with", which is a function of mount
-ORDER, of hoisting, of which optional sources happen to exist on this host, and
-of two deferred remounts that sit far from the thing they seal.
-
-So this renders the resolved list and then the exact argv, and it renders them
-from the same `BoxSpec` the real path uses -- never from a second construction
-that agrees with the first only until someone edits one of them. That fidelity
-is the whole reason the mode catches drift, and it is why `Box.staged()` exists:
-describing a profile must put the same files on disk the real path does, without
-minting a credential or opening a socket.
-
-Two readings, deliberately both:
-
-- the classified mount list, which is how a human checks the policy (what is
-  writable, what is pinned ro on top of it, what is sealed);
-- the argv, which is what actually happens, and the thing a snapshot test can
-  hold still.
+Mount order, optional sources, hoisting, and deferred remounts determine the
+final filesystem view. Reports use the same staged ``BoxSpec`` as a real launch
+and show both a classified mount list and the exact argument vector. Staging
+creates bind sources without minting credentials or opening sockets.
 """
 
 from __future__ import annotations
@@ -36,8 +21,7 @@ from .sandbox import Sandbox
 
 @dataclass(frozen=True)
 class MountLine:
-    """One mount spec read back out of the wrapper argv. `path` is the mount
-    destination; for binds src==dst at the real absolute path."""
+    """A mount parsed from the wrapper arguments, keyed by destination path."""
 
     kind: str  # system | proc | dev | symlink | ro | ro-pin | ro-shadow | ro-sub
     #           | rw-root | rw | tmpfs | overlay | seal-ro
@@ -46,13 +30,9 @@ class MountLine:
     size: str | None = None  # tmpfs only
 
 
-# Kind -> ANSI, grouped by what a reviewer scans FOR, never decoration:
-#   red/bold  the box can write here, and the one it must not miss -- ro-shadow,
-#             an ro bind a later rw defeats, reads as protected but is writable;
-#   yellow    writable by design (the rw root, binds, tmpfs, overlay);
-#   green     a guard doing its job (a pin, a seal);
-#   cyan      a substitution -- the box reads a DIFFERENT file than the host's;
-#   dim       inert surface (plain ro, the fixed system mounts).
+# Colors distinguish effective access: red for a shadowed read-only bind, yellow
+# for writable mounts, green for guards, cyan for substitutions, and dim for
+# fixed or read-only surface.
 _KIND_ANSI = {
     "ro-shadow": "1;31",
     "rw-root": "33",
@@ -69,18 +49,12 @@ _KIND_ANSI = {
     "symlink": "2",
 }
 
-# The fixed system surface, collapsed to one disclosed line: identical in every
-# box, so per-line it is noise between a reviewer and the policy. Named, not
-# hidden -- a change to it still shows as a changed path in the one line.
+# Collapse the fixed system surface into one line while retaining its paths.
 _SURFACE_KINDS = frozenset({"system", "proc", "dev", "symlink"})
 
 
 def _kind_field(kind: str, color: bool, width: int = 9) -> str:
-    """The kind column, padded to `width`, wrapped in its colour when `color`.
-
-    Padded before colouring so the ANSI bytes never enter the column math and
-    the paths stay aligned; plain and identical to the old output when off, so
-    a pipe or a snapshot sees no escape codes."""
+    """Format a padded mount kind with optional ANSI color."""
     field = f"{kind:<{width}}"
     ansi = _KIND_ANSI.get(kind)
     return f"\x1b[{ansi}m{field}\x1b[0m" if color and ansi else field
@@ -95,12 +69,11 @@ class Profile:
 
 
 def _policy_dests(sb: Sandbox) -> set[Path]:
-    """Mount destinations the profile's own bind list asks for.
+    """Return destinations from the profile's bind list.
 
-    Everything else in the argv came from the fixed system surface (/usr, /etc,
-    the journal socket), which is emitted outside the list. Distinguishing them
-    by membership rather than by argv position means the inspector keeps naming
-    them correctly through any reordering."""
+    Other wrapper mounts belong to the fixed system surface. Membership remains
+    accurate if wrapper argument order changes.
+    """
     dests: set[Path] = set()
     for m in sb.resolve():
         try:
@@ -111,21 +84,11 @@ def _policy_dests(sb: Sandbox) -> set[Path]:
 
 
 def _pins_and_shadows(sb: Sandbox) -> tuple[set[Path], set[Path]]:
-    """The two ways an ro bind is not what "ro" alone says, read off the ORDER.
+    """Classify read-only mounts affected by a covering writable mount.
 
-    Both are security-relevant and both are invisible in a flat "ro" label, so a
-    reviewer scanning a dump has to see them named:
-
-    - a PIN is an ro bind written after an rw one that covers it -- the .git
-      config guards. The box has it read-only, protecting a writable region.
-    - a SHADOW is the reverse: an ro bind that a LATER writable mount (rw, tmpfs
-      or overlay) covers, so the box actually has it WRITABLE. Labelling that
-      "ro" is the misleading rendering the audit flagged -- the reviewer reads
-      protection where there is none.
-
-    Mutually exclusive for one destination (the covering rw is either before it
-    or after it), and both come from the resolved order rather than a field, so
-    neither can disagree with the box the argv builds.
+    A later read-only mount pins a path inside a writable region. A later
+    writable mount shadows the earlier read-only mount. Derive both sets from
+    resolved mount order.
     """
     mounts = sb.resolve()
     resolved = [(m, Path(m.dst).resolve()) for m in mounts]
@@ -149,14 +112,11 @@ def _pins_and_shadows(sb: Sandbox) -> tuple[set[Path], set[Path]]:
 
 
 def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
-    """Tokenize the bwrap argv into classified mounts + env. Recognizes only
-    the spec forms `Sandbox` emits (--size/--tmpfs, --ro-bind/--bind S D,
-    --overlay-src S --tmp-overlay D, --remount-ro D, --setenv K V, --chdir P);
-    anything else is skipped.
+    """Parse supported sandbox arguments into mounts, environment, and cwd.
 
-    The argv is what bwrap is actually handed, so ordering here is the real
-    precedence; the resolved list is consulted only to name the ro binds that
-    are pins."""
+    Argument order defines mount precedence. The resolved bind list identifies
+    read-only pins and profile mounts.
+    """
     mounts: list[MountLine] = []
     env: dict[str, str] = {}
     chdir = ""
@@ -167,9 +127,7 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
     while i < n:
         a = argv[i]
         if a == "--tmpfs" and i + 1 < n:
-            # Emitted as `--size N --tmpfs MNT`, so the cap sits two tokens
-            # back and its value one; not all tmpfs carry one (a seal's does
-            # not), so look it up defensively.
+            # A size, when present, immediately precedes --tmpfs.
             size = argv[i - 1] if i >= 2 and argv[i - 2] == "--size" else None
             mounts.append(MountLine("tmpfs", argv[i + 1], i, size))
             i += 2
@@ -177,16 +135,13 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
             mounts.append(MountLine("overlay", argv[i + 1], i))
             i += 2
         elif a == "--remount-ro" and i + 1 < n:
-            # The second half of a seal: the tmpfs above went down empty, this
-            # closes it once the holes through it have been mounted.
+            # Seal the empty tmpfs after mounting its allowed descendants.
             mounts.append(MountLine("seal-ro", argv[i + 1], i))
             i += 2
         elif a == "--ro-bind" and i + 2 < n:
             src, dst = argv[i + 1], Path(argv[i + 2])
             if src != argv[i + 2]:
-                # A BindOver: src is substituted at dst, so this is NOT "the
-                # host's dst is mounted" -- the box reads a different file there
-                # (ReapiBackend's /etc/hosts redirect, a per-box .sisoenv).
+                # BindOver substitutes a different source at this destination.
                 kind = "ro-sub"
             else:
                 try:
@@ -211,9 +166,7 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
             mounts.append(MountLine("dev", argv[i + 1], i))
             i += 2
         elif a == "--symlink" and i + 2 < n:
-            # `--symlink TARGET LINKPATH`: the merged-usr links (/bin -> usr/bin)
-            # that stand in for a bound /. Named by the link path, since that is
-            # what exists in the box.
+            # Report merged-usr symlinks by the link path visible in the box.
             mounts.append(MountLine("symlink", argv[i + 2], i))
             i += 3
         elif a == "--bind" and i + 2 < n:
@@ -235,9 +188,7 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
 
 
 def _anc_eq(child: str, ancestor: str) -> bool:
-    """Is `ancestor` equal to or a parent of `child` (both resolved)? The
-    shadowing direction we care about: a later bind whose path covers the tmpfs
-    mount point. is_relative_to is True for equality too."""
+    """Return whether resolved ``ancestor`` contains ``child``, including equality."""
     try:
         return Path(child).resolve().is_relative_to(Path(ancestor).resolve())
     except (OSError, ValueError):
@@ -245,15 +196,12 @@ def _anc_eq(child: str, ancestor: str) -> bool:
 
 
 def assembly_refusal(box: Box) -> Exception | None:
-    """The refusal box assembly raises for this spec, or None if it resolves.
+    """Return the error raised while assembling ``box``, if any.
 
-    `_sandbox()` refuses a box whose mounts would leave a backend credential
-    readable inside it; `wrapper()` refuses a bind whose mandatory source is
-    missing, and mounts that would shadow a tmpfs or the rw root. Both are the finding `--explain` exists to surface: this
-    is where `explain` reads the refusal to render it, and where the CLI reads
-    it to exit nonzero, so a scripted `--explain && run` does not treat a
-    refused profile as a passed review. Both builders are pure, so probing them
-    here mints nothing and opens no socket."""
+    Assembly detects credential exposure, missing required sources, and mounts
+    that shadow tmpfs or the writable root. Both builders are pure, so this
+    check doesn't mint credentials or open sockets.
+    """
     try:
         box._sandbox()
         box.wrapper()
@@ -269,26 +217,17 @@ def explain(
     argv: bool = True,
     color: bool = False,
 ) -> str:
-    """The whole report for `box`, as text.
+    """Render the confinement report for ``box``.
 
-    Text rather than prints, because the two consumers want different things
-    with it: an operator wants it on a terminal, and the snapshot test wants to
-    compare it. A function that printed would force the test to capture stdout,
-    which is the kind of indirection that makes an audit artifact feel optional.
-
-    `inputs` is the caller's own context (which config, which worktree) -- the
-    one section aisan cannot fill in, because the whole point of a preset is
-    that aisan does not know what its arguments meant.
+    ``inputs`` supplies caller-specific context such as the selected config and
+    worktree. Returning text supports both terminal output and snapshot tests.
     """
     out = io.StringIO()
 
     def section(title: str) -> None:
         out.write(f"\n== {title} ==\n")
 
-    # A leak or a missing mandatory source surfaces as a raise from the
-    # builders, not as an argv to inspect. Report it as the finding -- this IS
-    # the diagnosis the mode exists to give, and a traceback would bury it. The
-    # CLI reads the same predicate to exit nonzero.
+    # Assembly failures have no wrapper arguments to inspect, so report the error.
     refusal = assembly_refusal(box)
     if refusal is not None:
         section("BOX ASSEMBLY REFUSED")
@@ -308,10 +247,7 @@ def explain(
     section("inputs")
     for key, value in inputs:
         out.write(f"  {key:<9} {value}\n")
-    # Rendered from unshare_net directly, unconditionally: the network mode is
-    # the box's most consequential boundary, and gating this line on egress once
-    # let a shared-host-network box with no backends print nothing here while the
-    # egress section claimed "no route off the machine".
+    # Always report the network namespace, including boxes without backends.
     if isolated:
         out.write("  network   own namespace (no route off the machine)\n")
     else:
@@ -355,10 +291,7 @@ def explain(
             continue
         out.write(f"  [{m.idx:>3}] {_kind_field(m.kind, color)} {m.path}\n")
 
-    # A seal is two ops far apart in the argv (an empty tmpfs where the directory
-    # was, then a ro remount after the holes through it are mounted), so neither
-    # line alone says "sealed". Name them together or a reader has to reconstruct
-    # the pairing from the ordering.
+    # A seal combines an empty tmpfs with a later read-only remount.
     sealed = [m for m in prof.mounts if m.kind == "seal-ro"]
     if sealed:
         section("sealed directories (empty in the box; nothing creatable)")
@@ -373,9 +306,7 @@ def explain(
         out.write(f"  {k}={effective_env[k]}\n")
 
     if argv:
-        # The exact argv, one token per line. Not shell-quoted: this is a list
-        # bwrap is handed directly, and rendering it as a copy-pasteable command
-        # would invite someone to run a re-parsed approximation of it.
+        # Show direct exec arguments one per line, without shell quoting.
         section("argv (exactly what is exec'd, one token per line)")
         for token in [*wrapper, *box.launch_prefix()]:
             out.write(f"  {token}\n")
@@ -387,19 +318,10 @@ _AISAN_MARK = "  <AISAN RUNTIME>"
 
 
 def _collapse_aisan_runtime(text: str) -> str:
-    """Replace the run of lines describing aisan's own runtime with one marker.
+    """Replace aisan runtime bind lines with one stable marker.
 
-    Aisan binds its interpreter, its venv and its editable source roots into
-    every box, unconditionally (see `Box._sandbox`). How MANY paths that is, and
-    what they are called, is a property of how aisan happens to be installed on
-    this machine -- one site-packages tree for a released install, one line per
-    workspace member for a checkout like this one. It is identical in every box
-    by construction, so it can never be the thing a preset diff changed, and a
-    snapshot carrying it would fail on somebody's install layout while staying
-    green through an actual policy change.
-
-    Matched by asking `launcher_binds` for the paths rather than by pattern, so
-    this collapses exactly what the Box added and nothing that looks like it.
+    Runtime binds depend on installation layout and appear in every box. Query
+    ``launcher_binds`` so only paths added by ``Box`` are collapsed.
     """
     from .launch import launcher_binds
 
@@ -407,14 +329,11 @@ def _collapse_aisan_runtime(text: str) -> str:
     lines = text.split("\n")
     drop = [any(ln.endswith(p) for p in paths) for ln in lines]
     for i, dropped in enumerate(drop):
-        # In the argv section a bind is three lines (--ro-bind, src, dst), so the
-        # flag introducing a dropped path goes with it or a bare --ro-bind is
-        # left behind pointing at nothing.
+        # Remove the bind flag with its source and destination lines.
         if dropped and i and lines[i - 1].strip() in ("--ro-bind", "--bind"):
             drop[i - 1] = True
     out: list[str] = []
-    # strict: drop is built per line above, so a length mismatch would mean
-    # the mask no longer describes the text it is masking.
+    # ``drop`` contains one entry per input line.
     for line, dropped in zip(lines, drop, strict=True):
         if not dropped:
             out.append(line)
@@ -429,33 +348,12 @@ def normalise(
     root: Path | None = None,
     paths: tuple[tuple[Path, str], ...] = (),
 ) -> str:
-    """Replace this host's paths in an explain report with stable placeholders.
+    """Replace host-specific report paths with stable snapshot placeholders.
 
-    For snapshot tests. The report describes one host in four ways and only
-    five: the home directory, the system temp dir, aisan's per-user private root,
-    the checkout the caller passed as the root, and aisan's own runtime binds.
-    None of them is a property of the policy, and all of them differ between a
-    developer machine and CI, so a raw snapshot would fail everywhere except
-    where it was generated -- and a snapshot that fails for a reason nobody
-    caused is a snapshot people regenerate reflexively, which is how a preset
-    drifts behind a green test.
-
-    The mount indices go too. They are byte offsets into an argv whose first
-    thirty-odd tokens are a fixed system preamble, so they carry no information
-    the line ORDER does not already carry, and they shift wholesale when
-    anything earlier gains a mount -- turning one real change into a diff
-    against every line below it.
-
-    `paths` is the caller's own: a profile names paths aisan cannot classify,
-    because it does not know what they meant. The V8 preset's is the sibling
-    MAIN checkout, reached through the worktree's dep symlinks and its .git --
-    under $HOME on a real host, so covered, but under a per-run temp dir in a
-    test, where nothing built in would catch it. Applied under the same
-    longest-first rule as the rest, so a caller path inside $HOME still wins.
-
-    Deliberately NOT normalised: mount order, mount kinds, sizes, env values,
-    and the bwrap flags. Those are the policy. If one of them changes, the test
-    is supposed to fail.
+    Normalize home, temp, private root, checkout, runtime, interpreter, caller
+    paths, and mount indices. Preserve mount order, kinds, sizes, environment
+    values, and bubblewrap flags because they define the policy. Apply path
+    replacements longest first so nested caller paths retain their own labels.
     """
     import re
     import sys
@@ -468,29 +366,17 @@ def normalise(
 
     subs = [
         *((str(Path(p).resolve()), name) for p, name in paths),
-        # The launcher's interpreter, which appears in the argv of any box with
-        # egress (`<python> -m aisan.launch`). Same reasoning as the runtime
-        # binds `_collapse_aisan_runtime` drops: it is wherever aisan happens to
-        # be installed -- a checkout's venv here, a vendored submodule's venv in
-        # a consumer -- so a snapshot carrying it fails for whoever runs the
-        # suite from the other one. The token stays, because "a launcher runs
-        # here" IS policy; only the install path goes.
+        # Interpreter paths vary with the aisan installation layout.
         (str(Path(sys.executable)), "<AISAN PYTHON>"),
         (str(root.resolve()), "<ROOT>") if root else None,
         (str(Path.home()), "<HOME>"),
         (str(private_root()), "<AISAN PRIVATE>"),
-        # The root a box offers a nested aisan, which is a fixed path carrying
-        # this uid -- a literal one would make a snapshot match only for the
-        # user who wrote it. Distinct from the rule above because on a host the
-        # two are different paths; when they are the SAME path (inside a box)
-        # the rule above has already claimed it, which is why the snapshot
-        # harness pins the private root rather than leaving it ambient.
+        # The nested private root contains the current uid.
         (_NESTED_ROOT, "<AISAN NESTED ROOT>"),
         (tempfile.gettempdir(), "<TMP>"),
     ]
     text = _collapse_aisan_runtime(text)
-    # Longest first: a home under the temp dir (some CI images) would otherwise
-    # have its prefix eaten by the shorter match and never hit the right rule.
+    # Replace nested paths before their parents.
     for pair in sorted([s for s in subs if s], key=lambda s: -len(s[0])):
         text = text.replace(*pair)
     return re.sub(r"^(\s*)\[\s*\d+\]", r"\1[..]", text, flags=re.MULTILINE)
@@ -501,15 +387,7 @@ def _cli_inputs(argv: list[str]) -> tuple[tuple[str, str], ...]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry: explain a preset without a config file or a running job.
-
-    `--dry-run` is the point of this entry: a preset is a pure function from
-    arguments to a spec, so explaining one needs no deployment, no config, no
-    job and no credential -- which means an operator on a fresh host, or a
-    reviewer reading a diff, can see the profile a change produces. Anything
-    that needed a config to answer "what does this preset mount" would be
-    answering a question about a deployment instead.
-    """
+    """Explain a preset without starting a job or reading deployment config."""
     import argparse
     import sys
 
@@ -526,8 +404,7 @@ def main(argv: list[str] | None = None) -> int:
         help="describe only; never start a backend (the default and only mode"
         " today, kept explicit so a future --run cannot be the default)",
     )
-    # The same knobs a launcher takes, so a review sees the box an operator
-    # actually runs: a preset alone omits the largest thing a caller adds.
+    # Include launcher composition options in the reviewed profile.
     p.add_argument(
         "--egress",
         action="append",

@@ -32,13 +32,7 @@ _TERM_PASSTHROUGH = ("TERM", "COLORTERM", "LANG", "LC_ALL")
 
 
 class LaunchRefused(Exception):
-    """A launcher-construction refusal carrying the exit code to report it with.
-
-    Raised from the spec-building work a launcher does before `run_interactive`,
-    where a bad host config would otherwise traceback out of `_main` with exit 1
-    instead of the return-2/return-3 vocabulary every other refusal speaks. The
-    dispatcher catches it so the three launchers need not each repeat the catch.
-    """
+    """A launcher refusal and the exit code to report."""
 
     def __init__(self, message: str, code: int = 2) -> None:
         super().__init__(message)
@@ -46,17 +40,10 @@ class LaunchRefused(Exception):
 
 
 def mcp_launcher_binds(mcp: SessionMCP | None) -> tuple[Path, ...]:
-    """The MCP launcher ro-binds for a preset's `extra_ro`, refusal routed.
+    """Resolve MCP launcher binds and convert resolution errors to refusals.
 
-    `mcp_ro_binds` raises `FileNotFoundError` when a declared server's command is
-    not installed -- by design, so it fails before the box owns the terminal
-    rather than as a per-server failure buried inside it. But a host MCP config
-    nobody re-reads at launch naming one uninstalled server is a refusal, not a
-    bug in aisan: it should reach the operator as a nonzero exit and the server's
-    name, the same as any other unmet precondition, not as a stack trace that
-    also takes down `--explain`. `ValueError` is the resolver refusing a
-    launcher it cannot bind narrowly -- an unproven tool root, or a bind that
-    would cover a credential store -- and routes the same way.
+    Resolution fails before the box starts when a command is missing, its tool
+    root can't be proven, or a required bind would expose a credential store.
     """
     if mcp is None:
         return ()
@@ -67,21 +54,12 @@ def mcp_launcher_binds(mcp: SessionMCP | None) -> tuple[Path, ...]:
 
 
 def git_config_binds() -> list[BindSpec]:
-    """Bind ONLY the user's global git config FILE, not all of ~/.config/git.
+    """Bind the global Git config file without exposing adjacent credentials.
 
-    The launchers bind this so an in-box commit is attributed (user.name/email).
-    The whole directory also holds git-credential-store's `credentials` (plaintext
-    `https://user:token@host`) and a config may carry `[http] extraHeader` or a
-    `[credential] helper` -- secrets the box, which has a model egress route, can
-    read and send out. Just the file closes the separate credentials store; a
-    secret an operator puts INSIDE config is the residual they chose.
-
-    XDG-aware on the SOURCE side only: the box reads `~/.config/git/config` (its
-    cleared env sets no XDG_CONFIG_HOME), while the host keeps the file wherever
-    its XDG_CONFIG_HOME points -- so the source is looked up XDG-aware and mounted
-    over the path the box reads. Empty when the host has no config: an in-box
-    commit then fails "tell me who you are", the honest state rather than a
-    silently mounted credential dir.
+    The file supplies commit identity. Binding its directory could expose the
+    plaintext credential store. Resolve the host source through
+    ``XDG_CONFIG_HOME``, then bind it to the default path used by the box's
+    cleared environment. Return no binds when the host has no global config.
     """
     xdg = os.environ.get("XDG_CONFIG_HOME")
     host = (Path(xdg) if xdg else Path.home() / ".config") / "git" / "config"
@@ -94,7 +72,7 @@ def git_config_binds() -> list[BindSpec]:
 
 
 def repo_key(repo: Path) -> str:
-    """A readable, stable key that distinguishes equal-basename repositories."""
+    """Return a stable key that distinguishes repositories with the same name."""
     resolved = repo.resolve()
     digest = hashlib.sha256(str(resolved).encode()).hexdigest()[:32]
     name = resolved.name or "root"
@@ -102,47 +80,29 @@ def repo_key(repo: Path) -> str:
 
 
 def state_dir(client: str, repo: Path, *, home: Path | None = None) -> Path:
-    """The persistent state directory for one client and repository."""
+    """Return the persistent state directory for a client and repository."""
     base = home if home is not None else Path.home()
     return base / ".cache" / f"aisan-{client}" / repo_key(repo)
 
 
 def mirror_user_memory(source: Path, dst: Path) -> None:
-    """Copy the host's user-level instructions to where a boxed CLI reads them.
+    """Copy host instructions into the boxed client's redirected config.
 
-    For the clients whose config directory is redirected at the state dir
-    (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`), user memory is read from INSIDE that
-    dir -- so the host file is not read wherever it sits, and a ro bind of it
-    is the fix that looks right and does nothing: measured, a box holding a
-    readable ~/.claude/CLAUDE.md answers that it has no instructions. The
-    redirect is not negotiable either, since the CLI writes its config dir
-    every turn and the host's holds the credential.
-
-    A copy rather than a mount because the state dir is already the launcher's
-    to seed, so this needs no bind and no entry in a user bind spec. Re-copied
-    per launch, which makes the host file the source of truth: memory the agent
-    writes in-box (the state dir is rw) survives only to the next launch.
-
-    A host with no such file is left alone rather than cleared. Nothing here
-    can tell a stale mirror from instructions the agent wrote itself, and of
-    the two ways to be wrong, deleting the operator's file is worse than
-    leaving a per-repo cache directory holding one.
-
-    The write goes through `write_sealed`, not `copyfile`: `dst` sits in the
-    box-writable state dir, and a plain copy would follow a symlink the agent
-    planted there and overwrite its target as the operator.
+    The state directory is writable in the box, so ``write_sealed`` prevents a
+    planted destination symlink from redirecting the host-side write. Refresh
+    the copy at launch, but preserve the destination when the source is absent.
     """
     if source.exists():
         write_sealed(dst, source.read_bytes())
 
 
 def box_id(client: str, repo: Path) -> str:
-    """A unique live-box identity carrying a stable repository hint."""
+    """Return a unique box ID containing a stable repository hint."""
     return f"{client}-i-{repo_key(repo)}-{secrets.token_hex(8)}"
 
 
 def interactive_parser(prog: str, executable: str) -> argparse.ArgumentParser:
-    """The common, strictly parsed surface of an interactive launcher."""
+    """Build the common strict argument parser for interactive launchers."""
     parser = argparse.ArgumentParser(
         prog=prog,
         allow_abbrev=False,
@@ -203,18 +163,10 @@ def parse_interactive_args(
 
 
 def mcp_notice(mcp: SessionMCP) -> str:
-    """What the host MCP import puts inside the box, named server by server.
+    """Describe the host MCP declarations copied into the box.
 
-    The import is by operator choice, but it is the one part of a session the
-    operator does not spell out at the call site: the declarations come from a
-    host config file nobody re-reads at launch, and each is copied VERBATIM --
-    so a server whose declaration carries an API token puts that token in a box
-    the agent can read, past the credential-absence the rest of the profile
-    keeps by subtraction. Everything else that widens the box announces itself
-    (`--net` warns, `--binds` is a path the operator typed); this said nothing.
-
-    Named rather than counted, and the environment-carrying ones named again,
-    because the action it invites is to go look at a specific declaration.
+    Name servers that carry environment values because those values may include
+    credentials readable by the box.
     """
     lines = [
         (
@@ -232,7 +184,7 @@ def mcp_notice(mcp: SessionMCP) -> str:
 
 
 def terminal_env() -> tuple[tuple[str, str], ...]:
-    """Terminal variables worth carrying through the box's cleared env."""
+    """Return terminal settings to restore after clearing the environment."""
     return tuple(
         (key, os.environ[key]) for key in _TERM_PASSTHROUGH if key in os.environ
     )
@@ -246,38 +198,24 @@ def apply_launcher_flags(
     grants: list[str] | None,
     binds: list[Path] | None,
 ) -> BoxSpec:
-    """Apply `--egress`, `--grant` and `--binds` to `spec`, the shared way an
-    interactive launcher and `aisan explain` both need them.
+    """Apply egress profiles, grants, and user bind files to ``spec``.
 
-    A review that omitted these would describe a box no operator runs -- these
-    are the largest thing a caller adds on top of a preset. Prints notices to
-    stderr (a profile that found nothing, a profile's own notice) and raises
-    `LaunchRefused` carrying the exit code on a hard error, so the CLI that
-    called it prints the reason and exits with that code rather than
-    tracebacking. The order is the model's: egress first (its backends gate the
-    credential guard the user binds run through), then grants, then each bind file
-    whole -- so a user file shadows a grant the same way it shadows the preset.
+    Apply them in that order so user bind files can shadow preset and grant
+    paths. Report unavailable optional profiles and raise ``LaunchRefused`` for
+    invalid configuration.
     """
-    # Named once each: the flag is repeatable so several profiles compose, and
-    # naming one twice is a typo rather than a request for two of it -- which
-    # BoxSpec would refuse anyway, on a port collision nobody typed.
+    # Ignore duplicate names from repeatable flags.
     for name in dict.fromkeys(egress_profiles or []):
         profile = EGRESS_PROFILES[name](repo)
         if not profile:
-            # A profile whose tree has nothing for it is not a refusal, but it
-            # must not be silent either: the operator asked for a route, and a
-            # box that quietly has none looks identical to one that works.
+            # Optional profiles may be unavailable for this repository.
             print(
                 f"NOTE: egress profile {name} found nothing to serve in {repo};"
                 " the box gets no route from it.",
                 file=sys.stderr,
             )
             continue
-        # Per profile rather than for --egress as a whole, because whether a
-        # route survives a shared namespace is a property of its transport: a
-        # backend without the authenticated host-loopback path would be a
-        # credential capability for everything on the machine, while a profile
-        # that is only mounts has no port to expose.
+        # Each backend defines whether its transport is safe on host loopback.
         stranded = [b.name for b in profile.backends if not b.supports_shared_net]
         if stranded and not spec.unshare_net:
             raise LaunchRefused(
@@ -293,14 +231,11 @@ def apply_launcher_flags(
         if profile.notice:
             print(profile.notice, file=sys.stderr)
 
-    # Named once each, like the egress flag, and applied whole: a grant is
-    # aisan's own knowledge about what a tree needs, so there is nothing here
-    # for the operator to get subtly wrong except which grants to ask for.
+    # Apply each named grant once.
     for name in dict.fromkeys(grants or []):
         grant = GRANTS[name]()
         if not grant:
-            # The tree is not on this host. Not a refusal -- the box is still a
-            # box -- but silence would look identical to a grant that worked.
+            # An unavailable optional tool grant doesn't prevent launching.
             print(
                 f"NOTE: grant {name} found nothing on this host;"
                 " the box gets none of it.",
@@ -313,19 +248,14 @@ def apply_launcher_flags(
             .with_env(grant.env)
         )
 
-    # In the order given, each file applied whole: later-wins is the model's
-    # only precedence rule, so two files compose the same way two entries in
-    # one file do -- which is what makes a shared tool spec and a per-project
-    # one usable together without either knowing about the other.
+    # Later files take precedence, matching bind order within one file.
     for spec_file in binds or []:
         try:
             user = userbinds.load(spec_file, egress=spec.egress)
         except ValueError as e:
             raise LaunchRefused(f"binds: {e}") from e
         except OSError as e:
-            # A missing or unreadable spec file is the operator's path being
-            # wrong (`userbinds.load` lets it propagate for exactly this caller
-            # to name); route it like a malformed one rather than tracebacking.
+            # Report unreadable files through the same launcher refusal path.
             raise LaunchRefused(f"binds: cannot read {spec_file}: {e}") from e
         spec = spec.with_binds(user.binds).with_path_prefix(user.path)
     return spec
@@ -348,7 +278,7 @@ async def run_interactive(
     prepare: Callable[[], None] | None = None,
     mcp: SessionMCP | None = None,
 ) -> int:
-    """Apply the composition flags, explain or run, keep the status."""
+    """Apply launcher options, then explain or run the box."""
     try:
         spec = apply_launcher_flags(
             spec, repo, egress_profiles=egress_profiles, grants=grants, binds=binds
@@ -359,9 +289,7 @@ async def run_interactive(
 
     box = Box(spec, box_id=box_id(client, repo))
     if explain_only:
-        # The review path discloses what an MCP import dragged in the same way
-        # the run path does: the mounts show up in the report, but only this
-        # notice says an import is what caused them.
+        # The report shows mounts; this notice attributes them to MCP imports.
         if mcp is not None and mcp.enabled:
             print(mcp_notice(mcp), file=sys.stderr)
         with staged_directory(state), box.staged():
@@ -377,10 +305,7 @@ async def run_interactive(
                 ),
                 end="",
             )
-            # Inside `staged()`, where bind-over sources exist on disk: probing
-            # assembly after it closes would fail every box on a missing source.
-            # A refused profile is not a passed review -- `--explain && run` must
-            # not read exit 0 off a box that would refuse to assemble.
+            # Probe while generated bind-over sources still exist.
             refused = assembly_refusal(box) is not None
         return 2 if refused else 0
 
@@ -391,8 +316,7 @@ async def run_interactive(
         )
         return 2
 
-    # Before anything is staged: a credential in the state dir is the box's own
-    # login, and it would be mounted rw into this box and every later one.
+    # A credential planted in persistent state would enter every later box read-write.
     planted = planted_credentials(state, client)
     if planted:
         print(
@@ -427,29 +351,23 @@ async def run_interactive(
                 env={**os.environ, **box.env},
                 check=False,
             )
-            # A box killed by a signal comes back as `-N`; report it the way a
-            # shell would, matching the unattended launcher's own status.
+            # Convert a negative signal return code to shell exit status.
             return exit_status(done.returncode)
     except PreflightError as e:
         print(f"refused: {e}", file=sys.stderr)
         return 3
     except (ValueError, FileNotFoundError) as e:
-        # Assembly can still refuse after preflight: staging a bind-over whose
-        # source is gone, or `wrapper()` finding the egress binds did not survive
-        # resolution. Only the child's status comes back as a return code; these
-        # come back as exceptions, so route them rather than let one traceback
-        # out with exit 1 next to the refusal convention its siblings speak.
+        # Bind sources can disappear and mount resolution can still fail after preflight.
         print(f"refused: {e}", file=sys.stderr)
         return 2
 
 
 @contextmanager
 def staged_directory(path: Path) -> Iterator[None]:
-    """Make `path` bindable for inspection, leaving no new empty directories.
+    """Create ``path`` for inspection and remove newly created empty directories.
 
-    Existing directories are never removed. Cleanup is best-effort and only
-    uses rmdir, so a concurrent writer that puts anything in a newly-created
-    directory turns it into persistent state rather than losing its files.
+    Cleanup uses ``rmdir``, so it preserves existing directories and any files
+    created concurrently.
     """
     created: list[Path] = []
     cursor = path

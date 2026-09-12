@@ -1,13 +1,12 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Host MCP declarations imported into an isolated interactive session.
+"""Import host MCP declarations into an isolated interactive session.
 
-Only local process transports cross this boundary. The clients start those
-processes inside the box, where they inherit its filesystem, cleared environment
-and network namespace. Each retained declaration is copied verbatim, so explicit
-arguments and environment values are inside the box by operator choice. Remote
-MCP declarations and their separate authentication state stay on the host.
+Only local process transports are imported. Clients start them inside the box
+with its filesystem, environment, and network namespace. Arguments and
+environment values from each imported declaration are readable inside the box.
+Remote MCP declarations remain on the host.
 """
 
 from __future__ import annotations
@@ -29,20 +28,14 @@ from .statedir import write_sealed
 
 @dataclass(frozen=True)
 class SessionMCP:
-    """One client's local MCP declarations and the commands they launch."""
+    """A client's local MCP declarations and launcher commands."""
 
     document: dict[str, object]
     commands: tuple[str, ...]
     kind: Literal["json", "toml"]
-    #: The retained server names, for the launcher's import notice. Carried as
-    #: data rather than read back out of `document`, whose top-level key differs
-    #: per client.
+    #: Imported server names shown in the launch notice.
     names: tuple[str, ...] = ()
-    #: Those whose declaration carries environment values. Computed by each
-    #: importer below rather than here, because the key holding them is the
-    #: CLIENT's: Claude Code and Codex spell it `env`, opencode `environment`.
-    #: Worth naming separately because that is where a host token would sit, and
-    #: copying the declaration verbatim puts it inside the box.
+    #: Servers with environment values that may contain host credentials.
     env_names: tuple[str, ...] = ()
 
     @property
@@ -55,9 +48,8 @@ class SessionMCP:
             text = _toml_document(self.document)
         else:
             text = json.dumps(self.document, indent=2) + "\n"
-        # Sealed rather than write_text+chmod: this lands in the box-writable
-        # state dir, so a symlink the agent planted at `path` would otherwise be
-        # followed and its target rewritten (and chmodded 0o600) by the operator.
+        # Prevent a symlink planted in the writable state directory from
+        # redirecting this host-side write and chmod.
         write_sealed(path, text)
 
 
@@ -123,8 +115,7 @@ def opencode_host_mcp(path: Path | None = None) -> SessionMCP:
         commands=tuple(commands),
         kind="json",
         names=tuple(kept),
-        # opencode's own key, not the `env` the other two use (documented in its
-        # local-server schema alongside `command` and `cwd`).
+        # OpenCode calls this field ``environment``; the other clients use ``env``.
         env_names=_env_names(kept, "environment"),
     )
 
@@ -132,7 +123,7 @@ def opencode_host_mcp(path: Path | None = None) -> SessionMCP:
 def _env_names(
     servers: dict[str, dict[str, object]], key: Literal["env", "environment"]
 ) -> tuple[str, ...]:
-    """The servers declaring a non-empty environment, under this client's key."""
+    """Return servers that declare a non-empty environment."""
     return tuple(
         name
         for name, server in servers.items()
@@ -141,13 +132,10 @@ def _env_names(
 
 
 def mcp_search_path(local_bin: bool = True) -> str:
-    """The PATH for launcher resolution and the box.
+    """Build the PATH used to resolve MCP launchers.
 
-    `local_bin` carries `~/.local/bin`, where home-installed MCP servers live.
-    Resolution needs it (that is where a bare command name is found); the box's
-    own PATH does NOT when MCP is off, because nothing binds that dir then -- a
-    PATH entry the box cannot see resolves nothing and only misleads a reader of
-    `explain`. So the launchers pass `local_bin=mcp.enabled` for the box PATH."""
+    Include ``~/.local/bin`` only when the box mounts home-installed launchers.
+    """
     dirs = ["/usr/bin", "/usr/local/bin"]
     if local_bin:
         dirs.insert(0, str(Path.home() / ".local" / "bin"))
@@ -157,7 +145,7 @@ def mcp_search_path(local_bin: bool = True) -> str:
 def mcp_ro_binds(
     config: SessionMCP, search_path: str | None = None
 ) -> tuple[Path, ...]:
-    """Read-only paths needed to execute the configured servers in the box."""
+    """Return read-only paths needed by the configured MCP servers."""
     if not config.enabled:
         return ()
     path = search_path or mcp_search_path()
@@ -165,9 +153,8 @@ def mcp_ro_binds(
     for command in config.commands:
         binds.extend(_launcher_binds(command, path))
     out = tuple(dict.fromkeys(binds))
-    # Structural, over every KNOWN backend credential rather than this box's
-    # egress: the store another client keeps is exposure all the same, and the
-    # box's own backends would never name it.
+    # Check every known credential store because MCP launchers are independent
+    # of the model backend configured for this box.
     hit = credential_overlap(out, known_credential_paths())
     if hit is not None:
         raise ValueError(
@@ -177,10 +164,8 @@ def mcp_ro_binds(
     return out
 
 
-# Trees that hold MANY tools' state side by side. Never a tool root: binding
-# one mounts every neighbour's files -- opencode's auth.json lives under
-# ~/.local/share -- and a launcher that needs one of these bound is a launcher
-# this module cannot bind narrowly.
+# These shared trees contain state for many tools, including credentials such as
+# OpenCode's auth.json. Refuse launchers that would require mounting one whole.
 def _shared_roots(home: Path) -> frozenset[Path]:
     return frozenset(
         {
@@ -195,13 +180,11 @@ def _shared_roots(home: Path) -> frozenset[Path]:
 
 
 def _launcher_binds(command: str, search_path: str) -> list[Path]:
-    """Resolve a home-installed launcher and the interpreter behind its venv.
+    """Resolve a home-installed launcher and its virtualenv interpreter.
 
-    The tool root is PROVEN, never guessed from path depth: `<root>/bin/<exe>`
-    is trusted only when `<root>` shows a venv's shape (`pyvenv.cfg`, or the
-    `bin/python` a uv tool root carries). The grandparent of a bare
-    `~/.local/bin` script is `~/.local`, and the old guess bound that whole
-    tree -- every other tool's state, credential stores included.
+    Accept ``<root>/bin/<exe>`` only when ``root`` contains ``pyvenv.cfg`` or
+    ``bin/python``. Inferring the root from path depth could mount shared tool
+    state and credentials under ``~/.local``.
     """
     executable = shutil.which(command, path=search_path)
     if executable is None:
@@ -214,8 +197,7 @@ def _launcher_binds(command: str, search_path: str) -> list[Path]:
         return []
 
     if len(real.parents) < 2 or real.parents[1] == home:
-        # A bare script directly under a top-level home dir (~/bin/x): the
-        # file itself, nothing around it.
+        # A script in ~/bin needs only the resolved file.
         return [real]
     root = real.parents[1]
     if (
@@ -240,14 +222,7 @@ def _codex_home() -> Path:
 
 
 def claude_config_file() -> Path:
-    """The host's own `.claude.json`, wherever CLAUDE_CONFIG_DIR puts it.
-
-    Public because `cli.claude` seeds from the same file: a second copy of this
-    rule is a second chance to forget the redirect, and forgetting it is silent
-    -- the file is simply not where the copy looks. The redirect itself comes
-    from `egress.anthropic`, which needs it for the credential in the same
-    directory.
-    """
+    """Return the host ``.claude.json`` path, honoring ``CLAUDE_CONFIG_DIR``."""
     return (claude_config_dir() or Path.home()) / ".claude.json"
 
 
@@ -342,11 +317,7 @@ def _strip_jsonc(text: str) -> str:
         if text.startswith("/*", index):
             end = text.find("*/", index + 2)
             if end < 0:
-                # Unterminated: the comment runs to EOF. Break, keeping what was
-                # already stripped -- returning the ORIGINAL text discarded every
-                # comment removed before this one, so the parse then choked on
-                # them. (`c`, not `char`: the comprehension has its own scope, but
-                # reusing the loop's name reads as a shadow.)
+                # An unterminated block comment consumes the rest of the input.
                 break
             out.extend("\n" for c in text[index : end + 2] if c == "\n")
             index = end + 2
