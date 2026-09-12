@@ -1,11 +1,10 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Starting the host-side children that refresh a credential.
+"""Start host processes that refresh credentials.
 
-These children are the one part of aisan that runs as the operator, outside any
-box, holding the real credential. Everything else here is about what the box may
-reach; this module is about what those children may read.
+These processes run outside the box as the operator and hold real credentials.
+This module limits what they can read from the host.
 """
 
 from __future__ import annotations
@@ -30,25 +29,18 @@ class HostChild:
 
 @contextmanager
 def neutral_child(env: Mapping[str, str] | None = None) -> Iterator[HostChild]:
-    """An empty, box-hidden cwd and normalized environment for a host child.
+    """Give a host child an empty, box-hidden cwd and normalized environment.
 
-    Without one a child inherits the launcher's cwd, which is normally the very
-    repository the boxed agent has been editing. Both `claude` and `codex` read
-    configuration out of the directory they start in, so a child started there
-    is one agent-written file away from running the agent's code as the operator
-    -- the box's whole point, undone by the refresh path. `--safe-mode` closes
-    some of that for `claude` and there is no equivalent for `codex`, so the cwd
-    is closed here instead, for every such child.
+    A child would otherwise inherit the repository that the boxed agent edits.
+    Both Claude and Codex read configuration from their starting directory, so
+    agent-written configuration could execute as the operator during refresh.
 
-    A fresh directory per child, removed when it exits: nothing to read, and
-    nothing left for the next one to find. It lives below a fixed private root,
-    not the ambient TMPDIR, and every Box seals that root. Otherwise an operator
-    whose TMPDIR is inside a writable bind would put this host process back in
-    reach of the box.
+    Each child gets a fresh directory that is removed on exit. It lives below a
+    fixed private root hidden from every box; ambient ``TMPDIR`` may point into a
+    writable bind.
 
-    The path-valued process metadata is normalized with the cwd. Merely passing
-    cwd to subprocess leaves PWD and several temp variables pointing back at the
-    launcher's repository or another box-visible directory.
+    Normalize path-valued environment variables as well as the subprocess cwd.
+    Otherwise ``PWD`` or a temp variable may still expose a box-visible path.
     """
     root = prepare_private_dir(host_child_root())
     with tempfile.TemporaryDirectory(prefix="child-", dir=root) as raw_path:

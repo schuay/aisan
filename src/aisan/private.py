@@ -1,33 +1,22 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Host-only paths shared by runtime control and credential children.
+"""Manage host-only paths for runtime control and credential processes.
 
-The root does not follow TMPDIR. A box may be given a TMPDIR inside its
-writable worktree, and host-side capabilities placed there would then cross
-the boundary by accident -- the hazard being that TMPDIR is a variable other
-tools set for their own reasons, so following it means following decisions
-nobody made about this.
+The root ignores ``TMPDIR`` because it may point inside a box-writable worktree.
+Placing host capabilities there would expose them to the box.
 
-``AISAN_PRIVATE_ROOT`` overrides it, which is not the same bargain: nothing
-else writes that name, so it moves only when someone means to move it. It
-exists because a box SEALS this root, so aisan running inside a box -- its own
-test suite, most of all -- has no usable one and every box-staging test fails
-on a directory it cannot create. A box gets the override in its environment
-(see spec.NESTING_ENV) and nests cleanly; a host sets nothing and keeps the
-fixed path.
+``AISAN_PRIVATE_ROOT`` is an explicit override for nested aisan processes. Each
+box hides the host root, so an aisan process inside the box needs a different
+root for its own runtime files. See ``spec.NESTING_ENV``.
 
-The override buys an attacker nothing. Setting it requires control of the
-environment, which is already control of PYTHONPATH and PATH -- code execution
-inside this process, next to the credentials themselves, which is strictly
-more than relocating a socket. And it is not a way into a box either: box
-environments are built with --clearenv, so the variable reaches one only when
-a spec names it. What guards the directory is `prepare_private_dir` below,
-which validates whatever root it is handed.
+Controlling this override already requires control of the process environment,
+including ``PYTHONPATH`` and ``PATH``. Box environments use ``--clearenv`` and
+receive the variable only through an explicit spec. ``prepare_private_dir``
+validates either root.
 
-The name is short because runtime UNIX socket paths live below it and Linux
-limits those to 108 bytes; an overriding caller inherits that budget, which
-`runtime.prepare_runtime_dir` checks rather than assumes.
+The default path is short enough to leave room under Linux's 108-byte UNIX
+socket path limit. An overriding caller must stay within the same limit.
 """
 
 from __future__ import annotations
@@ -41,25 +30,22 @@ _DEFAULT_ROOT = _SYSTEM_TEMP_ROOT / f"aisan-{os.getuid()}"
 _PRIVATE_ROOT = Path(os.environ.get("AISAN_PRIVATE_ROOT") or _DEFAULT_ROOT)
 _HOST_CHILD_DIR = "host-children"
 
-# The root a box names for an aisan nested inside it. Here rather than in spec,
-# with the other root: it is the same concept, and the sibling construction
-# above is what keeps a literal "/tmp" out of the source.
+# A private root for aisan processes launched inside a box.
 _NESTED_ROOT = _SYSTEM_TEMP_ROOT / f"aisan-nested-{os.getuid()}"
 
 
 def nested_root() -> Path:
-    """The root a box offers an aisan running inside it.
+    """Return the private root available to aisan inside a box.
 
-    Under the box's own /tmp, which is a tmpfs it owns: nothing written there
-    reaches the host, and the nested aisan creates it 0700 like any other root.
-    Deliberately not the sealed name -- a box able to write to THAT path would
-    be writing where the host binds its runtime dir.
+    This path lies on the box's private ``/tmp`` and can't reach the host. It
+    differs from the sealed host path so nested processes can't write where the
+    host binds runtime directories.
     """
     return _NESTED_ROOT
 
 
 def private_root() -> Path:
-    """The per-user root that every box must hide."""
+    """Return the per-user host root hidden from every box."""
     return _PRIVATE_ROOT
 
 
@@ -71,10 +57,9 @@ def host_child_root() -> Path:
 def prepare_private_dir(path: Path) -> Path:
     """Create and validate a private directory under the private root.
 
-    The final component must be a real directory owned by this user and must
-    grant no group or other access. Refusing an unsafe pre-existing path is
-    important because /tmp is shared and the directory holds unauthenticated
-    sockets and host processes with access to durable credentials.
+    The final component must be a real directory owned by this user with no
+    group or other access. The directory may live below shared ``/tmp`` and hold
+    unauthenticated sockets or host processes with durable credentials.
     """
     root = private_root()
     try:

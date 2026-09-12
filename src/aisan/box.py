@@ -1,26 +1,19 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""One lifecycle bracket: `async with Box(spec, box_id=...) as box`.
+"""Manage a box and its host-side egress services as one async context.
 
-`__aenter__` creates the runtime dir, preflights and starts every backend,
-writes the selected transport's launcher control file, and hands back a Box
-that can produce the wrapper argv and launch prefix; `__aexit__` unwinds it.
+Entering the context performs these steps in order:
 
-The order inside `__aenter__` is the part worth stating, because it is a real
-constraint and not a preference:
+1. Preflight every backend before bwrap can take over the terminal, because
+   credential repair such as `luci-auth` reauthentication may be interactive.
+2. Create the runtime directory and prepare each backend's bind sources.
+3. Start the backends and write either the relay manifest or protected shared
+   client environment consumed by the launcher.
+4. Resolve the wrapper only after every bind source exists.
 
-1. runtime dir -- every backend writes into it.
-2. per backend: preflight, then prepare, then serve. Preflight before ANY bwrap
-   because luci reauth is interactive and the box owns the TTY once it is up;
-   prepare before wrapper() because a bind-over source that does not exist fails
-   the whole profile.
-3. relay manifest or protected client environment, because the launcher reads it.
-4. only then may `wrapper()` be called. It resolves the binds, and the sources
-   have to be on disk by then.
-
-`box_id` is opaque: a string aisan hashes for the runtime dir name and otherwise
-never interprets.
+Exiting unwinds all resources. `box_id` is an opaque string used only to derive
+the runtime directory name.
 """
 
 from __future__ import annotations
@@ -47,26 +40,19 @@ from .spec import BoxSpec
 
 
 def _rw_grant_covers(path: Path, spec: BoxSpec) -> bool:
-    """Whether the spec already grants `path` writable, as the root or through
-    a Bind whose mode is RW.
+    """Return whether the spec already grants `path` writable.
 
-    Containment, not equality: the grant that matters is an ancestor of the
-    launcher path, because the launcher's requirement is only visibility and an
-    rw ancestor supplies it in full. Optional RW binds do not count -- one that
-    cannot be stat'd is dropped at resolve time, and the launcher requirement
-    would go with it.
+    The writable root or a mandatory writable ancestor provides the visibility
+    required by the launcher. Optional binds do not count because resolution may
+    omit them along with that visibility.
 
-    The consumer's own RO pins inside the root are not this function's business.
-    Those are the consumer overriding the consumer (the .git dance in
-    Sandbox.resolve's ordering), and later-wins stays theirs to use; this
-    predicate only disarms the LIBRARY's defaults, never a bind the spec wrote.
+    This predicate suppresses only the library's default launcher binds. It does
+    not alter read-only pins explicitly ordered by the caller.
     """
 
     def within(p: Path, ancestor: Path) -> bool:
-        # Compare mount destinations, not their host-side targets. Two paths
-        # that resolve to the same directory still name distinct destinations
-        # in the box; launcher_binds() deliberately preserves both names for
-        # interpreter symlink chains.
+        # Compare literal mount destinations. Symlink aliases may resolve to one
+        # host directory while remaining distinct paths required inside the box.
         return p.absolute().is_relative_to(ancestor.absolute())
 
     if within(path, spec.root):
@@ -81,9 +67,10 @@ log = logging.getLogger(__name__)
 
 
 def _undo_host_paths(files: tuple[Path, ...], dirs: tuple[Path, ...]) -> None:
-    """Remove ensure-paths a box created: files first, then directories deepest
-    first, and only while empty -- a concurrent box that put something real in
-    one keeps it, the same best-effort rule `staged_directory` uses."""
+    """Remove created files, then created directories from deepest to shallowest.
+
+    Leave nonempty directories intact in case another box has used them.
+    """
     for f in files:
         with suppress(OSError):
             f.unlink()
@@ -93,11 +80,10 @@ def _undo_host_paths(files: tuple[Path, ...], dirs: tuple[Path, ...]) -> None:
 
 
 class Box:
-    """A running box: the mount policy resolved, the egress halves serving.
+    """A running mount policy with its host-side egress services.
 
-    Not a context manager over a Sandbox -- a Box IS the lifecycle. `wrapper()`
-    and `launch_prefix()` are only meaningful between `__aenter__` and
-    `__aexit__`, because both name paths that exist for exactly that long.
+    `wrapper()` and `launch_prefix()` are valid only inside the async context
+    because they refer to resources created and removed by that context.
     """
 
     def __init__(self, spec: BoxSpec, *, box_id: str) -> None:
@@ -111,45 +97,32 @@ class Box:
         return bool(self.spec.egress) and self.spec.unshare_net
 
     def _stage(self, stack: ExitStack | AsyncExitStack) -> None:
-        """Everything that has to exist on disk before `wrapper()` may resolve:
-        the runtime dir, each backend's bind-over sources, and the spec's
-        ensure-paths (the .git guard files a fresh checkout may lack).
+        """Create every on-disk source required before wrapper resolution.
 
-        Shared with `staged()` below, which is the inspector's way in. Split out
-        so there is ONE statement of what a resolvable box needs -- an inspector
-        that staged a little differently from the real path would report a
-        profile nobody ever runs, which is precisely the drift the triad exists
-        to catch. Every source this creates is registered for cleanup on the
-        same stack, so the run path unwinds it at box exit and the inspector's
-        short-lived stack leaves the host exactly as it found it.
+        This includes ensure-paths, the runtime directory, and backend bind-over
+        sources. Both live boxes and `staged()` inspection use this method so the
+        inspector resolves the same profile. Every created resource registers
+        cleanup on the supplied stack.
         """
         self._ensure_host_paths(stack)
         prepare_runtime_dir(self.box_id)
-        # Registered before anything can fail, so a backend that raises halfway
-        # still leaves no directory behind.
+        # Register cleanup before backend preparation can fail.
         stack.callback(cleanup_runtime_dir, self.box_id)
         for backend in self.spec.egress:
             backend.prepare(self.runtime_dir)
-            # Whatever prepare() just wrote goes back out here rather than in the
-            # backend, because THIS is where it was written and the directory
-            # only disappears once it is empty. The sources are not guessed: they
-            # are the bind-over srcs the backend itself names, filtered to the
-            # ones inside the runtime dir -- a backend binding over something it
-            # does not own is not ours to remove.
+            # Remove prepared bind-over sources owned by this runtime directory.
+            # Sources outside it belong to the backend's caller and remain intact.
             for spec in backend.box_binds(self.runtime_dir):
                 src = getattr(spec, "src", None)
                 if src is not None and src.parent == self.runtime_dir:
                     stack.callback(src.unlink, missing_ok=True)
 
     def _ensure_host_paths(self, stack: ExitStack | AsyncExitStack) -> None:
-        """Create the spec's ensure-paths, empty, registering their undo.
+        """Create missing ensure-paths empty and register their cleanup.
 
-        Files are touched, directories mkdir'd, and each path that did not
-        already exist -- including any parent this had to create -- is recorded
-        so the single cleanup callback removes exactly what this box added and
-        nothing that was already there. Empty is equivalent to absent for every
-        file this concerns (an empty git config or hooks dir steers nothing), so
-        removing them on the way out cannot change what host-side git sees.
+        Record every created file and parent directory so cleanup removes only
+        this box's additions. For the Git guards involved, empty and absent have
+        the same effect on host-side Git.
         """
         created_files: list[Path] = []
         created_dirs: list[Path] = []
@@ -168,13 +141,9 @@ class Box:
                 ensure_dir(e.path)
             else:
                 ensure_dir(e.path.parent)
-                # O_EXCL|O_NOFOLLOW, not touch(): the .git these land in is
-                # box-writable, so an agent could plant `config.worktree` as a
-                # symlink to a host file, and a plain touch would follow it and
-                # create (or stamp) the target as the operator. O_EXCL creates
-                # only a genuinely absent file and O_NOFOLLOW refuses a symlink;
-                # an already-present regular file or a planted link both raise
-                # FileExistsError and are left for the bind to resolve.
+                # The writable .git directory may contain an agent-planted
+                # symlink. O_EXCL creates only an absent file, and O_NOFOLLOW
+                # prevents touching a host target through that symlink.
                 try:
                     fd = os.open(
                         e.path,
@@ -192,10 +161,8 @@ class Box:
         stack = AsyncExitStack()
         try:
             for backend in self.spec.egress:
-                # Preflight every backend before starting ANY of them, and before
-                # anything is written: the point is to fail before bwrap, and a
-                # box whose second backend has no credential is just as dead as
-                # one whose first does not.
+                # Preflight the complete set before starting services or writing
+                # state, so one missing credential aborts the box cleanly.
                 await backend.preflight()
             self._stage(stack)
             activations: dict[Backend, BackendActivation] = {}
@@ -216,9 +183,7 @@ class Box:
                 stack.callback(path.unlink, missing_ok=True)
             if self._needs_relays():
                 path = write_manifest(self.runtime_dir, self._manifest())
-                # Unlinked with everything else: a file left in the runtime dir
-                # means its rmdir never succeeds and every box leaks a directory
-                # under the system temp dir.
+                # The runtime directory can be removed only after this file.
                 stack.callback(path.unlink, missing_ok=True)
         except BaseException:
             await stack.aclose()
@@ -244,7 +209,7 @@ class Box:
             await stack.aclose()
 
     def activation(self, backend: Backend) -> BackendActivation:
-        """The backend's live per-Box endpoint, only inside the async bracket."""
+        """Return a backend's live endpoint within this box's async context."""
         try:
             return self._activations[backend]
         except KeyError as e:
@@ -252,13 +217,11 @@ class Box:
 
     @contextmanager
     def staged(self) -> Iterator[Box]:
-        """The box's files on disk, but nothing serving and nothing minted.
+        """Stage the box for inspection without serving or minting credentials.
 
-        What an inspector wants: `wrapper()` resolves only if every bind-over
-        source exists, but describing a profile must not mint a credential or
-        open a socket. This is the same `_stage` the real path runs, so what
-        `explain` prints is the argv the box would get -- the fidelity the
-        inspector triad rests on.
+        Wrapper resolution requires every bind-over source. Reuse the live
+        staging path to create those sources without opening sockets, ensuring
+        `explain` reports the same mount profile a live box receives.
         """
         with ExitStack() as stack:
             self._stage(stack)
@@ -266,12 +229,11 @@ class Box:
 
     @property
     def env(self) -> dict[str, str]:
-        """Environment serialized into bwrap argv.
+        """Return the environment serialized into the bwrap argv.
 
-        Isolated mode includes each backend's meaningless placeholder values.
-        Shared mode deliberately does not: its live ports and proxy tokens are
-        injected by the launcher from the protected runtime file, so they never
-        appear in a host process command line.
+        Isolated mode includes backend placeholder values. In shared mode the
+        launcher reads live ports and proxy tokens from the protected runtime
+        file, keeping them out of host process command lines.
         """
         env = dict(self.spec.env)
         if self.spec.unshare_net:
@@ -280,64 +242,34 @@ class Box:
         return env
 
     def _sandbox(self) -> Sandbox:
-        """The spec plus what egress costs, as a resolvable Sandbox.
+        """Combine the spec with runtime mounts and return a resolvable sandbox.
 
-        Four additions, and each is exactly what the spec deliberately does not
-        carry -- something derived from the box's IDENTITY, which does not exist
-        until there is a box:
+        A box adds four kinds of mounts whose paths depend on runtime identity:
 
-        - aisan's own runtime, ro, in EVERY box and not just the ones with
-          egress. A spec requirement rather than the consumer's favour (see
-          launch.launcher_binds), and unconditional so that "aisan's runtime is
-          present" is an invariant of a Box rather than a property of a
-          particular spec. Conditioning it on egress would make adding a backend
-          to a working box change what is mounted in it, which is the class of
-          coupling this whole extraction exists to remove. RO is the DEFAULT,
-          not the requirement: a launcher path the spec already grants writable
-          (a box rooted at aisan's own checkout is the case that forced this)
-          keeps the spec's grant, and the launcher bind for it is dropped
-          below -- a default does not downgrade an explicit grant.
-        - a seal over aisan's private host root, so no box can observe credential
-          children or another box's unauthenticated runtime capabilities;
-        - the runtime dir, ro, so isolated relays can reach sockets and the
-          shared-network launcher can read its protected client environment.
-          The box has no business changing either control surface.
-        - each backend's own mounts, whose sources live in the runtime dir.
+        * aisan's interpreter and source runtime, read-only unless the spec
+          already grants the path writable;
+        * a seal over the private host root, hiding credential children and
+          other boxes' runtime capabilities;
+        * this box's runtime directory, read-only, for relay sockets or shared
+          client state;
+        * backend-specific mounts sourced from that directory.
 
-        Appended LAST, so a consumer that binds one of these paths differently
-        still loses to the box's own version. That is the right way round: a box
-        whose sockets are shadowed is a box whose egress silently does not work.
-        The launcher binds are the one exception, and it is a DROP rather than
-        an ordering: their winning is never load-bearing -- the launcher reads
-        and execs, it does not write -- while their shadowing a writable grant
-        subtracts a freedom the spec stated.
+        Runtime and backend mounts come last so the spec cannot shadow its egress
+        control files. Launcher mounts are omitted when an explicit writable
+        grant already provides the path, preserving that grant.
 
-        Composed on the UNRESOLVED bind list and resolved once, never by
-        concatenating two resolved lists: a Seal resolves to a tmpfs now plus a
-        deferred --remount-ro at the very END, and gluing two resolved lists puts
-        one seal's remount before the other's holes are punched. There is exactly
-        one resolve() call per box and it is inside the Sandbox below.
+        Compose the unresolved bind list and resolve it once. Concatenating
+        resolved lists could place one seal's deferred read-only remount before
+        another seal's holes have been mounted.
         """
-        # Imported here, not at module scope: `launch` is executed in the box as
-        # `python -m ...aisan.launch`, and runpy warns (and re-executes the
-        # module) when the package __init__ has already imported it. __init__
-        # imports this module, so a top-level import here would put launch on
-        # that chain.
+        # Keep this import off the package initialization path. `python -m`
+        # otherwise finds `launch` already imported, warns, and re-executes it.
         from .launch import launcher_binds
 
-        # A launcher bind states a REQUIREMENT -- aisan importable, the
-        # interpreter exec'able -- and RO is the least-privilege way to meet
-        # it, not a policy over the consumer's tree. Where the spec already
-        # grants one of these paths writable (the root, or an RW bind), that
-        # grant both meets the requirement and says more trust than the
-        # default, and re-appending RO after it downgrades an explicit grant
-        # to an implementation detail. The case in point: a box rooted at
-        # aisan's own checkout, where `<root>/src` and `<root>/.venv` came
-        # out read-only and the session existed to edit them. DROPPED rather
-        # than reordered, because the runtime dir and backend bind-overs
-        # appended below must keep winning (a shadowed socket dir is
-        # silently dead egress) while a launcher bind's win here would only
-        # subtract writability.
+        # Launcher binds provide visibility with the least privilege. Omit one
+        # when the spec already grants its path writable; re-appending it would
+        # unexpectedly downgrade that explicit grant. This matters when a box is
+        # rooted at the aisan checkout and needs to edit its own source or venv.
         binds = list(self.spec.binds)
         binds += [
             b
@@ -348,10 +280,8 @@ class Box:
                 and _rw_grant_covers(b.path, self.spec)
             )
         ]
-        # Hide the whole shared host-control namespace first. This box's own
-        # runtime directory is the one deliberate hole punched through it below.
-        # allow_missing is required before the first helper or runtime has
-        # created the root; bwrap can synthesize the box-side mountpoint.
+        # Hide the shared host-control namespace, then expose only this box's
+        # runtime directory. The root may not exist before the first box.
         binds.append(Seal(private_root(), allow_missing=True))
         if self.spec.egress:
             binds.append(runtime_bind(self.box_id))
@@ -370,12 +300,10 @@ class Box:
             unshare_net=self.spec.unshare_net,
         )
 
-        # The private-root invariant is broader than backend credentials: it
-        # protects host credential children and every other live box's runtime
-        # sockets and shared-network token. The current box's own runtime is the
-        # sole allowed source below that root. A bind-over of the root at another
-        # destination is still found because the check reads resolved mounts,
-        # not just the seal at the root's ordinary name.
+        # Protect credential children and every other box's runtime sockets and
+        # shared-network tokens. Only this box's runtime directory may remain
+        # visible below the private root. Checking resolved mounts also catches
+        # aliases created by bind-over operations.
         allowed = (self.runtime_dir,) if self.spec.egress else ()
         hit = sandbox.exposed_path((private_root(),), allowed_sources=allowed)
         if hit is not None:
@@ -385,18 +313,9 @@ class Box:
                 f" host-control root at {path}"
             )
 
-        # The credential-absence invariant, at the same choke point as the
-        # mount-order leak check and asked the same way: of the finished mount
-        # list rather than of the spec that produced it. A spec is caller input
-        # and the one thing it must not be able to state is "and also mount the
-        # credential" -- but a spec is not the only way in, because the fixed
-        # system surface is mounted whether or not any spec names it, and on a
-        # host whose home sits under /usr that surface is the credential's own
-        # ancestor. Both halves are the same question about the box, so both are
-        # decided by `exposed_path`. Here rather than in
-        # BoxSpec.__post_init__ because the backends own the paths, and after the
-        # composition above because the answer depends on the whole list, root
-        # and library-authored binds included.
+        # Check credentials against the finished mount list, including the fixed
+        # system surface and library-added binds. Backends own the protected
+        # paths, so this check belongs after composition rather than in BoxSpec.
         for backend in self.spec.egress:
             hit = sandbox.exposed_path(backend.credentials)
             if hit is not None:
@@ -414,18 +333,12 @@ class Box:
         return self._sandbox().resolve()
 
     def wrapper(self) -> list[str]:
-        """The argv prefix: [systemd-run ...] bwrap ... -- ready to have the
-        payload appended.
+        """Return the systemd and bwrap argv prefix for a payload.
 
-        Checks that the runtime dir really is mounted when there are backends.
-        `_sandbox` adds that bind, so this is not checking the spec -- it is
-        checking that the bind SURVIVED resolution. It is optional (a box being
-        explained may have no runtime dir yet), so a wrapper() called outside
-        the bracket, before `_stage` created the directory, silently drops it
-        and produces a box whose relays have no sockets, or whose shared-network
-        launcher has no client environment. That presents as every model call
-        failing inside a box that otherwise looks correct, far from the missing
-        `async with` that caused it.
+        When egress is configured, verify that the optional runtime-directory
+        bind survived resolution. Calling this outside the lifecycle, before
+        `_stage` creates the directory, would otherwise omit the bind and leave
+        the launcher without sockets or shared client state.
         """
         sandbox = self._sandbox()
         if self.spec.egress and not any(
@@ -439,10 +352,10 @@ class Box:
         return sandbox.wrapper()
 
     def launch_prefix(self) -> list[str]:
-        """The argv prefix that supplies the selected egress transport.
+        """Return the launcher argv prefix for the selected egress transport.
 
-        Empty when there is no egress: no backends means no relays or protected
-        client environment, so the payload need not carry a Python launcher.
+        A box without backends needs neither relays nor protected client state,
+        so it can launch the payload directly.
         """
         if not self.spec.egress:
             return []
@@ -451,26 +364,17 @@ class Box:
         return launch_prefix(self.runtime_dir)
 
     def command(self, payload: list[str]) -> list[str]:
-        """The complete argv: wrapper, launcher, payload.
+        """Return the complete wrapper, launcher, and payload argv.
 
-        The one call site that has to know these three compose in this order, so
-        no consumer has to.
-
-        An argv, never a command string, and that is an invariant rather than a
-        convenience. A caller handed a string has to spawn it through a shell, and
-        the shell it uses is the HOST's -- so the payload's bytes get a round of
-        host-side word splitting, globbing and substitution before bwrap has run
-        anything. The confinement is downstream of that, which means a `$(...)` in
-        a payload executes outside the box. Returning argv keeps every caller on
-        `shell=False`, where the bytes are arguments and nothing interprets them.
-        This also matches sandbox-runtime's `wrapWithSandboxArgv` design; the
-        implementation here is independent.
+        Returning an argv keeps callers on `shell=False`. A command string would
+        require a host shell, allowing word splitting, globbing, or substitution
+        such as `$(...)` to execute before bwrap establishes confinement.
         """
         return [*self.wrapper(), *self.launch_prefix(), *payload]
 
     @property
     def refused(self) -> Exception | None:
-        """The first backend credential refusal of this box's life, or None."""
+        """Return the first backend credential refusal, if any."""
         for backend in self.spec.egress:
             if backend.refused is not None:
                 return backend.refused

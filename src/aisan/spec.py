@@ -1,21 +1,16 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""What a box is: an ordered bind list, an environment, limits, and egress.
+"""The complete policy for a box: binds, environment, limits, and egress.
 
-`BoxSpec` is pure data and deliberately **non-defaulting**. Every field must be
-written at the call site, so a reviewer reading one knows what is mounted
-without simulating default resolution -- which is the property that makes a
-profile auditable, and the property `Box(...)` would lose the moment it grew a
-convenience default. Convenience lives one layer up, in `presets`: pure
-functions returning this same object, so a preset can never express something
-you could not write by hand.
+`BoxSpec` has no implicit policy defaults. Every field is visible at the call
+site, so a reviewer can tell what the box mounts without reproducing default
+resolution. Presets provide convenience by constructing the same data type and
+cannot express anything that a caller could not write directly.
 
-The spec is the whole policy but not the whole box. What it deliberately does
-NOT carry is anything derived from the box's identity -- the runtime directory,
-the socket paths, the relay manifest, the launcher prefix. Those are the Box's,
-because they exist only once a box is running and two specs that differ only in
-them are the same policy. `box.py` is where the two meet.
+Runtime state derived from a box's identity does not belong in the policy. The
+runtime directory, socket paths, relay manifest, and launcher prefix exist only
+while a `Box` is running. `box.py` combines that state with the spec.
 """
 
 from __future__ import annotations
@@ -29,19 +24,14 @@ from .egress.base import Backend
 from .private import nested_root
 from .sandbox import BindSpec, EnsurePath
 
-# Noninteractive defaults for any box that runs build tooling. Not a bwrap flag
-# and not a mount, so nothing here enforces it: a spec's `env` is the box's WHOLE
-# environment (--clearenv, then --setenv per entry), which means a default not
-# named in a spec is a default that box does not have. Merged in by whoever
-# builds the spec -- see presets/depot_tools_job.py -- rather than added on the
-# way to the
-# box, because a profile that states its environment and then silently receives
-# more of it is a profile nobody can read.
+# Defaults for noninteractive build tools. A spec's `env` is the complete box
+# environment (`--clearenv` followed by its `--setenv` entries), so the code
+# constructing the spec must add these explicitly. Applying them later would
+# make the rendered profile incomplete. See presets/depot_tools_job.py.
 #
-# The pager/prompt entries stop a tool blocking on a terminal that is not there.
-# AI_AGENT is read by autoninja/siso, which drop per-action progress when it is
-# non-empty -- any value will do, so this one is free to say who set it, and it
-# says aisan because that is what built the box.
+# The pager and prompt settings prevent tools from waiting for an unavailable
+# terminal. autoninja and siso suppress per-action progress when AI_AGENT is
+# nonempty; its value identifies aisan as the source.
 DEFANG_ENV = {
     "DEBIAN_FRONTEND": "noninteractive",
     "GIT_PAGER": "cat",
@@ -50,13 +40,9 @@ DEFANG_ENV = {
     "AI_AGENT": "aisan",
 }
 
-# A root for an aisan running INSIDE the box. Its own default is sealed here --
-# that is the point of the seal -- so without this one, nesting fails on a
-# directory it cannot create, and aisan's own suite cannot be run in the thing
-# it is a suite for. Separate from DEFANG_ENV because it defangs nothing; merged
-# the same way, by the spec, so `explain` shows it rather than a launcher adding
-# it behind the profile's back.
-#
+# An inner aisan needs a private root outside the sealed host default. Keep this
+# separate from DEFANG_ENV because it serves nesting rather than build tools.
+# The spec applies it explicitly so `explain` shows the effective value.
 NESTING_ENV = {"AISAN_PRIVATE_ROOT": str(nested_root())}
 
 
@@ -64,16 +50,13 @@ NESTING_ENV = {"AISAN_PRIVATE_ROOT": str(nested_root())}
 class Limits:
     """Resource caps applied through the systemd transient scope.
 
-    Separated from the mount policy because they answer a different question --
-    "how much of this machine may the box use" rather than "what may it see" --
-    and because a caller tuning one almost never touches the other. Every field
-    has a neutral value (empty string / 0) meaning "leave systemd's default",
-    which is why this is the one part of a spec that may be defaulted: an unset
-    limit is not an unstated mount, it is a cap that does not exist.
+    Limits are separate from the mount policy because they control resource use
+    instead of visibility. Empty strings and zero retain systemd's defaults.
+    These neutral values make `Limits` safe to default even though mount policy
+    must always be explicit.
 
-    `use_cgroup=False` drops the scope entirely, for a host with no user manager
-    (a container, a bare chroot) or an operator inspecting a profile without
-    tripping a cgroup policy.
+    Set `use_cgroup=False` on hosts without a user manager, such as containers
+    and bare chroots, or when inspecting a profile without creating a scope.
     """
 
     memory_max: str = ""
@@ -85,28 +68,21 @@ class Limits:
 
 @dataclass(frozen=True)
 class Grant:
-    """What one `--grant NAME` contributes to a box: the mounts, PATH entries
-    and environment some tree needs to work inside a box that has no network.
+    """Mounts, PATH entries, and environment added by one `--grant NAME`.
 
-    Deliberately not named for tools: a tool tree is the first case, but the
-    shape fits anything aisan can know how to hand a box -- a CA bundle and the
-    variable naming it, a device node and the library path that finds it. What
-    every one of them has in common is that it WIDENS the box, which is why the
-    flag says grant.
+    Grants cover any host resource aisan knows how to supply, including tool
+    trees, CA bundles with their environment variables, or device nodes with
+    library paths. Each grant widens the box's access.
 
-    The sibling of `EgressProfile`, and the split between them is what each is a
-    fact ABOUT. An egress profile is a fact about a checkout -- an RBE project,
-    where a tree keeps its config -- so it is a function of the box's root. A
-    grant is a fact about the HOST: where depot_tools is installed, where
-    vpython keeps its venvs. It takes no root, and a box rooted anywhere gets
-    the same one.
+    An `EgressProfile` depends on the checkout, such as the RBE project named in
+    its configuration. A grant describes the host, such as the locations of
+    depot_tools and vpython environments, and therefore does not depend on the
+    box root.
 
-    `env` is the half no bind can express, and the reason this type exists
-    rather than a list of mounts. A tool tree bound read-only into a box with no
-    route does not merely lack the network -- it tries to USE it, on every
-    invocation, and fails in its own vocabulary rather than in the box's. The
-    value that turns that off is knowledge about the tree, so it belongs beside
-    the mounts that need it and not in each operator's config file.
+    `env` carries requirements that mounts cannot express. For example, an
+    offline tool may need an environment variable that disables its updater.
+    Such settings belong with the tool's mounts rather than in each operator's
+    configuration.
     """
 
     binds: tuple[BindSpec, ...] = ()
@@ -114,17 +90,18 @@ class Grant:
     env: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
-        # PATH through `env` would be applied AFTER `path` and win, silently
-        # replacing the box's PATH with this grant's idea of it rather than
-        # prepending to it. The field exists so that cannot be written by hand.
+        # A PATH in `env` would override the entries from `path` instead of
+        # prepending them.
         if any(k == "PATH" for k, _ in self.env):
             raise ValueError("a grant names PATH through `path`, not through `env`")
 
     def __bool__(self) -> bool:
-        """Whether this grant contributes anything. A tree absent from this host
-        resolves to an empty grant rather than a refusal -- the same shape
-        `EgressProfile` uses, and the launcher says so rather than building a box
-        that silently lacks what was asked for."""
+        """Return whether this grant contributes anything.
+
+        A resource absent from the host resolves to an empty grant. The launcher
+        reports that result instead of building a box missing the requested
+        resource.
+        """
         return bool(self.binds or self.path or self.env)
 
 
@@ -132,46 +109,33 @@ class Grant:
 class BoxSpec:
     """One box's complete policy: what it may touch, and how it reaches out.
 
-    Frozen and non-defaulting on everything that describes the box's contents.
-    `with_binds` / `with_egress` return a NEW spec rather than mutating, so a
-    preset's result can be adjusted without the preset's own guarantees being
-    quietly editable -- and so "the spec that built this box" stays a single
-    value somebody can print.
+    Every field that controls the box's contents is explicit and immutable.
+    The `with_*` methods return new specs, which preserves the original preset
+    and leaves one printable value describing the box.
     """
 
-    # The rw root, bound at its real absolute path and also the box's cwd.
+    # The writable root, bound at its absolute host path and used as the cwd.
     root: Path
-    # Everything else the box may touch, in mount order: later wins. The rule is
-    # bwrap's own, and it is the only precedence rule in the model.
+    # All other mounts in bwrap order. Later mounts take precedence.
     binds: tuple[BindSpec, ...]
     # (mount point, size in bytes), mounted before the root and the binds.
     tmpfs: tuple[tuple[str, int], ...]
-    # The COMPLETE environment inside the box. Nothing is merged on the way to
-    # the box, so what a spec says the environment is, is what it is -- with one
-    # exception the Box owns and documents: the per-backend client variables,
-    # which cannot be written here because they name a port table the Box
-    # resolves. See Box.env.
+    # The complete environment inside the box. `Box.env` adds only per-backend
+    # client variables, whose values depend on ports resolved at runtime.
     env: tuple[tuple[str, str], ...]
-    # The egress backends this box gets. Each is a host half holding a
-    # credential and a client endpoint selected by the network mode; an empty
-    # tuple is a box with no credential-aware route.
+    # Host-side egress backends and their network-mode-specific client endpoints.
     egress: tuple[Backend, ...]
-    # Its own network namespace: no general route off the machine, and a
-    # loopback that is not the host's. False shares the host's complete network.
+    # True creates a network namespace with private loopback and no external route.
     unshare_net: bool
     limits: Limits = field(default_factory=Limits)
-    # Host paths to create (empty) before the binds resolve and remove again if
-    # this box created them. The .git guard pins name real host files that may
-    # be absent on a fresh checkout; see EnsurePath for why this is declared
-    # rather than done in the preset that computes the binds.
+    # Empty host paths to create before bind resolution and remove afterward if
+    # this box created them. See `EnsurePath` for the .git guard use case.
     ensure: tuple[EnsurePath, ...] = ()
 
     def __post_init__(self) -> None:
-        # Egress without unshare_net is valid only for a backend that supplies
-        # the authenticated, kernel-assigned host-loopback transport. A backend
-        # with only the fixed relay port would either collide with another box or
-        # expose an unauthenticated credential capability on host loopback. The
-        # all-or-none rule lives here so no caller can assemble that unsafe mix.
+        # Shared networking requires authenticated, kernel-assigned loopback
+        # endpoints. A fixed relay port could collide with another box or expose
+        # an unauthenticated credential capability on the host.
         unsupported = [b.name for b in self.egress if not b.supports_shared_net]
         if self.egress and not self.unshare_net and unsupported:
             raise ValueError(
@@ -191,50 +155,39 @@ class BoxSpec:
             raise ValueError(f"egress backend names collide: {names}")
         ports = [b.port for b in self.egress]
         if self.unshare_net and len(set(ports)) != len(ports):
-            # A collision presents as one backend mysteriously unreachable (its
-            # relay bound first and the other's client found the wrong server),
-            # which is a long way from the typo that caused it.
+            # Without this check, one relay binds first and the other backend's
+            # client reaches the wrong server.
             raise ValueError(
                 f"egress ports collide: {[(b.name, b.port) for b in self.egress]}"
             )
 
     def with_binds(self, extra: list[BindSpec]) -> BoxSpec:
-        """This spec with `extra` appended to the bind list.
+        """Return this spec with `extra` appended to the bind list.
 
-        Concatenation, with no precedence logic to invent: later-wins is already
-        the semantics, so appending is exactly "these binds are applied after
-        everything the preset asked for". Prepending is deliberately not offered
-        -- a bind that has to come first is a bind whose position matters, and
-        that belongs in a spec written by hand rather than in a combinator.
+        Appending applies these binds after the preset's binds under the existing
+        later-wins rule. Callers that need an earlier position must construct the
+        ordered spec directly.
         """
         return replace(self, binds=(*self.binds, *extra))
 
     def with_path_prefix(self, dirs: tuple[Path, ...]) -> BoxSpec:
-        """This spec with `dirs` prepended to the box's PATH.
+        """Return this spec with `dirs` prepended to the box's PATH.
 
-        The mount-completing env combinator, and it exists because PATH is the
-        variable whose values are DIRECTORIES: a bind the box cannot resolve by
-        name is half a grant, and completing it adds no reach the bind did not.
-        Values that are not directories go through `with_env`, which is a wider
-        grant and says so.
+        This complements a mount by making its executables discoverable. PATH
+        entries add no filesystem access beyond their corresponding binds.
+        Other environment values go through `with_env`.
 
-        Prepended, not appended: a caller adding a tool tree means the box to
-        use that one. An absent PATH is set rather than refused, so this
-        composes with a spec whose environment does not name one.
+        New entries take precedence over the existing PATH. If the spec has no
+        PATH, this method creates one.
 
-        The LAST entry, not the first. `env` is an ordered tuple of pairs
-        rather than a mapping, and a preset naming a variable that its caller
-        then overrides through `extra_env` leaves two -- which bwrap resolves
-        the way this does, by `--setenv` running in order. Rewriting the first
-        would prepend to the value the box does not use.
+        `env` may contain a variable more than once because bwrap applies its
+        `--setenv` arguments in order. This method updates the last PATH entry,
+        which is the effective one.
         """
         if not dirs:
             return self
-        # The invariant this claims -- a PATH prefix names box directories -- was
-        # enforced nowhere: a relative dir resolves against the box's cwd, and a
-        # dir containing os.pathsep smuggles a second PATH entry past every
-        # coverage check. Both are refused here so no caller (userbinds or a
-        # direct one) can assert the invariant while breaking it.
+        # Relative paths depend on the box cwd, and `os.pathsep` would encode an
+        # unchecked second entry. Reject both before mount-coverage checks.
         for d in dirs:
             if os.pathsep in str(d):
                 raise ValueError(
@@ -247,10 +200,8 @@ class BoxSpec:
         last = max((i for i, (k, _) in enumerate(env) if k == "PATH"), default=None)
         value = env[last][1] if last is not None else ""
         entries = [*(str(d) for d in dirs), *(value.split(os.pathsep) if value else [])]
-        # First occurrence wins, which is how PATH lookup already works: a
-        # repeat of an earlier entry resolves nothing and only makes the
-        # rendered profile harder to read. It shows up when a caller names a
-        # grant the preset already applied.
+        # PATH lookup uses the first occurrence, so later duplicates have no
+        # effect and only obscure the rendered profile.
         path = os.pathsep.join(dict.fromkeys(entries))
         if last is None:
             env.append(("PATH", path))
@@ -259,27 +210,24 @@ class BoxSpec:
         return replace(self, env=tuple(env))
 
     def with_env(self, extra: tuple[tuple[str, str], ...]) -> BoxSpec:
-        """This spec with `extra` env pairs appended, later winning.
+        """Return this spec with `extra` environment pairs appended.
 
-        Wider than `with_path_prefix`: these are VALUES, so nothing here is
-        checkable the way a PATH dir is checkable against the mounts. That is
-        why it exists for aisan's own named grants -- resolved through a
-        registry in this repo, applied by the flag that selected them -- and why
-        the user bind format still refuses an env key. A value a person writes
-        into an unreviewed file is a secret this box cannot see it carrying.
+        Arbitrary values cannot be checked against the mount policy as PATH
+        entries can. This method therefore serves aisan's reviewed, named grants;
+        user bind files cannot add environment variables that may contain
+        secrets.
 
-        Appended rather than merged, because `env` is an ordered tuple that
-        bwrap replays through `--setenv` in order: a later pair overriding an
-        earlier one is the semantics, and rewriting the earlier would hide from
-        a reader that two callers named the same variable.
+        Appending preserves bwrap's ordered `--setenv` behavior and shows when
+        two callers set the same variable. The later value wins.
         """
         if not extra:
             return self
         return replace(self, env=(*self.env, *extra))
 
     def with_egress(self, extra: list[Backend]) -> BoxSpec:
-        """This spec with `extra` backends added. Order is irrelevant here --
-        backends are addressed by port, not by position -- but the port
-        injectivity check in __post_init__ still runs, so adding a backend that
-        collides with one already present fails at composition."""
+        """Return this spec with `extra` backends added.
+
+        Backends are addressed by port, so their order does not matter.
+        `__post_init__` rejects any port collision introduced by composition.
+        """
         return replace(self, egress=(*self.egress, *extra))

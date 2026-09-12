@@ -1,22 +1,18 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The in-box launcher: relay isolated egress or inject shared-network state.
+"""Launch a payload with isolated relays or shared-network credentials.
 
-In isolated mode, `relays.json` says what to listen on and where to splice it;
-the launcher binds every relay, spawns the payload, and returns its status. In
-shared-network mode, `client-env.json` carries the dynamic proxy port and token;
-the launcher adds them to the environment and execs the payload without
-starting relays or exposing the token in argv.
+In isolated mode, ``relays.json`` lists the relay listeners. The launcher starts
+them, spawns the payload, and returns its status. In shared-network mode,
+``client-env.json`` supplies the proxy port and token. The launcher adds them to
+the environment and executes the payload without exposing the token in argv.
 
-Spawn, not exec, and that is the whole reason this is a process at all. The
-relays live in THIS process's event loop, so replacing the image would take them
-with it. The cost of spawning is one extra process in the box and the obligation
-to forward signals, both of which are paid here.
+The isolated launcher must stay alive because its event loop serves the relays.
+It therefore spawns the payload and forwards signals to it.
 
-The launcher is pid 2, not pid 1: bwrap keeps pid 1 for its own reaper (see
-`box.py` on why `--as-pid-1` must never be passed), so an orphaned grandchild is
-reaped there and this process only ever waits on its own child.
+Bubblewrap remains PID 1 so it can reap orphaned grandchildren. The launcher is
+PID 2 and waits only for its direct child.
 """
 
 from __future__ import annotations
@@ -32,22 +28,16 @@ from .proxy import relay
 from .runtime import CLIENT_ENV_NAME, read_client_env, read_manifest
 from .sandbox import RO, Bind, BindSpec
 
-# Signals forwarded to the payload. Everything a terminal or a supervisor sends
-# to end or interrupt a job: the launcher is in the middle of that path and a
-# signal that stops here leaves the payload running with nobody watching.
+# Forward terminal and supervisor termination signals to the payload.
 _FORWARD = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 
 
 def interpreter_roots(python: Path) -> list[Path]:
-    """Every root a python symlink hops THROUGH, not just its final target.
+    """Return every root traversed by an interpreter symlink chain.
 
-    uv keeps two names for one interpreter: a versioned dir
-    (cpython-3.12.12-linux-x86_64-gnu) and an unversioned symlink to it
-    (cpython-3.12-...). A venv's bin/python points at the UNVERSIONED one, so
-    binding only `.resolve()` binds the versioned dir and leaves the name the
-    venv actually names absent in the box -- and bwrap then fails the exec with
-    `execvp <venv>/bin/python3: No such file or directory`, which reads as a
-    missing venv rather than a missing hop. Walk the chain and bind each root.
+    uv may connect a venv interpreter to a versioned installation through an
+    unversioned directory symlink. Binding only the resolved target leaves that
+    intermediate name absent from the box, so bind every hop.
     """
     roots: list[Path] = []
     seen: set[Path] = set()
@@ -58,16 +48,12 @@ def interpreter_roots(python: Path) -> list[Path]:
             roots.append(root)
 
     p = python
-    for _ in range(10):  # cycle/rogue-chain guard; real chains are 1-2 hops
+    for _ in range(10):  # Bound cycles and unexpectedly long chains.
         try:
             if len(p.parents) >= 2:
                 add(p.parents[1])
             if not p.is_symlink():
-                # The interpreter root itself may be reached through a symlinked
-                # DIRECTORY rather than a symlinked file: uv writes
-                # <...>/cpython-3.12 -> <...>/cpython-3.12.12 and the venv points
-                # into the alias, so following only file links stops one hop
-                # short of the real tree. resolve() closes any such gap.
+                # Resolve directory symlinks that weren't visible as file links.
                 add(p.resolve().parents[1] if len(p.parents) >= 2 else p.resolve())
                 break
             target = Path(os.readlink(p))
@@ -80,22 +66,14 @@ def interpreter_roots(python: Path) -> list[Path]:
 def own_source_root() -> Path | None:
     """This package's own source tree, when it is installed editable.
 
-    A non-editable dist lives in site-packages and rides the venv bind; an
-    EDITABLE one leaves only a .pth behind, and its actual code sits in a
-    checkout the venv bind does not cover -- so `python -m aisan.launch` in the
-    box dies with `No module named aisan`, which names the module and says
-    nothing about the mount that is missing.
+    A normal installation lives in site-packages and is covered by the venv
+    bind. An editable installation uses a ``.pth`` file to reach source outside
+    that bind, so the source root must also be mounted.
 
-    Just this package, found from the module rather than by scanning every
-    editable distribution in the venv. Nothing above this package is imported
-    to reach the launcher, so no unrelated source tree needs to be mounted into
-    the box.
+    Derive the root from this module so unrelated editable packages stay hidden.
     """
     root = Path(__file__).resolve().parent.parent
-    # The parent of the package dir is a source root only for an editable
-    # install (<checkout>/src/aisan -> <checkout>/src). Installed normally it is
-    # site-packages, which the venv bind already covers, and binding it again
-    # would be a second mount of the same tree under a different name.
+    # A site-packages parent is already covered by the venv bind.
     return root if (root / "aisan").is_dir() and not _in_site_packages(root) else None
 
 
@@ -104,26 +82,17 @@ def _in_site_packages(path: Path) -> bool:
 
 
 def launcher_binds(python: Path | None = None) -> list[BindSpec]:
-    """Read-only binds every box with egress needs: aisan's own runtime.
+    """Return read-only binds for the in-box aisan launcher.
 
-    A spec requirement, not a consumer's convenience. The launcher runs INSIDE
-    the box, so aisan's interpreter, the venv, and the trees aisan's own imports
-    resolve through have to be visible there -- and a box whose payload is a
-    shell script, or a compiled binary, or another language's toolchain has no
-    other reason to contain a Python. Stating it here is what keeps "aisan
-    works" from silently depending on the consumer having bound its own
-    interpreter for its own reasons -- a dependency that holds right up until the
-    consumer stops needing a Python in the box, and then breaks aisan.
+    The launcher runs inside the box and requires its interpreter, venv, and
+    imported source even when the payload doesn't use Python. Including these
+    binds in the launcher policy avoids relying on payload-specific mounts.
 
-    Three parts, none redundant: the venv dir unresolved (bin/python is a
-    symlink out of it), the interpreter chain it points at, and -- for an
-    editable install only -- this package's own source root, which coincides
-    with the venv only when it is installed normally.
+    The binds cover the unresolved venv, the interpreter symlink chain, and the
+    package source root for editable installations.
 
-    The venv is proven by its `pyvenv.cfg`, not guessed from depth: a system
-    interpreter's grandparent is /usr, which `interpreter_roots` already
-    covers, and the unproven guess bound it a second time under the venv's
-    name.
+    ``pyvenv.cfg`` distinguishes a venv from a system interpreter whose parent
+    directory is already covered by ``interpreter_roots``.
     """
     exe = python or Path(sys.executable)
     venv = exe.parent.parent
@@ -142,12 +111,9 @@ def launcher_binds(python: Path | None = None) -> list[BindSpec]:
 def launch_prefix(runtime_dir: Path, python: Path | None = None) -> list[str]:
     """The argv prefix that supplies a payload's egress transport.
 
-    `python -m` at an absolute interpreter path rather than the installed
-    `aisan-box-launch` console script: it names exactly the interpreter
-    `launcher_binds` bound, with no PATH lookup and no shim to resolve. In a box
-    the PATH deliberately holds several venvs' bin dirs, and picking the
-    launcher by name there would make which aisan runs a function of bind order.
-    The console script still exists, for an operator inside `box shell`.
+    An absolute ``python -m`` path selects the interpreter covered by
+    ``launcher_binds`` without a PATH lookup or shim. A box may contain several
+    venv bin directories whose order would otherwise choose the aisan version.
     """
     exe = python or Path(sys.executable)
     return [str(exe), "-m", f"{__package__}.launch", str(runtime_dir), "--"]
@@ -156,10 +122,9 @@ def launch_prefix(runtime_dir: Path, python: Path | None = None) -> list[str]:
 def exit_status(code: int) -> int:
     """A `wait` status as the number a shell would report.
 
-    A process killed by signal N has no exit code; `wait` and `subprocess.run`
-    hand it back as `-N`, while a shell reports `128 + N`. Normalising here means
-    a caller reading the status sees the same number with a launcher in the
-    middle as it would without one.
+    ``wait`` and ``subprocess.run`` report a signal as ``-N``, while shells
+    report ``128 + N``. Convert it so callers see the same status with or without
+    the launcher.
     """
     return code if code >= 0 else 128 - code
 
@@ -172,10 +137,8 @@ async def _run(runtime_dir: Path, cmd: list[str]) -> int:
 
     servers = []
     for entry in read_manifest(runtime_dir):
-        # Bind failures propagate: a relay that is not listening does not mean a
-        # degraded box, it means every call through that backend fails with a
-        # connection error, and startup is a far better place to learn that than
-        # the middle of a turn.
+        # Fail startup if a relay can't listen; every call to that backend would
+        # otherwise fail later with a connection error.
         servers.append(
             await relay.serve(Path(str(entry["socket"])), int(str(entry["port"])))
         )
@@ -183,10 +146,7 @@ async def _run(runtime_dir: Path, cmd: list[str]) -> int:
         proc = await asyncio.create_subprocess_exec(*cmd)
         loop = asyncio.get_running_loop()
         for sig in _FORWARD:
-            # Forward rather than die: the payload owns the job, and killing the
-            # launcher first would tear the relays out from under a process that
-            # is still trying to finish. It gets the signal, we wait for it, and
-            # the relays close after it is gone.
+            # Keep relays alive while the payload handles the forwarded signal.
             loop.add_signal_handler(sig, _forward, proc, sig)
         try:
             code = await proc.wait()
@@ -200,7 +160,7 @@ async def _run(runtime_dir: Path, cmd: list[str]) -> int:
 
 
 def _forward(proc: asyncio.subprocess.Process, sig: signal.Signals) -> None:
-    # Raced with the payload exiting. Nothing to signal, nothing to fix.
+    # The payload may exit before the signal is forwarded.
     with contextlib.suppress(ProcessLookupError):
         proc.send_signal(sig)
 

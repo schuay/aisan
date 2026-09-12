@@ -1,32 +1,24 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The bind model: an ordered mount policy, rendered as a bubblewrap argv.
+"""Render an ordered mount policy as a bubblewrap command line.
 
-The mechanism is per-call confinement. With an in-process agent harness the
-model's whole capability surface is its tools, so wrapping tool execution
-confines the agent without a process boundary -- and the same wrapper serves a
-box whose payload is one command. Each call runs inside a fresh bubblewrap mount
-namespace (the job worktree rw at its real absolute path, declared dependencies
-ro, everything else -- $HOME, other worktrees, the main checkout -- absent, not
-merely denied), under a systemd transient scope for cgroup limits.
+Each call runs in a fresh mount namespace. The job worktree is writable at its
+absolute host path, declared dependencies are read-only, and undeclared paths
+such as the host home and other worktrees are absent. An optional systemd scope
+applies resource limits.
 
-What the box may touch is one ordered list of binds, and the rule is bwrap's
-own: a later mount wins where two overlap. There is no second precedence rule
-layered on top -- no read-vs-write asymmetry, no field whose name encodes when
-it is emitted. Reading the list top to bottom is reading the policy, which is
-the property that makes a profile auditable.
+Mount order is the policy: when paths overlap, the later bwrap mount wins. No
+separate rule gives read-only or writable mounts priority, so reading the list
+from top to bottom reveals the effective policy.
 
-Known give-ups of this tier, documented rather than papered over:
-- Network is the host's unless `unshare_net` is set. With it set the box has
-  no route off the machine at all; host-side proxies then reach it only through
-  a bind-mounted UNIX socket, which is what the Vertex and RBE proxies do.
-  Interactive launchers default to that isolation and expose explicit `--net`
-  opt-in backed by authenticated host-loopback proxies.
-- No disk quota on the rw worktree (project quotas need root); only the tmpfs
-  mounts are size-capped.
-- /tmp is a fresh tmpfs per call: scratch there does not survive to the next
-  shell call. Durable scratch needs an explicit persistent bind.
+This layer has three known limits:
+
+* Without `unshare_net`, the box shares the host network. With it, the box has
+  no external route and reaches host-side proxies through mounted Unix sockets.
+* Only tmpfs mounts have size caps; the writable worktree has no disk quota.
+* `/tmp` is a fresh tmpfs for each call. Durable scratch requires an explicit
+  persistent bind.
 """
 
 from __future__ import annotations
@@ -37,9 +29,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-# The fixed system surface every sandboxed command sees. /usr and /etc ro; the
-# usual merged-usr symlinks recreated instead of bound so nothing else from /
-# leaks in. No /opt, no /srv, no /home beyond the tmpfs + explicit binds.
+# The fixed system surface. Bind /usr and /etc read-only and recreate the usual
+# merged-/usr symlinks without exposing other directories under `/`.
 _SYSTEM_ARGS = (
     "--ro-bind", "/usr", "/usr",
     "--symlink", "usr/bin", "/bin",
@@ -51,11 +42,9 @@ _SYSTEM_ARGS = (
     "--dev", "/dev",
 )  # fmt: skip
 
-# The host journal's stdout stream socket. `bash -lc` sources /etc/profile.d,
-# and on a systemd host an /etc/profile.d snippet may pipe shell startup through
-# `systemd-cat`, which connects here; /run is unbound, so absent this bind the
-# connect fails and prefixes every command with two benign "Failed to create
-# stream fd" lines that are then re-fed to the model on each shell result.
+# A login shell may invoke `systemd-cat` from `/etc/profile.d`. Because `/run` is
+# otherwise absent, expose this socket when present to prevent harmless journal
+# connection errors from appearing in every command result.
 _JOURNAL_STDOUT_SOCK = Path("/run/systemd/journal/stdout")
 
 _ISOLATION_ARGS = (
@@ -69,8 +58,10 @@ _ISOLATION_ARGS = (
 
 
 class Mode(enum.Enum):
-    """Which way a bind is mounted. Nothing else distinguishes two binds: where
-    they land relative to each other is their position in the list."""
+    """Whether a bind is read-only or writable.
+
+    Its position in the bind list determines precedence.
+    """
 
     RO = "ro"
     RW = "rw"
@@ -84,17 +75,13 @@ RW = Mode.RW
 class Bind:
     """Mount `path` into the box at its own absolute path.
 
-    A later Bind of an overlapping path wins, which is how a pin, a hole through
-    it, and a pin back inside that hole are all written: as three Binds in that
-    order. The mode alone carries no precedence -- an RO bind does not outrank an
-    RW one, it just comes after it or does not.
+    Later overlapping binds win. A pin, a hole through it, and another pin
+    inside the hole are represented as three binds in that order; the modes do
+    not alter their precedence.
 
-    `optional` is the one property the ordering cannot express, and it is
-    deliberately explicit rather than implied by what a bind is for. A dep
-    symlink target that vanished is a bind to skip; a guard that vanished is a
-    profile to refuse, because the path it was pinning stays writable under
-    whatever it was pinned on top of. Default False: a bind whose source is
-    missing fails the profile unless the caller has said it is safe to drop.
+    Set `optional` only when a missing source is safe to omit, such as a vanished
+    dependency symlink target. A missing guard must fail because omitting it can
+    leave the underlying path writable. Sources are mandatory by default.
     """
 
     path: Path
@@ -104,15 +91,11 @@ class Bind:
 
 @dataclass(frozen=True)
 class BindOver:
-    """Mount `src` at `dst` -- the one bind that is not src -> the same path.
+    """Mount `src` read-only at a different path, `dst`.
 
-    Everything else answers "let the box see this"; this answers "let the box see
-    THIS where it expects THAT", which is how a per-job /etc/hosts or a build
-    config reaches a checkout the job does not own. Mounted ro: the freedom this
-    adds is over the source, not over what the box may write.
-
-    Never optional. Silently skipping it leaves the box reading the ORIGINAL
-    file, which is the misconfiguration it exists to prevent.
+    This supplies a file where software already expects it, such as a per-job
+    `/etc/hosts` or a build configuration in another checkout. It is always
+    mandatory because omitting it would silently expose the original file.
     """
 
     src: Path
@@ -121,22 +104,17 @@ class BindOver:
 
 @dataclass(frozen=True)
 class Overlay:
-    """Show `path` WARM but discard what the box writes to it: an overlayfs whose
-    lower layer is the host directory and whose upper layer is a per-box tmpfs
-    (bwrap --tmp-overlay). Reads come from the host copy, writes die with the box.
+    """Expose the host contents at `path` but discard changes made in the box.
 
-    The shape this exists for is a shared tool cache the box must be able to
-    write to but must never actually change -- vpython's, which is 4 GB of
-    interpreters and ~21k Python files that every `git cl` execution runs. It
-    needs a lock file even to READ, so a ro bind fails ("failed to acquire read
-    lock ... read-only file system") and an absent one makes vpython try to
-    rebuild the venv, which with no network HANGS.
+    bwrap places a per-box tmpfs above the host directory. This supports shared
+    tool caches that require writes even for reads. In particular, vpython needs
+    a lock file to use its multi-gigabyte cache; a read-only bind fails, while an
+    absent cache triggers an offline rebuild that hangs.
 
-    Not a general substitute for RO: an overlay is writable from inside, so
-    anything the box must not change EVEN LOCALLY (a pinned git config, a
-    credential) is still a Bind(..., RO) later in the list. Never optional -- a
-    skipped overlay is the hang, and a hang is the worst way to learn about a
-    bad bind.
+    An overlay remains writable inside the box. Use a later read-only `Bind` for
+    files that must not change even temporarily, such as pinned Git config or
+    credentials. Overlays are mandatory because silently omitting a cache can
+    hang the tool that needs it.
     """
 
     path: Path
@@ -146,30 +124,25 @@ class Overlay:
 class Seal:
     """Replace `path` with an empty directory nothing can be created in.
 
-    An RO bind of a directory makes its EXISTING entries read-only; it does not
-    stop the box creating new ones... but it also cannot hide what is already
-    there. A seal does both: an empty tmpfs over the directory, remounted ro once
-    the rest of the list has been mounted.
+    A read-only directory still exposes existing entries and may permit new
+    mount points. A seal hides the contents with an empty tmpfs, then remounts it
+    read-only after all later mounts have created their holes.
 
-    This is the .git/worktrees case, and it is why pins are not enough on their
-    own. Pinning the sibling worktree configs that exist at assembly time is a
-    SNAPSHOT: a profile outlives the scan, so a job could write a config.worktree
-    into a sibling created after it, or into a directory of its own invention,
-    and steer host-side git from there. Sealing removes the whole question --
-    siblings are not read-only in the box, they are absent -- while a later
-    Bind(<own dir>, RW) punches this job's own dir back through.
+    Git worktrees require this stronger operation. Pinning the sibling configs
+    found during assembly captures only a snapshot; a job could later add a
+    sibling or invent a directory containing `config.worktree`. Sealing the
+    entire worktrees directory hides every sibling, while a later writable bind
+    restores the current worktree's directory.
 
-    The ro remount is deferred to the end of the list on purpose: bwrap cannot
-    create a mountpoint inside an already-read-only tmpfs, so sealing atomically
-    would make every hole through the seal fail with "Can't mkdir: Read-only file
-    system" (verified against bwrap 0.11.2).
+    bwrap cannot create a mount point inside an already read-only tmpfs. The
+    read-only remount therefore runs after the complete bind list. This behavior
+    was verified with bwrap 0.11.2.
     """
 
     path: Path
-    # An absent destination is normally a caller mistake: bwrap may create it
-    # through a writable host bind as a side effect. Internal reserved paths are
-    # different. They must be hidden before their first user appears, so their
-    # seals explicitly opt into an absent destination.
+    # Missing destinations usually indicate caller error because bwrap may
+    # create them through a writable host bind. Reserved internal paths opt in
+    # because they must be hidden before their first use.
     allow_missing: bool = False
 
 
@@ -178,20 +151,16 @@ BindSpec = Bind | BindOver | Overlay | Seal
 
 @dataclass(frozen=True)
 class EnsurePath:
-    """A host path a profile needs present before its binds resolve, created
-    empty if absent and removed again if the box created it.
+    """A host path that must exist before bind resolution.
 
-    Not a mount. The .git guard pins bind REAL host files, so that an in-box
-    agent cannot make host-side git read a config or hook it planted -- and on a
-    fresh checkout some of those files are absent, while a missing bind source
-    fails the profile. Creating them is a host mutation, and doing it inside the
-    pure preset meant even `aisan explain`, a dry run, wrote into the shared
-    .git. Declared here instead, the Box creates them on the run path and undoes
-    them on the inspector's staged path, so a review leaves the host untouched.
+    The box creates a missing path empty and removes it afterward if it remains
+    safe to do so. This supports Git guard pins whose source files may not exist
+    in a fresh checkout. Those pins prevent the box from planting config or
+    hooks that host-side Git would later read.
 
-    `is_dir` distinguishes a file (touched, unlinked) from a directory (mkdir'd,
-    rmdir'd only if still empty); the producer knows which, and the two clean up
-    differently.
+    Declaring creation here keeps presets pure: `Box` performs the host mutation
+    only while staging or running and then undoes it. `is_dir` selects `mkdir`
+    and conditional `rmdir` instead of touching and unlinking a file.
     """
 
     path: Path
@@ -202,10 +171,8 @@ class EnsurePath:
 class Mount:
     """One resolved mount operation, in the order bwrap will apply it.
 
-    The resolved list is the single representation of what a profile mounts: the
-    leak check runs over it, the argv is a formatting of it, and the inspector
-    displays it. A check against one representation and a display of another is
-    how the two drift apart without anything failing.
+    The leak check, argv renderer, and inspector all consume this representation
+    so validation and display cannot drift from the mounted policy.
     """
 
     op: str  # ro | rw | tmpfs | overlay | seal-ro
@@ -215,26 +182,20 @@ class Mount:
 
     @property
     def covers(self) -> bool:
-        """Whether this op mounts something over `dst`, as opposed to modifying a
-        mount already there. Only a covering op can shadow what came before it."""
+        """Return whether this operation can shadow an earlier mount at `dst`."""
         return self.op != "seal-ro"
 
 
 def _bindable(p: Path) -> bool:
-    """Whether an OPTIONAL bind source can be mounted, i.e. whether we can stat
-    it at all -- not merely whether it exists.
+    """Return whether an optional bind source can be statted.
 
-    `Path.exists()` is not enough: it swallows ENOENT/ENOTDIR/EBADF/ELOOP and
-    re-raises everything else, so a path we cannot reach for any other reason
-    propagates an OSError out of wrapper() instead of being skipped. The case
-    that bit us is a credential-gated network mount (a /google path with an
-    expired ticket) raising ENOKEY: the caller had already decided that bind was
-    optional, but sandbox assembly blew up and took the whole job with it.
-    Unreachable and absent are the same thing for an optional bind -- bwrap
-    cannot mount either -- so treat any stat failure as "skip".
+    `Path.exists()` suppresses only selected errors. Other failures, such as
+    ENOKEY from a credential-gated network mount, would escape during sandbox
+    assembly. An optional source is unusable whether it is absent or merely
+    unreachable, so any stat failure omits it.
 
-    Only for optional sources. A mandatory one must keep raising: skipping it
-    silently drops a guard while whatever it was pinned over stays writable.
+    Mandatory sources use separate checks that preserve errors. Silently
+    omitting one could drop a guard and leave its underlying path writable.
     """
     try:
         p.stat()
@@ -243,10 +204,8 @@ def _bindable(p: Path) -> bool:
     return True
 
 
-# The ro binds _SYSTEM_ARGS already makes (/usr, /etc), as (source, destination).
-# Parsed rather than written out a second time so the two cannot drift: one of
-# the readers below decides what to drop and the other decides what a box can
-# read, and a stale copy of this list would get both wrong.
+# Read-only binds already emitted by `_SYSTEM_ARGS`, parsed as source and
+# destination pairs so deduplication and reachability checks use the same list.
 _SYSTEM_RO_BINDS = tuple(
     (Path(_SYSTEM_ARGS[i + 1]), Path(_SYSTEM_ARGS[i + 2]))
     for i in range(len(_SYSTEM_ARGS) - 2)
@@ -255,35 +214,29 @@ _SYSTEM_RO_BINDS = tuple(
 
 
 def _system_ro_roots() -> frozenset[Path]:
-    """The paths an RO bind need not re-emit, because the box already has them
-    mounted there, early and in the safe order. Re-emitting one is pure waste --
-    and, when it lands after a tmpfs it covers (the motivating bug: a
-    launcher-resolved interpreter root of /usr re-emitted after the $HOME
-    tmpfs), a leak.
+    """Return identity-mounted system roots that need no second read-only bind.
 
-    Identity binds only. The claim being made is "a bind of this SOURCE at this
-    same path is already in effect", which a system bind of one path at another
-    would not support -- it would leave the source unmounted while the name
-    looked taken.
+    Re-emitting one after a tmpfs could expose host contents again. This once
+    happened when a resolved interpreter root caused `/usr` to be mounted after
+    the home tmpfs.
+
+    A non-identity system bind does not qualify because it leaves the source's
+    own path unmounted.
     """
     return frozenset(dst for src, dst in _SYSTEM_RO_BINDS if src == dst)
 
 
 def _system_mounts() -> list[Mount]:
-    """The fixed system surface as mounts, for checks that must reason about
-    what the box gets rather than only about what the caller asked for.
+    """Return the complete fixed system surface in bwrap order.
 
-    ALL of it, identity or not, and in the order bwrap applies it -- ahead of
-    everything a profile asks for. A check that skipped an entry here would be
-    a check reading a smaller box than the one that runs.
+    Policy checks need the mounts the box receives implicitly as well as those
+    requested by the caller.
     """
     return [Mount("ro", dst, src) for src, dst in _SYSTEM_RO_BINDS]
 
 
 def _resolved(p: Path) -> Path:
-    """`p` canonicalised, or `p` itself when the host cannot say. Comparisons
-    here are between real locations: a symlinked home and its target are one
-    directory, and treating them as two is how a check misses."""
+    """Return the canonical host path, or `p` when it cannot be resolved."""
     try:
         return p.resolve()
     except OSError:
@@ -293,42 +246,26 @@ def _resolved(p: Path) -> Path:
 def paths_overlap(a: Path, b: Path) -> bool:
     """Whether `a` and `b` are the same path or one is inside the other.
 
-    The overlap decision, once, for every guard that asks whether a mount and a
-    credential touch. EITHER direction: a mount above a credential store
-    publishes the store whole, and a mount of one file inside it publishes that
-    file -- which, for a store whose point is the token it holds, is the same
-    answer. A one-way containment test reads as the stricter rule and is not.
-
-    Resolved on both sides: these are host paths, where a symlinked home and its
-    target are one directory.
+    Containment in either direction exposes protected data: mounting an ancestor
+    exposes the whole store, while mounting a descendant exposes part of it.
+    Resolve both host paths so symlink aliases cannot evade the check.
     """
     ra, rb = _resolved(a), _resolved(b)
     return ra.is_relative_to(rb) or rb.is_relative_to(ra)
 
 
 def _reachable_through(mounts: list[Mount], path: Path) -> tuple[Path, ...]:
-    """Sources leaving any part of `path` readable after ordered mounts.
+    """Return mount sources that leave any part of `path` readable in the box.
 
-    Reachability, not containment, and the difference is the whole point. A
-    mount whose SOURCE overlaps the path publishes it, at the mount's
-    destination. Anything landing over that destination afterwards -- a tmpfs, a
-    seal, a bind from somewhere else -- takes it away again. So the answer is a
-    fact about the finished box, not about any one entry in the list, and it has
-    to be computed the way bwrap computes it: in order, later winning.
+    Process mounts in order because a later tmpfs, seal, or unrelated bind can
+    hide an earlier publication. Track each box destination separately: one host
+    path may be mounted under several names, and hiding one does not hide the
+    others.
 
-    Tracked as box-side paths rather than a boolean because one host path can be
-    published at several destinations (a bind-over mounts a source somewhere its
-    own name does not appear), and a tmpfs over one of them says nothing about
-    the others.
-
-    Sources are resolved and destinations are not, because they are facts about
-    two different filesystems. A source is a host path, where a symlinked home
-    and its target are one directory. A destination is a location in the box,
-    which bwrap creates as given -- and if the destination IS a symlink there,
-    bwrap refuses the mount outright ("Can't mount on symlink destination", 0.11.2),
-    so there is no case where following one host-side describes the box. Resolving
-    them would let a symlink invent a mask that the box does not have, and a mask
-    that is not there is a credential this returns None for.
+    Resolve sources because they belong to the host filesystem, where symlink
+    aliases identify the same data. Keep destinations literal because they
+    belong to the box. bwrap rejects a symlink destination rather than following
+    it, so host-side resolution would invent masks that the box never receives.
     """
     target = _resolved(path)
     visible: dict[Path, Path] = {}
@@ -342,20 +279,15 @@ def _reachable_through(mounts: list[Mount], path: Path) -> tuple[Path, ...]:
         src = _resolved(m.src)
         if not paths_overlap(target, src):
             continue
-        # Where that overlap lands in the box: under the mount point when the
-        # source holds the credential, AT it when the credential holds the
-        # source. Geometry, not policy -- `paths_overlap` already decided.
+        # Preserve the protected path's offset when its ancestor is mounted.
         inside = target.relative_to(src) if target.is_relative_to(src) else Path()
         visible[m.dst / inside] = m.src
-    # The LAST source to publish a given box path, because re-publishing the
-    # same path overwrites the value while keeping its position: what the
-    # operator has to remove is the mount that won, not the one it covered.
+    # Reassigning an existing key records the source of the winning mount.
     return tuple(visible.values())
 
 
 def _strict_ancestor(a: Path, b: Path) -> bool:
-    """Is `a` a strict ancestor of `b` (a covers b, a != b)? Both resolved, so a
-    symlinked home still compares against its real target."""
+    """Return whether resolved path `a` is a strict ancestor of `b`."""
     try:
         ra, rb = a.resolve(), b.resolve()
     except OSError:
@@ -366,10 +298,9 @@ def _strict_ancestor(a: Path, b: Path) -> bool:
 def _validate_destination(path: Path) -> None:
     """Require a box path whose kernel meaning matches its written shape.
 
-    Relative destinations depend on the launcher cwd. Parent traversal is more
-    subtle: normalizing it in Python is not sound when an earlier component is
-    a symlink, while leaving it literal makes the mount checks reason about a
-    different path from the one the kernel reaches. Refuse both forms instead.
+    Relative destinations depend on the launcher cwd. Normalizing parent
+    traversal is unsafe when an earlier component is a symlink, while leaving it
+    intact makes policy checks and the kernel interpret different paths.
     """
     if not path.is_absolute() or ".." in path.parts:
         raise ValueError(
@@ -379,38 +310,32 @@ def _validate_destination(path: Path) -> None:
 
 @dataclass(frozen=True)
 class Sandbox:
-    """One job's confinement profile; `wrapper()` yields the argv prefix that
-    runs a command inside it. Immutable so a profile can be shared across a
-    job's calls.
+    """An immutable confinement profile for one job.
+
+    `wrapper()` returns the command prefix for running inside the profile.
     """
 
-    # The rw root (the job worktree), bound at its real absolute path because
-    # remote-exec resolves build inputs by absolute path. Also the cwd, and one
-    # of the two things the leak check protects. Mounted after the tmpfs and
-    # before `binds`, so a bind written into the list can still pin a path
-    # INSIDE the worktree read-only (the .git gitdir pointer is exactly that).
+    # The writable job root and cwd. It retains its absolute host path because
+    # remote execution resolves build inputs by that path. It is mounted after
+    # tmpfs entries and before `binds`, allowing later guards such as the .git
+    # gitdir pointer to make paths inside it read-only.
     root: Path
     # Everything else the box may touch, in mount order: later wins.
     #
-    # There is one departure from pure list order, and it is an invariant rather
-    # than a preference: an RO bind that is a strict ANCESTOR of the rw root or
-    # of a tmpfs is hoisted to before the thing it would otherwise cover. The
-    # ancestors are layout-dependent and mostly not chosen by the caller (an
-    # operator's extra_ro, an editable source root, a resolved launcher chain),
-    # so requiring them to be ordered by hand would turn a host's directory
-    # layout into a profile bug. The motivating case: a launcher-resolved interpreter
-    # root of /usr re-emitted after the $HOME tmpfs shadowed it read-only, and
-    # $HOME/.cache is where vpython takes its lock. Nothing else moves -- the
-    # relative order of the binds a caller wrote is preserved exactly.
+    # One safety rule adjusts the written order: a read-only strict ancestor of
+    # the writable root or a tmpfs is hoisted before that mount. Such ancestors
+    # often depend on host layout, including editable source roots and resolved
+    # interpreter chains. Requiring callers to predict them would make the same
+    # profile unsafe on another host. This rule fixed `/usr` being remounted
+    # after the home tmpfs and exposing the host home read-only. All other binds
+    # retain their relative order.
     binds: tuple[BindSpec, ...] = ()
     # (mount point, size in bytes). Mounted before the root and the binds so a
     # bind under a tmpfs (the worktree under the blanked $HOME) lands on top.
     tmpfs: tuple[tuple[str, int], ...] = ()
-    # The complete environment inside the sandbox (--clearenv first, so the
-    # daemon's env -- credentials included -- never leaks through). Verbatim and
-    # complete: nothing is added on the way to --setenv, so what a profile says
-    # the box's environment is, is what it is. A caller wanting the
-    # noninteractive defaults a build expects merges `spec.DEFANG_ENV` in itself.
+    # The complete box environment, applied after `--clearenv` so host
+    # credentials cannot leak through inheritance. Callers add noninteractive
+    # build defaults explicitly from `spec.DEFANG_ENV`.
     env: tuple[tuple[str, str], ...] = ()
     # cgroup limits, applied via `systemd-run --user --scope` when available.
     # Empty string / 0 skips that property.
@@ -421,41 +346,31 @@ class Sandbox:
     # systemd slice to place the scope under (`--slice=`). A stable cgroup anchor
     # for host-side accounting; empty leaves systemd's default.
     slice_unit: str = ""
-    # Give the box its OWN network namespace: no route off the machine, and a
-    # fresh loopback of its own. This is the real isolation an L3 allowlist only
-    # approximates, because RBE and the rest of Google share one frontend IP
-    # range.
+    # Give the box a private network namespace with its own loopback and no
+    # external route. An L3 allowlist cannot provide the same boundary because
+    # RBE and other Google services share frontend address ranges.
     #
-    # It also redefines what "127.0.0.1" means in here. The box's loopback is
-    # NOT the host's, so a host-side listener on a port is unreachable and any
-    # such proxy needs its in-box half (a relay onto a bind-mounted UNIX socket,
-    # which crosses the boundary because it is a filesystem object). Turning
-    # this on without that half is what silently takes remote builds away.
+    # Host loopback listeners are unreachable from this namespace. Proxies need
+    # an in-box TCP relay connected to a bind-mounted Unix socket; omitting that
+    # relay disables their service.
     unshare_net: bool = False
 
     def resolve(self) -> list[Mount]:
-        """The bind list as the ordered mount operations it compiles to.
+        """Compile the bind list into ordered mount operations.
 
-        This is the representation everything else works from: `wrapper()`
-        formats it, `_assert_no_leak` checks it, and the inspector prints it.
-        Optional sources that cannot be stat'd are already dropped here and
-        mandatory ones have already raised, so what comes back is exactly what
-        the box will have.
+        `wrapper()`, `_assert_no_leak`, and the inspector consume the result.
+        Resolution omits unreachable optional sources and raises for missing
+        mandatory sources, so the returned operations describe the actual box.
         """
         tmpfs_mounts = [Path(m) for m, _ in self.tmpfs]
         mounts: list[Mount] = []
-        # Deferred to the very end: a seal cannot be remounted ro until every
-        # hole through it has been mounted. See Seal.
+        # A seal becomes read-only only after all holes through it are mounted.
         seal_ro: list[Mount] = []
-        # What mode each literal path is currently mounted with, so a bind that
-        # is already in effect is not emitted twice. Keyed on the literal path,
-        # never the resolved one: an interpreter root and the unversioned symlink
-        # a venv names it by resolve to the same directory but are two distinct
-        # destinations in the box, and binding only one leaves the other missing
-        # so every exec fails ENOENT. Any covering mount invalidates the entries
-        # it covers -- otherwise a pin re-stated after a hole was punched through
-        # it would look redundant and be dropped, which is the guard the .git
-        # dance depends on.
+        # Track the effective mode at each literal destination to avoid duplicate
+        # binds. Do not resolve these paths: a venv's unversioned interpreter
+        # symlink and its target need separate destinations even when they resolve
+        # to one host directory. A covering mount invalidates entries below it so
+        # a guard repeated after a hole is preserved.
         in_effect: dict[Path, Mode] = {}
 
         def emit(m: Mount) -> None:
@@ -466,15 +381,13 @@ class Sandbox:
             for k in [k for k in in_effect if k == m.dst or k.is_relative_to(m.dst)]:
                 del in_effect[k]
 
-        early: list[Bind] = []  # RO ancestors of a tmpfs: before the tmpfs block
-        mid: list[Bind] = []  # RO ancestors of the root: after it, before the root
+        early: list[Bind] = []  # Read-only ancestors mounted before tmpfs entries.
+        mid: list[Bind] = []  # Read-only ancestors mounted before the root.
         rest: list[BindSpec] = []
         for spec in self.binds:
             if isinstance(spec, Bind):
-                # Every bind is validated here, once: an optional source we
-                # cannot stat is dropped, a mandatory one fails the profile.
-                # Splitting the check between this pass and the emit loop below
-                # is how one of the two ends up unreachable.
+                # Validate every bind in this pass so hoisted and ordinary binds
+                # handle missing sources consistently.
                 if spec.optional:
                     if not _bindable(spec.path):
                         continue
@@ -532,38 +445,27 @@ class Sandbox:
         *,
         allowed_sources: Iterable[Path] = (),
     ) -> tuple[Path, Path] | None:
-        """The first (mount source, protected path) left readable in the box.
+        """Return the first protected path left readable through a mount source.
 
-        Over the resolved mounts, with the fixed system surface in front of them,
-        for the same reason `_assert_no_leak` runs over that list: it is what the
-        box gets. The question a caller needs answered is "can the payload read
-        this file", and no reading of the bind list alone answers it -- in either
-        direction.
+        Evaluate the resolved mounts after the fixed system surface because that
+        ordered result determines whether the payload can read a path. The input
+        bind list alone omits both implicit mounts and later masks.
 
         `allowed_sources` names intentional holes inside a protected directory.
-        A source equal to or below one of those paths is ignored; an ancestor is
-        not, because binding the ancestor would publish protected siblings too.
-        Every surviving publication is examined, so one allowed hole cannot hide
-        another mount that exposes the same protected path through an alias.
+        Ignore a source at or below an allowed path, but still reject an ancestor
+        that also publishes protected siblings. Examine every publication so an
+        allowed mount cannot hide another alias to the protected path.
 
-        Not, in particular, "does a bind name a path containing the credential".
-        That proxy fails on a host whose home lives UNDER a system root. Some
-        enterprise Linux images place home directories inside `/usr/local`, and
-        there a credential store at `~/.config/<name>` is a path inside `/usr`:
+        Checking whether a requested bind contains a credential is insufficient
+        when home resides below a system root such as `/usr/local`:
 
-        - every box already has the credential's directory in reach through the
-          unconditional `--ro-bind /usr /usr`, which no bind list mentions and
-          the proxy therefore never audits. What actually keeps the credential
-          out is the tmpfs over $HOME landing on top of it, and that is a
-          property of the mount ORDER;
-        - meanwhile a spec that names `/usr` (an interpreter root under it, say
-          -- see launch.interpreter_roots) reads as an exposure while compiling
-          to no mount at all, because resolve() drops an RO bind of a system root
-          as already in effect. The same layout is why that dedup and the
-          RO-ancestor hoisting above exist; this is the third symptom of it.
+        * The implicit `/usr` bind exposes the credential directory until the
+          later home tmpfs hides it.
+        * A requested `/usr` bind compiles to no operation because the system
+          surface already mounted it.
 
-        So a bind naming `/usr` here is ordinary rather than alarming, and the
-        thing worth refusing is a box that can actually read the protected path.
+        The final mount order, rather than a bind's spelling, therefore decides
+        whether to refuse the box.
         """
         mounts = [*_system_mounts(), *self.resolve()]
         allowed = tuple(_resolved(p) for p in allowed_sources)
@@ -576,17 +478,13 @@ class Sandbox:
         return None
 
     def wrapper(self) -> list[str]:
-        """The argv prefix: [systemd-run ...] bwrap ... -- ready to have the
-        actual command appended."""
+        """Return the systemd and bwrap argv prefix for a command."""
         if not self.root.is_dir():
             raise FileNotFoundError(f"sandbox root missing: {self.root}")
         mounts = self.resolve()
-        # Guarantee: no later mount may cover (be an ancestor-or-equal of) an
-        # earlier tmpfs or the rw root. A violation is a silent sandbox leak --
-        # the home-tmpfs shadow if the hoisting above ever regresses, or a
-        # worktree turned read-only (or replaced with real disk) by a later
-        # ancestor bind. Fail the profile at assembly rather than hand the agent
-        # a box that is not what it claims to be.
+        # A later mount covering an earlier tmpfs or the writable root can expose
+        # the host home, make the worktree read-only, or replace it with other
+        # host contents. Reject such profiles before launch.
         self._assert_no_leak(mounts)
         argv = list(self._cgroup_args())
         argv += ["bwrap", *_SYSTEM_ARGS]
@@ -602,13 +500,10 @@ class Sandbox:
         return argv
 
     def _assert_no_leak(self, mounts: list[Mount]) -> None:
-        """No later mount may cover (be an ancestor-or-equal of) an earlier
-        tmpfs or the rw root, and raise naming the offending pair if one does.
+        """Reject a later mount that covers an earlier tmpfs or writable root.
 
-        Runs over the resolved list rather than the emitted argv: one
-        representation, checked and displayed identically. Parsing back the argv
-        would mean a second reading of the same intent that can disagree with
-        the first without anything failing.
+        Validate the resolved mount list used by both rendering and inspection
+        so the checked representation cannot differ from the displayed one.
         """
         root = self.root.resolve()
         protected = [
@@ -620,8 +515,7 @@ class Sandbox:
             for mi, m in enumerate(mounts):
                 if mi <= pi or not m.covers:
                     continue
-                # is_relative_to is True for equality too: a later bind that
-                # remounts the exact path is just as much a shadow.
+                # Equality also shadows the earlier mount.
                 if pp.is_relative_to(m.dst.resolve()):
                     raise ValueError(
                         f"sandbox mount order leaks: {m.dst} (index {mi}) covers"
@@ -630,8 +524,7 @@ class Sandbox:
                     )
 
     def _cgroup_args(self) -> list[str]:
-        # systemd-run needs the user manager; when it is absent (a bare chroot,
-        # a container) degrade to bwrap-only rather than failing every call.
+        # Hosts without a systemd user manager still use bwrap without cgroups.
         if not self.use_cgroup or shutil.which("systemd-run") is None:
             return []
         args = ["systemd-run", "--user", "--scope", "-q", "--collect"]
@@ -647,24 +540,18 @@ class Sandbox:
 
     @staticmethod
     def _journal_socket_args() -> list[str]:
-        # Bind the host journal socket (when present) so the login shell's
-        # systemd-cat connect succeeds instead of spraying "Failed to create
-        # stream fd" into every result. Keeping `bash -lc` preserves the
-        # deployment-set build PATH; this just silences its one sandbox casualty.
+        # Let login-shell `systemd-cat` calls connect without exposing `/run`.
         if _JOURNAL_STDOUT_SOCK.is_socket():
             return ["--ro-bind", str(_JOURNAL_STDOUT_SOCK), str(_JOURNAL_STDOUT_SOCK)]
         return []
 
-    # There is deliberately no path-containment check here. Confinement is the
-    # mount namespace: a caller runs the whole loop inside the wrapper, so a
-    # second in-process check of the same policy would be a copy that can drift
-    # from the argv without anything failing. A tool that needs containment
-    # belongs inside the box, not behind a predicate.
+    # The mount namespace enforces containment. A second in-process copy of the
+    # policy could drift from the emitted argv; tools needing confinement must
+    # run inside the wrapper.
 
 
 def _mount_args(mounts: list[Mount]) -> list[str]:
-    """Format resolved mounts as bwrap arguments, one op at a time and in
-    order. The only place a Mount becomes a string."""
+    """Format resolved mounts as ordered bwrap arguments."""
     argv: list[str] = []
     for m in mounts:
         match m.op:

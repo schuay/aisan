@@ -1,15 +1,11 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""User-written bind specs: a five-key TOML file, appended to a preset.
+"""Load user-written bind specs from a five-key TOML format.
 
-The launchers' escape hatch until now was "copy the script and edit it",
-which forks the template the moment a session wants one more directory. This
-is the smaller format for that case: a file naming paths to bind ro, rw and
-overlaid, appended AFTER the preset's own list by the caller's `with_binds`
--- later wins is the model's one precedence rule, so appending is exactly
-"these shadow the template", and no composition semantics have to be
-defined::
+The format adds mounts without requiring users to copy and modify a launcher.
+Callers append the result to a preset, so these mounts follow the standard rule
+that later entries shadow earlier ones::
 
     # a user spec, in full
     ro = [                       # optional: absent on this host -> dropped
@@ -28,79 +24,48 @@ defined::
         "./base-userbinds.toml", # BEFORE this file's own keys, so this
     ]                            # file shadows what it includes
 
-`~` expands, and a relative path resolves against the FILE's directory, so a
-spec checked into a repo can name its neighbours without knowing where the
-checkout lives. `include` is the same resolution applied to spec files, which
-is what lets a set of them live in one directory and name each other by
-basename.
+`~` expands to the user's home. Relative paths resolve from the spec file's
+directory, allowing checked-in specs to refer to neighboring repositories.
+Included files use the same resolution.
 
-`include` exists because the alternative ways to compose a growing collection
-are both worse. Repeating `--binds` per file puts the order in the operator's
-shell history, where the next reader cannot see it; a glob puts it in
-lexicographic filename order, where nobody can see it and a rename silently
-changes which file wins. An include list is the order, written down in the file
-that depends on it. Expansion is depth-first and in the order given, each file
-still applied whole -- so later-wins remains the one precedence rule, and an
-including file shadows what it includes.
+An explicit include list keeps composition order in the file instead of the
+operator's command line or implicit filename sorting. Expansion is depth-first
+in the written order, with each file applied as a unit. The including file
+therefore shadows the files it includes.
 
-A file already expanded is not expanded again: a diamond is two paths to one
-file, not a request to mount it twice. A file that includes itself, however
-transitively, is a refusal naming the chain -- unlike the diamond, that is
-never what anybody meant.
+Diamond includes apply a shared file once. Direct or transitive include cycles
+are rejected with the full chain.
 
-The three optionality defaults are the ones the repo measured rather than
-picked: a ro reference bind that has vanished is a bind to skip
-(`with_reference_docs`), while a named WRITABLE that silently vanishes is a
-box quietly missing what the caller asked for. `overlay` is mandatory for a
-sharper reason than rw's -- `Overlay`'s docstring measures what the two
-plausible alternatives do to a shared tool cache, and the failure a skipped
-one produces is a HANG rather than a missing directory. There is deliberately
-no per-path `optional` key: when the defaults are wrong for a case, the
-escape hatch is still Python, and a data file that grew the vocabulary for it
-would be the matching DSL the library explicitly refuses to bless.
+The repository's measured use cases determine optionality. A missing read-only
+reference is skipped, while a missing writable path is an error because the box
+would lack a requested output location. Overlays are also mandatory because an
+absent shared tool cache can cause an offline rebuild to hang. Cases requiring
+different behavior use the Python API; the TOML format has no per-path
+`optional` setting.
 
-`path` is the one key here that is not a mount, and it is admitted because it
-names DIRECTORIES rather than values. Every entry must be covered by a mount
-this same file names, so the key cannot widen the box by a byte: it makes
-what a bind already granted resolvable by name, which is the other half of
-the same grant. A tool tree bound and not on the PATH is a directory whose
-contents nothing resolves, and the shims that would work around that (a
-symlink into a directory already on the PATH) break the argv0-relative
-bootstrap such trees are usually written with. Coverage is checked against
-this file rather than the merged spec so the refusal names two lines the
-reader can see at once.
+`path` names directories rather than arbitrary environment values. Every entry
+must be covered by a mount from the merged include tree, so it adds no filesystem
+access. It only makes an already mounted tool discoverable without symlinks that
+could break argv0-relative bootstrap logic.
 
-Same reasoning for what is absent on purpose: env VALUES (capability, not
-mount -- a key naming one is the grant this format refuses, and a payload
-that needs one has its own configuration to put it in), removals,
-reordering, globs, Seal and BindOver. `include` names files rather than
-patterns for the same reason globs are absent from the mount keys: the set it
-resolves to has to be readable off the page.
+The format excludes arbitrary environment values, removals, reordering, globs,
+`Seal`, and `BindOver`. Those operations require reviewed Python policy or may
+carry capabilities that a mount-only file cannot reveal. Includes name files
+explicitly so readers can see the complete set and its order.
 
-The credential guard is why `load` takes the egress tuple. Until now every
-bind source was audited code plus a snapshot; a user file is the first
-input nobody reviewed, and the credential-absence claim is subtraction -- a
-spec naming `~` would re-add exactly what the profile exists to keep out.
-`load` refuses such a file naming the key it came from. `Box._sandbox` then
-asks the harder question of the assembled box -- whether its mounts leave the
-credential readable inside -- so neither a user file nor a hand-composed
-caller can route around it. This one is deliberately the stricter of the two:
-a path a person wrote down may not name the credential even if some later
-mount would go on to cover it.
+`load` accepts the egress tuple so it can reject user mounts that overlap a
+backend credential. It rejects the written source even if a later mount would
+hide the credential. `Box._sandbox` separately evaluates the finished mount
+order, covering both user files and hand-built specs.
 
-The guard then asks the same question of every OTHER backend's credential
-(`known_credential_paths`), because this box's egress cannot name them: an
-`aisan claude --binds` file listing `~/.codex` is a real credential in a box
-whose review said it held none. `~/.ssh` and `~/.gnupg` are refused on the
-same terms though aisan uses neither -- see `_REFUSED_KEY_STORES` for why
-those two and not a longer list.
+The guard also rejects credentials owned by other known backends. For example,
+a Claude box must not receive `~/.codex` simply because Codex is absent from its
+egress tuple. It applies the same rule to `~/.ssh` and `~/.gnupg`.
 
-Git-awareness is NOT applied here. For interactive sessions the perimeter
-model treats the whole root as the session's, and hook-pinning user repos
-would be a different model applied inconsistently; the one measured trap --
-a linked worktree bound alone answers `fatal: not a git repository` -- is
-recorded in the session scripts, and the fix for that case is `git_binds` in
-a hand-composed spec, which `aisan-claude-specs.py` demonstrates.
+This loader does not add Git-specific binds. Interactive sessions treat the
+entire root as belonging to the session. Hand-built specs that need a linked
+worktree's external Git metadata can add `git_binds`, as demonstrated by
+`aisan-claude-specs.py`.
 """
 
 from __future__ import annotations
@@ -117,39 +82,31 @@ from .sandbox import RO, RW, Bind, BindSpec, Overlay
 
 __all__ = ["UserSpec", "load"]
 
-# Host key stores that are refused outright, though no backend of aisan's uses
-# them. Not a general list of sensitive directories: these two hold private keys
-# whose whole security model is that they never leave the machine, and neither
-# has a legitimate reason to be inside an agent box -- an agent that needs to
-# push runs `git` on the HOST, or gets a deploy key written for the purpose.
-# Everything else an operator might regret binding stays their call; drawing the
-# line further out would turn this guard into a taste list nobody can maintain.
+# Always refuse the host's SSH and GnuPG private-key stores. Neither belongs in
+# an agent box; host-side Git or a purpose-specific deploy key handles pushes.
+# This is intentionally narrower than a general list of sensitive directories.
 _REFUSED_KEY_STORES = (".ssh", ".gnupg")
 
 
 def _refused_key_stores() -> tuple[Path, ...]:
-    """Read per call, not at import: `Path.home` is what tests move."""
+    """Return key-store paths using the current home directory."""
     return tuple(Path.home() / name for name in _REFUSED_KEY_STORES)
 
 
-# Mount keys in the order their binds are emitted: warm caches, then what the
-# box may read, then what it may write. `path` is not one of them -- it grants
-# no mount and is checked against these.
+# Mount keys in emission order: writable overlays, read-only paths, then writable
+# paths. `path` adds no mount and must be covered by one of these entries.
 _MOUNT_KEYS = ("overlay", "ro", "rw")
 
-# Every key a spec file may carry. `include` is neither a mount nor checked
-# against them -- it names other spec files.
+# Complete set of accepted keys. `include` names other spec files.
 _KEYS = (*_MOUNT_KEYS, "path", "include")
 
 
 @dataclass(frozen=True)
 class UserSpec:
-    """One user file's contents: mounts, and PATH entries covered by them.
+    """The mounts and covered PATH entries loaded from one include tree.
 
-    Two fields rather than one because they reach the spec by two different
-    combinators (`with_binds`, `with_path_prefix`) -- and returning them
-    together keeps that a property of the file, not of the number of times a
-    caller remembered to parse it.
+    Callers apply the fields through `with_binds` and `with_path_prefix` after
+    parsing the file once.
     """
 
     binds: list[BindSpec]
@@ -157,19 +114,13 @@ class UserSpec:
 
 
 def load(path: Path, *, egress: tuple[Backend, ...]) -> UserSpec:
-    """The mounts and PATH entries a user file names, validated and guarded.
+    """Load and validate mounts and PATH entries from a user spec.
 
-    Raises ValueError naming the file and the offending key for every
-    malformed input -- a typo'd key (`wr = [...]`) is a refusal, not a
-    silently ignored line in a file somebody believes is in effect.
-    FileNotFoundError propagates: a missing spec file is the caller's path
-    being wrong, not this file's contents.
+    Malformed input raises `ValueError` naming the file and key. A missing file
+    propagates `FileNotFoundError` because the caller supplied the wrong path.
 
-    `egress` has no default on purpose. It is the credential guard's only input,
-    and a default of `()` would be a guard silently switched off for any caller
-    that forgot it -- the one failure the guard exists to prevent. A caller with
-    no backends passes `()` and says so; a caller with backends cannot omit them
-    by accident.
+    `egress` is mandatory because omitting it would disable credential checks.
+    Callers without backends pass an explicit empty tuple.
     """
     spec = _load(path, egress, [], set())
     _assert_path_coverage(path, spec)
@@ -177,14 +128,13 @@ def load(path: Path, *, egress: tuple[Backend, ...]) -> UserSpec:
 
 
 def _assert_path_coverage(path: Path, spec: UserSpec) -> None:
-    """Every PATH dir must sit under some mount the box actually gets.
+    """Require every PATH directory to lie below an emitted mount.
 
-    Over the WHOLE merged spec, so a diamond-included mount counts no matter
-    which branch expanded it (see `_load`). Normalised before the containment
-    test: `/tools/bin/../../../etc` is `is_relative_to("/tools")` by components
-    while resolving outside it, so an un-normalised check would call an escaping
-    PATH dir covered. A bind's box-side path is its own (`Bind`/`Overlay` mount
-    at their source); userbinds emits no substituting bind."""
+    Check the merged include tree so a shared include can cover entries from
+    either branch. Normalize paths before containment checks to prevent `..`
+    components from appearing covered while escaping the mount. User binds mount
+    each source at the same path inside the box.
+    """
     mounted = [Path(os.path.normpath(b.path)) for b in spec.binds if hasattr(b, "path")]
     for d in spec.path:
         if not any(Path(os.path.normpath(d)).is_relative_to(m) for m in mounted):
@@ -201,11 +151,10 @@ def _load(
     chain: list[Path],
     expanded: set[Path],
 ) -> UserSpec:
-    """`load` plus the two things an include tree needs to carry.
+    """Load one file while tracking include ancestry and prior expansions.
 
-    `chain` is the include path taken to get here, resolved, for cycle
-    detection and for the message that names it. `expanded` is every file the
-    whole tree has already applied, so a diamond mounts once.
+    `chain` supports cycle detection and diagnostics. `expanded` ensures a
+    diamond include applies its shared file once.
     """
     here = path.resolve()
     if here in chain:
@@ -229,41 +178,33 @@ def _load(
     inner_binds: list[BindSpec] = []
     inner_dirs: list[Path] = []
     for spec_file in _entries(path, doc.get("include", []), "include"):
-        # Skip only a file some OTHER branch already applied. One that is on
-        # the way here is a cycle, and must reach _load's check rather than be
-        # quietly dropped as a repeat.
+        # A file expanded through another branch is a duplicate. A file in the
+        # active chain must reach `_load` so the cycle is reported.
         target = spec_file.resolve()
         if target in expanded and target not in (*chain, here):
             continue
         if not spec_file.is_file():
-            # Not the bare FileNotFoundError the caller's own path raises: this
-            # one has an includer to name, and the pair is the fix.
+            # Name both sides of a missing include relationship.
             raise ValueError(f"{path}: include {spec_file} is not a file")
         inner = _load(spec_file, egress, [*chain, here], expanded)
         inner_binds += inner.binds
         inner_dirs += inner.path
 
-    # Absent keys default to empty lists -- a file with only `ro` is a file
-    # with no writable binds, not a malformed one.
+    # Omitted keys represent empty lists.
     mounts = {key: _entries(path, doc.get(key, []), key) for key in _MOUNT_KEYS}
     for (a, first), (b, second) in combinations(mounts.items(), 2):
         both = [str(p) for p in first if p in second]
         if both:
-            # There is no order between two keys to resolve this with, and
-            # picking one silently would be a precedence rule nobody asked for.
+            # One path cannot have two modes within the same file.
             raise ValueError(
                 f"{path}: {both[0]} appears in both {a} and {b} -- pick one"
             )
 
-    # Exact equality above is not enough: the keys emit in a fixed order
-    # (overlay, then ro, then rw) and later wins, so a broad `rw` naming an
-    # ANCESTOR of an earlier `ro` (or `overlay`) silently upgrades that narrower
-    # path to writable -- and for an overlay it defeats the copy-up, sending
-    # writes to the host tree. Refuse rather than reorder: there is no spelling
-    # of "ro under rw" this format should honour by guessing. Compared on the
-    # normalised form, which also closes the `..` route around the check above.
-    # Scoped to this file's own keys, not the includes: a `rw` here shadowing an
-    # included `ro` is the documented later-wins doing its job.
+    # Because keys emit in fixed order, a broad writable path could cover an
+    # earlier nested read-only path or overlay. That would make the nested path
+    # writable and could send overlay writes to the host. Reject overlaps within
+    # one file rather than guessing a different order. Cross-file shadowing
+    # remains the documented include behavior.
     emitted = [
         (key, p, Path(os.path.normpath(p))) for key in _MOUNT_KEYS for p in mounts[key]
     ]
@@ -277,22 +218,15 @@ def _load(
                     " writable); remove the nesting"
                 )
 
-    # Includes first, so this file's own keys shadow them -- the same
-    # later-wins the launcher applies between two --binds files. A path this
-    # file mounts rw over an include's ro is that rule doing its job, which is
-    # why the cross-key refusal below stays WITHIN one document.
+    # Apply includes first so this file can intentionally shadow their mounts.
     binds: list[BindSpec] = [*inner_binds]
     binds += [Overlay(p) for p in _dedup(mounts["overlay"])]
     binds += [Bind(p, RO, optional=True) for p in _dedup(mounts["ro"])]
     binds += [Bind(p, RW) for p in _dedup(mounts["rw"])]
 
     dirs = _dedup([*inner_dirs, *_entries(path, doc.get("path", []), "path")])
-    # PATH coverage is checked ONCE over the merged tree, in `load` below, not
-    # per file: a diamond include is expanded only on its first path, so its
-    # mounts are absent from `inner_binds` on the second -- and a PATH entry
-    # covered by that include would be reported uncovered or not depending on
-    # include order in a file the reader is not looking at. The final box has
-    # every file's mounts, so coverage is a fact about the whole tree.
+    # Check PATH coverage once after merging. Per-file checks would make diamond
+    # includes depend on which branch expanded the shared file first.
 
     exposure = credential_exposure(tuple(binds), egress)
     if exposure is not None:
@@ -302,11 +236,7 @@ def _load(
             f" credential at {cred} -- a user bind may not name it, nor"
             " anything containing it or inside it"
         )
-    # Then every OTHER backend's credential, which this box's egress cannot
-    # name. `aisan claude --binds` handing a box ~/.codex is a real credential
-    # in a box that was reviewed as holding none, and the box's own backend list
-    # has no reason to mention it. The MCP launcher-bind guard already asks the
-    # question this way; a user file is the less audited of the two inputs.
+    # Also protect credentials belonging to backends absent from this box.
     sources = [
         src
         for spec in binds
@@ -333,14 +263,11 @@ def _load(
 
 
 def _entries(path: Path, raw: object, key: str) -> list[Path]:
-    """`raw` as a list of expanded absolute Paths, or a ValueError naming it.
+    """Return `raw` as expanded absolute paths, or raise a named `ValueError`.
 
-    Expanded here rather than at bind time so the cross-key and dedupe checks
-    compare paths, not spellings: `~/a` and its expansion are the same bind,
-    and a file that names one twice in two spellings has still named it twice.
-    NOT symlink-resolved -- the credential guard resolves for its own
-    comparison, and silently canonicalising a user's paths would rewrite the
-    box's mount points out from under the file that named them.
+    Expand paths before overlap and duplicate checks so equivalent spellings
+    compare equally. Preserve symlink spelling because it determines the mount
+    destination; credential checks resolve aliases separately.
     """
     if not isinstance(raw, list) or not all(
         isinstance(e, str) and e.strip() for e in raw
@@ -348,16 +275,13 @@ def _entries(path: Path, raw: object, key: str) -> list[Path]:
         raise ValueError(f"{path}: {key} must be an array of non-empty path strings")
     out = []
     for entry in raw:
-        # os.pathsep in one entry becomes TWO PATH entries once joined, and the
-        # second rides past the coverage check that saw one string. A real path
-        # never needs it; refuse it rather than let it smuggle a directory in.
+        # A path separator would become a second unchecked PATH entry when joined.
         if os.pathsep in entry:
             raise ValueError(f"{path}: {key} entry {entry!r} contains {os.pathsep!r}")
         try:
             p = Path(entry).expanduser()
         except RuntimeError as e:
-            # ~nosuchuser and friends: a RuntimeError bypasses the "ValueError
-            # naming the file" contract this loader promises its caller.
+            # Convert failed user expansion into the loader's named error form.
             raise ValueError(
                 f"{path}: {key} entry {entry!r} cannot be expanded: {e}"
             ) from e
@@ -368,8 +292,6 @@ def _entries(path: Path, raw: object, key: str) -> list[Path]:
 
 
 def _dedup(paths: list[Path]) -> list[Path]:
-    """Same paths, first occurrence's order, one entry each. bwrap does not
-    want the same source twice, and a duplicate in a user file is far more
-    likely an edit-in-place than a wish to mount it again."""
+    """Return unique paths in first-occurrence order."""
     seen: set[Path] = set()
     return [p for p in paths if not (p in seen or seen.add(p))]

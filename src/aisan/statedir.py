@@ -1,19 +1,15 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The host<->box state seam: the per-session state dir and the seeds in it.
+"""Safely manage persistent, box-writable client state and seed files.
 
-The state dir is bound rw into the box, so between sessions the agent controls
-its contents -- most dangerously by planting a symlink where the launcher next
-writes a fixed-name seed. The launcher runs as the operator, OUTSIDE the box, so
-a seed write that follows a planted link truncates or creates whatever the link
-points at, with the operator's authority: an escape straight out of the sandbox.
+The agent controls this directory between sessions. It could plant a symlink at
+a fixed seed path before the host-side launcher writes there as the operator.
+Following that link would let the box truncate or create an arbitrary host file.
 
-`runtime.py` already treats its own dir as hostile (0o700, lstat, uid and
-permission checks); this gives the state dir the same rigor and makes every seed
-write refuse to follow a link. It imports nothing from the rest of aisan so the
-three seed call sites (`session`, `session_mcp`, `cli/claude`) can all use it
-without an import cycle.
+State directories receive the same ownership and permission checks as runtime
+directories, and seed I/O never follows symlinks. This module has no aisan
+imports so all seed writers can use it without creating an import cycle.
 """
 
 from __future__ import annotations
@@ -25,13 +21,12 @@ from pathlib import Path
 
 
 def prepare_state_dir(state: Path) -> Path:
-    """Create the state dir private to this user, tighten a stale one, return it.
+    """Create a private state directory and tighten its permissions if needed.
 
-    0o700 because it holds the client's transcripts, its seeded config, and the
-    imported MCP declarations (which exist to carry tokens). `mkdir` does not
-    change an existing directory's mode, so a dir left 0o755 by an older version
-    is tightened here rather than trusted: this dir is stable per (client, repo),
-    so refusing a pre-existing loose one would wedge every future session.
+    State contains client transcripts, seeded configuration, and MCP declarations
+    that may carry tokens. ``mkdir`` doesn't change the mode of an existing
+    directory, so tighten directories left by older versions. Refusing them would
+    prevent every future session for the same client and repository.
     """
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
@@ -47,12 +42,10 @@ def prepare_state_dir(state: Path) -> Path:
     return state
 
 
-# Where each boxed client would write a credential of its OWN, relative to the
-# state dir. Each of these paths is the client's normal credential location once
-# the box redirects its config directory there -- CLAUDE_CONFIG_DIR, CODEX_HOME,
-# XDG_DATA_HOME -- so a `/login` completed inside a `--net` box lands here rather
-# than on the host. Measured: none of the three writes any of these during
-# ordinary boxed use, where the credential arrives by environment instead.
+# Credential paths relative to each client's state directory. Redirecting
+# CLAUDE_CONFIG_DIR, CODEX_HOME, or XDG_DATA_HOME makes an in-box login write to
+# these paths instead of the host configuration. Ordinary boxed sessions pass
+# credentials through the environment and do not write these files.
 BOXED_CREDENTIALS: dict[str, tuple[str, ...]] = {
     "claude": (".credentials.json",),
     "codex": ("auth.json",),
@@ -61,15 +54,13 @@ BOXED_CREDENTIALS: dict[str, tuple[str, ...]] = {
 
 
 def planted_credentials(state: Path, client: str) -> list[Path]:
-    """Credential files a previous box left in `client`'s own state dir.
+    """Find credentials left in client state by an earlier boxed session.
 
-    The dir is bound rw and is the same one every later session for the repo
-    gets, so one networked session that logged in inside the box would hand a
-    real token to every session after it -- exactly the thing the credential
-    guard checks the MOUNTS for, arriving by a route no mount describes.
+    The state directory is writable and persists across sessions for a
+    repository. A login during a networked session could therefore expose its
+    token to later sessions without adding a credential mount.
 
-    `lstat`, so a planted symlink counts: what matters is that the name is
-    occupied by something the box put there, not what it resolves to.
+    ``lstat`` counts symlinks because an occupied credential path is sufficient.
     """
     found: list[Path] = []
     for name in BOXED_CREDENTIALS.get(client, ()):
@@ -83,36 +74,33 @@ def planted_credentials(state: Path, client: str) -> list[Path]:
 
 
 def write_sealed(path: Path, data: str | bytes, *, mode: int = 0o600) -> None:
-    """Write `data` to `path` as a fresh regular file, never through a symlink.
+    """Write data to a regular file without following a final symlink.
 
-    O_NOFOLLOW refuses to open a symlink at the final component, so a planted
-    `state/CLAUDE.md -> ~/.config/git/config` cannot make this truncate the host
-    target. A non-regular entry (the planted link most of all) is unlinked first
-    so the seed still succeeds with a real file rather than failing ELOOP -- the
-    goal is to defeat the escape without handing the agent a launch-time DoS.
+    ``O_NOFOLLOW`` prevents a planted link such as
+    ``state/CLAUDE.md -> ~/.config/git/config`` from truncating its host target.
+    Remove a non-regular entry first so it can't block future launches.
     """
     _unlink_if_not_regular(path)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode)
     try:
-        os.fchmod(fd, mode)  # exact bits regardless of umask, as the old chmod did
+        os.fchmod(fd, mode)  # Set exact permissions regardless of the process umask.
         os.write(fd, data.encode() if isinstance(data, str) else data)
     finally:
         os.close(fd)
 
 
 def read_sealed_text(path: Path) -> str | None:
-    """Read `path` without following a symlink; None if absent or not regular.
+    """Read a regular file without following a final symlink.
 
-    A planted symlink reads as absent so the caller rebuilds the file rather than
-    reading through the link (into a host file it does not own) and writing the
-    merged result back through it.
+    Return ``None`` for an absent, non-regular, or symlinked path. The caller can
+    then rebuild the file without reading or overwriting a symlink target.
     """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
         return None
     except OSError:
-        return None  # ELOOP: a symlink is planted; treat as absent
+        return None  # A symlink or other unreadable path is treated as absent.
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
@@ -123,13 +111,11 @@ def read_sealed_text(path: Path) -> str | None:
 
 
 def read_sealed_object(path: Path) -> dict:
-    """The JSON object at `path`, read as `read_sealed_text`; {} if it is not one.
+    """Read a JSON object safely, returning an empty object for invalid input.
 
-    For a seed that merges its own keys into a file the boxed client also
-    writes. The file sits in the box-writable state dir, so absent, planted,
-    unparseable and non-object all rebuild from scratch rather than raise: a
-    file the agent mangled must cost the client one more first-run prompt, not
-    wedge every later launch of this repo.
+    Seed writers merge their keys into files that boxed clients can also change.
+    Missing, replaced, malformed, and non-object files are rebuilt rather than
+    preventing every later launch.
     """
     text = read_sealed_text(path)
     if not text:

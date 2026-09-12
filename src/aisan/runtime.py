@@ -1,19 +1,15 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The per-box runtime directory: sockets, backend files, and launcher control.
+"""Manage per-box sockets, backend files, and launcher control files.
 
-One directory per box, holding one socket per backend plus the small files the
-box needs in order to dial them, plus `relays.json` -- the manifest the in-box
-launcher reads to know what to listen on. The box binds the DIRECTORY, so every
-file in it is reachable inside at the same absolute path the host wrote it at.
-Isolated mode carries `relays.json`; shared-network mode carries a protected
-`client-env.json` whose live port and token the launcher injects before exec.
+Each box gets a directory with one socket per backend and the files needed to
+connect to them. The box binds the entire directory at the same absolute path.
+Isolated mode uses ``relays.json``; shared-network mode uses a protected
+``client-env.json`` containing the port and token to inject before execution.
 
-The directory is keyed by an opaque `box_id`. Opaque is the point: aisan never
-parses it, never derives a job id or a worktree out of it, and two boxes with
-different ids are simply different boxes. A consumer that wants its own notion
-of identity in there passes its own string.
+An opaque ``box_id`` identifies the directory. Aisan doesn't parse the ID or
+derive other identifiers from it.
 """
 
 from __future__ import annotations
@@ -26,29 +22,23 @@ from pathlib import Path
 from .private import prepare_private_dir, private_root
 from .sandbox import RO, Bind
 
-# Names the directory as ours, so an operator seeing it in the private root
-# knows what left it there and a stale one is safe to remove.
+# Identify aisan directories within the private root.
 _DIR_PREFIX = "proxy-"
 
-# The manifest file name. Read by the in-box launcher, written by the Box.
+# The Box writes this manifest for the in-box launcher.
 MANIFEST_NAME = "relays.json"
 CLIENT_ENV_NAME = "client-env.json"
 
 
 def runtime_dir(box_id: str) -> Path:
-    """This box's directory, under aisan's fixed private root, by digest.
+    """Return the box's runtime directory, named with a digest of its ID.
 
-    The digest is not obfuscation, it is a length bound. A UNIX socket path is
-    capped at 108 bytes (sizeof sun_path), and the natural path -- an operator's
-    control root plus a job id plus "vertex.sock" -- once reached 129 bytes, so
-    bind() died "AF_UNIX path too long" and took the job with
-    it. Both terms were unbounded and neither was ours to shorten. Hashing makes
-    the length independent of the caller's naming entirely:
-    /tmp/aisan-UID/proxy-XXXX is short and leaves ample room for the file name.
+    The digest bounds path length rather than hiding the ID. Linux limits UNIX
+    socket paths to 108 bytes, while caller-provided IDs are unbounded. A path
+    such as ``/tmp/aisan-UID/proxy-XXXX`` leaves room for socket file names.
 
-    Truncated to 16 hex chars (64 bits). A collision means two live boxes share
-    a socket directory, which needs a birthday pair among boxes alive at the
-    same moment -- a population in the tens, not the billions.
+    Sixteen hexadecimal characters provide 64 bits. A harmful collision
+    requires two boxes with the same digest to be live at once.
     """
     digest = hashlib.sha256(box_id.encode()).hexdigest()[:16]
     return private_root() / f"{_DIR_PREFIX}{digest}"
@@ -57,18 +47,14 @@ def runtime_dir(box_id: str) -> Path:
 def prepare_runtime_dir(box_id: str) -> Path:
     """Create the directory, private to this user, and return it.
 
-    Both this directory and its parent are 0o700 because the system temp dir is
-    world-writable and these sockets are unauthenticated capabilities: the host
-    halves behind them hold the credentials, so anyone who can connect gets
-    model calls and RBE calls on somebody else's identity.
+    Both the directory and its parent use mode 0o700. They live below the shared
+    system temp directory, and their unauthenticated sockets provide access to
+    host processes that hold credentials.
     """
     d = prepare_private_dir(runtime_dir(box_id))
-    # Clear the control files a prior run may have left. A --net run writes
-    # client-env.json; a SIGKILL skips the cleanup that would remove it; and the
-    # launcher checks client-env BEFORE the manifest -- so a stale one makes the
-    # next ISOLATED run (which writes only a manifest) take the shared branch,
-    # read a dead port, and never start its relays. Both are rewritten fresh by
-    # `_stage`, so removing a stale copy here cannot lose anything.
+    # A killed shared-network run may leave client-env.json behind. Because the
+    # launcher checks it before the manifest, the next isolated run would use a
+    # dead port instead of starting relays. Staging recreates both control files.
     for name in (MANIFEST_NAME, CLIENT_ENV_NAME):
         (d / name).unlink(missing_ok=True)
     return d
@@ -77,39 +63,32 @@ def prepare_runtime_dir(box_id: str) -> Path:
 def cleanup_runtime_dir(box_id: str) -> None:
     """Remove the directory once its last file is gone.
 
-    Best-effort and only when empty: the directory is ours alone (its name is
-    this box's digest), but a non-empty one means something we do not own is in
-    there, and deleting a stranger's file is worse than leaving litter.
+    Removal is best-effort and succeeds only when the directory is empty. An
+    unexpected file is preserved rather than deleted.
     """
     with contextlib.suppress(OSError):
         runtime_dir(box_id).rmdir()
 
 
 def runtime_bind(box_id: str) -> Bind:
-    """The ro bind that makes this box's sockets reachable from inside it.
+    """Return the read-only bind that exposes runtime sockets to the box.
 
-    A preset puts this in its spec, so the spec stays the complete mount policy
-    and `Box` augments nothing a reader of `explain` would not see. ro is
-    enough: connect() needs no write bit on a socket file, and the box has no
-    business unlinking the host's socket. Optional because a box that is only
-    being explained has no live runtime dir, and refusing to describe a profile
-    for want of a directory nobody has created yet helps no one.
+    Presets include this bind so the spec describes the complete mount policy.
+    Connecting to a socket doesn't require write access to its file. The bind is
+    optional because explaining a box doesn't create its runtime directory.
     """
     return Bind(runtime_dir(box_id), RO, optional=True)
 
 
 def write_manifest(directory: Path, entries: list[dict[str, object]]) -> Path:
-    """Write `relays.json`, the in-box launcher's whole input.
+    """Write the complete relay configuration for the in-box launcher.
 
-    A file rather than environment variables or argv, for the reason the whole
-    design puts the wiring here: N backends means N sockets and N ports, and
-    every alternative encoding either fixes N at the shape of the command line
-    or reinvents a list format in a string. The launcher reads one file and
-    knows everything; adding a backend touches no launcher code and no argv.
+    A file represents any number of socket and port pairs without encoding a
+    list in environment variables or command-line arguments.
 
-    Written into the runtime dir, which is already bound into the box and
-    already 0o700, so it needs no mount of its own and grants no reader who
-    could not already open the sockets it names.
+    The box already mounts the private runtime directory, so the manifest
+    doesn't need an additional mount. Access to the directory also grants access
+    to its relay sockets.
     """
     path = directory / MANIFEST_NAME
     path.write_text(json.dumps(entries, indent=2) + "\n")

@@ -1,17 +1,13 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Binding a git worktree into a box without handing over the checkout behind it.
+"""Bind a Git worktree without exposing or compromising its main checkout.
 
-Nothing here is V8-shaped: it is the linked-worktree layout git itself defines,
-so any consumer boxing a worktree wants exactly this policy. What made it look
-domain-specific was living in a module called `sandbox.py` next to the V8 job
-profile; the profile is now a preset, and this is a bind helper a preset calls.
-
-The hard part is that a worktree's `.git` is a POINTER, so confining the worktree
-confines nothing on its own -- see `git_binds` for the whole argument. A plain
-checkout's `.git` is a directory inside the rw root, and the same files inside
-it steer host-side git, so it gets the same pins.
+A linked worktree's `.git` file points outside the worktree, so confining the
+worktree directory alone breaks Git. The shared directory must be writable for
+normal Git operations, while files that can influence later host-side Git
+commands remain pinned read-only. Plain checkouts need the same pins inside
+their in-tree `.git` directory. `git_binds` documents the complete policy.
 """
 
 from __future__ import annotations
@@ -23,19 +19,15 @@ from .sandbox import RO, RW, Bind, BindSpec, EnsurePath, Seal
 
 log = logging.getLogger(__name__)
 
-# Box-scoped git configuration, as environment rather than a file: it applies
-# to every git invocation inside the box, touches no host state, and cannot
-# outlive the box. `gc.auto` is the one that matters most -- the common .git is
-# bound rw, so a repack triggered from a turn would rewrite the SHARED
-# packed-refs/objects out from under the main checkout and any concurrent
-# worktree.
+# Box-scoped Git configuration. Environment variables apply to every invocation
+# without changing host files. Disabling `gc.auto` prevents an automatic repack
+# from rewriting shared objects and refs used by the main checkout and sibling
+# worktrees.
 #
-# The two prune knobs are defence in depth and NOT the guard: measured, a box
-# with all three set still lost a commit that only a sibling worktree's HEAD
-# referenced, because `gc.pruneExpire` governs LOOSE objects while repack drops
-# unreachable packed ones, and `git gc --prune=now` overrides the setting
-# anyway. What actually holds is `pin_packs` -- see `git_binds`. These are kept
-# because they cost nothing and stop the automatic path before it starts.
+# The prune settings are supplemental. Testing showed that these three settings
+# alone still allowed a manual `git gc --prune=now` to destroy a commit reachable
+# only from a sibling. `pin_packs` supplies the actual guard; these settings stop
+# automatic cleanup before it starts.
 GC_ENV = (
     ("GIT_CONFIG_COUNT", "3"),
     ("GIT_CONFIG_KEY_0", "gc.auto"),
@@ -46,9 +38,8 @@ GC_ENV = (
     ("GIT_CONFIG_VALUE_2", "never"),
 )
 
-# How deep to look for dep symlinks. A checkout tool typically links deps at the
-# top level (build, buildtools) and one level down (third_party/*); depth 3 adds
-# margin for a layout change without walking the whole tree.
+# Dependency symlinks usually appear at the root or below `third_party`. Scan one
+# extra level without traversing the entire checkout.
 _SYMLINK_SCAN_DEPTH = 3
 _SCAN_SKIP = {".git", "out"}  # no deps there, and out/ is huge
 
@@ -56,33 +47,23 @@ _SCAN_SKIP = {".git", "out"}  # no deps there, and out/ is huge
 def external_symlink_targets(
     root: Path, *, skip: frozenset[str] = frozenset(_SCAN_SKIP)
 ) -> list[Path]:
-    """Resolved targets of symlinks under `root` that point outside it.
+    """Return safe external targets of symlinks below `root`.
 
-    A checkout assembled from shared dependency caches is a tree of symlinks
-    into directories the box would otherwise not see, and binding the SYMLINKS
-    rather than their targets either breaks the build or -- when the target is
-    the main checkout -- hands over a writable tree the box was never meant to
-    reach. Bind what they point at, read-only, and the tree resolves.
+    Checkouts may link dependencies into directories the box cannot otherwise
+    see. Binding those targets read-only allows the links to resolve without
+    granting writable access to the main checkout.
 
-    Confined to the worktree's MAIN checkout. A V8 worktree's dep symlinks all
-    point into it -- v8-utils writes `<wt>/<dep> -> <main>/<dep>` for each
-    gclient dep, and nothing legitimate points anywhere else (verified across a
-    real checkout). So the main checkout is the allowlist, derived from the
-    same `.git` gitdir pointer `git_binds` validates. A target OUTSIDE it is not
-    a dep link: the worktree is the box's rw root, which the agent writes and
-    which persists between turns, so `<wt>/x -> ~/.ssh` or `-> /` would
-    otherwise hand the box a host path it was never meant to see (and the
-    per-box credential guard does not fire on the egress-less depot_tools_job box). Such a
-    target is DROPPED with a warning rather than bound.
+    Only targets inside the linked worktree's main checkout are trusted. v8-utils
+    creates its dependency links in that shape, as verified against a real V8
+    checkout. A writable worktree could otherwise add a link to `~/.ssh`, `/`,
+    or another unintended host path. Drop such targets with a warning.
 
-    When `root` is not a linked worktree there is no main checkout to bind into,
-    so every outside-the-root target is dropped -- a plain checkout keeps its
-    deps in place rather than symlinked out, so this is empty in practice.
+    Plain checkouts provide no external allowlist, so all targets outside the
+    root are dropped. Their dependencies normally reside in the checkout.
 
-    Optional in the sense a preset may skip it entirely: a checkout with no
-    external links returns an empty list and costs one directory walk.
+    A checkout without external links returns an empty list.
     """
-    root = root.resolve()  # compare resolved against resolved
+    root = root.resolve()
     layout = _git_layout(root)
     allowed = layout[2].parent.resolve() if layout is not None else None
     targets: set[Path] = set()
@@ -113,10 +94,10 @@ def external_symlink_targets(
 
 
 def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
-    """The ordered binds for the .git behind `worktree`, whichever layout it has.
+    """Return ordered binds for the Git metadata behind `worktree`.
 
-    A linked worktree's .git is a file pointing at <main>/.git/worktrees/<name>.
-    The list reads as the policy, in mount order, later winning:
+    For a linked worktree, `.git` points to
+    `<main>/.git/worktrees/<name>`. The policy is:
 
         Bind(common, RW)              in-worktree git works
         Bind(gitfile, RO)             the pointers and configs that steer
@@ -130,40 +111,25 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
         Bind(private/config.worktree, RO)
         Bind(common/objects/pack, RO) with pin_packs: nothing in the box repacks
 
-    The common .git is rw because git locks packed-refs on every ref update, and
-    a ro .git root makes that lock uncreatable: every commit then prints "Unable
-    to create packed-refs.lock: Read-only file system" -- harmless (the commit
-    lands via a loose ref) but the agent misreads it as a failure and thrashes.
-    Writable refs/objects are only recoverable repo state.
+    The common `.git` remains writable because Git locks `packed-refs` during
+    ref updates. A read-only directory makes every commit report a lock error,
+    even when the loose ref succeeds, and prevents normal repository recovery.
 
-    What is pinned ro on top is every file that STEERS host-side git, because
-    those are host-code-exec vectors: a planted hook, or a
-    core.fsmonitor/credential.helper in a config, runs as the host user the
-    next time the orchestrator's own git touches the checkout (a squash commit,
-    a rebase, a pull, `git cl format` -- all host-side, all in a tree the agent
-    writes). Pinning the config CONTENT is not enough on its own: git finds that
-    content through two agent-reachable pointers -- <worktree>/.git (the gitdir
-    pointer, in the rw root) and <.git>/worktrees/*/commondir (per-worktree, in
-    the rw-bound .git). Repointing either makes git read config/hooks from an
-    agent-chosen directory, so the content pins are never consulted. Both are
-    pinned alongside the content. alternates is a pointer on the same principle:
-    it redirects where host-side git resolves objects.
+    Read-only pins protect every file that can steer later host-side Git. Hooks,
+    `core.fsmonitor`, and credential helpers can execute as the host user during
+    commands such as rebase, pull, or `git cl format`. Pinning config contents
+    alone is insufficient: the worktree `.git` file and its `commondir` can
+    redirect Git to attacker-chosen config and hooks. `alternates` receives the
+    same protection because it redirects object lookup.
 
-    Sealing worktrees/ rather than pinning each sibling is what makes the policy
-    a statement instead of a snapshot. Pins scan the siblings that exist now,
-    while the profile outlives the scan (a profile is built per stage, not per
-    turn), so a job could write a config.worktree no pin ever covered -- into a
-    sibling a concurrent job created afterwards, or into a directory of its own
-    invention. The seal answers all of those at once: in the box, worktrees/ is
-    an empty directory nothing can be created in, and the siblings are not
-    read-only but absent. This job's own dir is bound back through it because git
-    needs to create index.lock there, and its own commondir/config.worktree are
-    then pinned inside that hole -- which is simply what comes after it in the
-    list, not a special case.
+    Sealing `worktrees/` also covers siblings created after profile assembly.
+    Pinning only existing siblings would leave later `config.worktree` files
+    writable. The seal hides all siblings and prevents new entries. A later bind
+    restores this worktree's private directory so Git can create `index.lock`,
+    then pins its steering files inside that hole.
 
-    A plain checkout's .git is a directory inside the rw root. It gets the same
-    pins minus the two pointers it does not have, plus one bind that is not a
-    permission at all:
+    A plain checkout has an in-tree `.git` directory. It needs the same pins,
+    minus the linked-worktree pointers, plus a self-bind:
 
         Bind(.git, RW)                a mount point, so the directory itself
                                       cannot be renamed or unlinked from inside
@@ -174,38 +140,26 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
         Seal(.git/worktrees)          nothing creatable
         Bind(.git/objects/pack, RO)   with pin_packs
 
-    The self-bind is what makes the pins hold. Measured: with only the file
-    pins in place, `mv .git .git.old` inside the box succeeded and persisted on
-    the host, after which a fresh .git with agent-written config and hooks is
-    what host-side git reads. A mount point refuses the rename with EBUSY, and
-    so does every pin inside it. The seal is always applied here, because a
-    worktree the box creates carries a `commondir` pointer it wrote, and host
-    git run inside that worktree follows the pointer to a gitdir of the box's
-    choosing; the cost is that `git worktree add` fails inside the box.
+    The self-bind turns `.git` into a mount point that cannot be renamed. Testing
+    showed that file pins alone allowed `mv .git .git.old`, after which the box
+    could create new config and hooks for host Git to read. The worktrees seal
+    also prevents the box from creating a worktree with an attacker-controlled
+    `commondir`. Consequently, `git worktree add` is unavailable inside the box.
 
-    `pin_packs` is the one guard the seal above does not provide, and the seal
-    is why it is needed. Sealing worktrees/ makes the siblings ABSENT, which
-    also removes their HEAD and index as reachability roots -- so an in-box
-    `git gc` sees objects that only a sibling references as unreachable and
-    prunes them from the object store it shares with the host. Measured on a
-    scratch repo: with the seal and nothing else, a sibling's detached-HEAD
-    commit was destroyed and that worktree was left at "fatal: bad object
-    HEAD"; with objects/pack ro, the same `git gc --prune=now` answered "fatal:
-    failed to run repack" and both survived. Config cannot express this (see
-    `GC_ENV`), because the destructive commands are the ones an agent types
-    rather than the ones git runs on its own.
+    `pin_packs` protects objects reachable only from hidden siblings. Because
+    the seal hides their HEAD and index, in-box `git gc` can otherwise consider
+    those objects unreachable and prune them from the shared store. A scratch
+    test destroyed a sibling's detached-HEAD commit without this pin; making
+    `objects/pack` read-only caused `git gc --prune=now` to fail before damage.
+    `GC_ENV` cannot prevent an explicitly requested destructive command.
 
-    The cost is that nothing in the box may write a pack: repacking, and
-    anything running index-pack -- `git fetch`, `git clone`. A box with its own
-    network namespace has nothing to fetch FROM, which is why the callers here
-    pass `pin_packs=unshare_net` rather than always. Ordinary work is
-    unaffected: a commit writes loose objects, and the host repacks them later.
+    Pack pinning also blocks repacking, `git fetch`, and `git clone`. Callers use
+    it for network-isolated boxes, which cannot fetch anyway. Commits still
+    write loose objects for the host to repack later.
 
-    Returns an empty list when `worktree` has no .git at all. Raises when the
-    pointer does not resolve to a <main>/.git/worktrees/<name> layout: that
-    means the file was already poisoned before this profile was built, and
-    failing assembly abandons the turn rather than binding an attacker-named
-    directory rw as if it were .git.
+    Return an empty list when the worktree has no `.git`. Refuse malformed
+    linked-worktree pointers instead of mounting an attacker-chosen directory
+    writable as Git metadata.
     """
     layout = _git_layout(worktree)
     if layout is None:
@@ -222,19 +176,15 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
             binds.append(Bind(git / "objects" / "pack", RO))
         return binds
     gitfile, private, main_git = layout
-    # Pure: the guard sources this pins may not exist yet on a fresh checkout,
-    # and creating them is a host mutation `git_host_files` declares for the Box
-    # to do and undo. A bind is just a path here; resolution checks existence
-    # once the ensure-paths are on disk.
+    # `git_host_files` declares missing guard sources for `Box` to create and
+    # remove. Keeping creation there leaves this function free of host changes.
     binds = [Bind(main_git, RW), Bind(gitfile, RO), *_steering_pins(main_git)]
     wts = main_git / "worktrees"
     if wts.is_dir():
         binds.append(Seal(wts))
-    # The hole through the seal, then the pointers inside the hole pinned back on
-    # top of it. commondir is never absent in a real private dir, so a missing
-    # one fails the profile rather than being papered over with an empty file
-    # that would point git at the filesystem root -- which is why it is NOT in
-    # `git_host_files`, unlike this worktree's own config.worktree.
+    # Restore this worktree's private directory through the seal, then pin its
+    # steering files. `commondir` must already exist; fabricating an empty one
+    # would make Git interpret the filesystem root as the common directory.
     binds.append(Bind(private, RW))
     binds += [Bind(private / "commondir", RO), Bind(private / "config.worktree", RO)]
     binds += [Bind(p, RO) for p, _is_dir in _submodule_steering(main_git)]
@@ -244,8 +194,7 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
 
 
 def _steering_pins(git: Path) -> list[BindSpec]:
-    """The files in a .git that steer host-side git, pinned ro in mount order:
-    the two configs, the object redirect, and the hooks."""
+    """Return read-only pins for config, object redirects, and hooks."""
     return [
         Bind(git / "config", RO),
         Bind(git / "config.worktree", RO),
@@ -255,12 +204,12 @@ def _steering_pins(git: Path) -> list[BindSpec]:
 
 
 def _steering_host_files(git: Path) -> list[EnsurePath]:
-    """The `_steering_pins` sources a fresh checkout may lack, as ensure-paths."""
+    """Return ensure-paths for steering pins absent in a fresh checkout."""
     return [
         EnsurePath(git / "hooks", is_dir=True),
         EnsurePath(git / "config", is_dir=False),
         EnsurePath(git / "config.worktree", is_dir=False),
-        # Its parent objects/info is created for it by the Box.
+        # Box also creates the missing `objects/info` parent.
         EnsurePath(git / "objects" / "info" / "alternates", is_dir=False),
     ]
 
@@ -268,9 +217,8 @@ def _steering_host_files(git: Path) -> list[EnsurePath]:
 def _plain_git(root: Path) -> Path | None:
     """`<root>/.git` when it is a directory, None when there is none.
 
-    A symlink is refused rather than followed: bwrap will not mount over a
-    symlink destination, so the pins could not land, and a .git that points
-    outside the root is a tree the box was never meant to write.
+    Refuse a symlink because bwrap cannot place the guard mounts over it, and
+    following it could expose a writable directory outside the root.
     """
     git = root / ".git"
     if git.is_symlink():
@@ -281,25 +229,21 @@ def _plain_git(root: Path) -> Path | None:
 
 
 def _submodule_steering(main_git: Path) -> list[tuple[Path, bool]]:
-    """(path, is_dir) for each present submodule gitdir's config and hooks.
+    """Return config and hooks paths for each present submodule gitdir.
 
-    A submodule keeps its gitdir under `<main>/.git/modules/<name>`, and
-    host-side git run in that submodule reads its config (a core.fsmonitor or
-    credential.helper there executes as the host user) and runs its hooks -- the
-    same host-exec vector the main .git pins close, one level down and in a tree
-    the box can also write. Pinned ro when present.
+    Submodule config can define `core.fsmonitor` or credential helpers, and its
+    hooks can execute during a later host-side Git command. Pin both under
+    `<main>/.git/modules/<name>` when present.
 
-    Bounded on purpose: top-level submodules only (nested ones are rare and left
-    uncovered), and a snapshot like the pre-seal worktree pins -- a submodule
-    initialised after the profile is built is not covered. Empty when the repo
-    has no `modules/` at all, which is the common case.
+    This scan covers only top-level submodules present during profile assembly.
+    Nested or subsequently initialized submodules remain outside its coverage.
     """
     modules = main_git / "modules"
     if not modules.is_dir():
         return []
     steering: list[tuple[Path, bool]] = []
     for sub in sorted(modules.iterdir()):
-        # A gitdir, not some other entry: `config` (or `HEAD`) marks one.
+        # `config` or `HEAD` distinguishes a gitdir from unrelated entries.
         if (sub / "config").exists() or (sub / "HEAD").exists():
             steering.append((sub / "config", False))
             steering.append((sub / "hooks", True))
@@ -310,14 +254,11 @@ def _git_layout(worktree: Path) -> tuple[Path, Path, Path] | None:
     """`(<worktree>/.git file, its private dir, the main .git)` for a linked
     worktree, or None for a plain checkout whose .git is inside the rw root.
 
-    Raises when the `.git` pointer does not resolve to a
-    `<main>/.git/worktrees/<name>` layout OWNED by this worktree: git keeps a
-    back-pointer (`<private>/gitdir`) naming the worktree's own `.git`, so a
-    poisoned `gitdir: /other/repo/.git/worktrees/z` points back at that repo's
-    worktree, not ours, and binding an unrelated repo's store rw off it is the
-    escape this refuses. Both the shape check and the back-pointer keep it
-    honest; the pin keeps it honest turn-to-turn (the agent cannot rewrite a ro
-    file), so this only fires on a tree that arrived poisoned.
+    Refuse pointers outside a `<main>/.git/worktrees/<name>` layout owned by this
+    worktree. Git's `<private>/gitdir` back-pointer must name this `.git` file;
+    otherwise a poisoned pointer could make the box mount another repository's
+    object store writable. Read-only pins prevent the pointer from changing
+    after validation.
     """
     gitfile = worktree / ".git"
     if gitfile.is_dir() or not gitfile.exists():
@@ -326,7 +267,7 @@ def _git_layout(worktree: Path) -> tuple[Path, Path, Path] | None:
     if not text.startswith("gitdir:"):
         return None
     private = Path(text.removeprefix("gitdir:").strip())
-    main_git = private.parent.parent  # <main>/.git/worktrees/<name> -> <main>/.git
+    main_git = private.parent.parent
     if private.parent.name != "worktrees" or main_git.name != ".git":
         raise ValueError(
             f"{gitfile} does not point into a <main>/.git/worktrees/<name> "
@@ -347,19 +288,16 @@ def _git_layout(worktree: Path) -> tuple[Path, Path, Path] | None:
 def git_host_files(
     worktree: Path, *, pin_packs: bool = False
 ) -> tuple[EnsurePath, ...]:
-    """The .git guard sources `git_binds` pins that a fresh checkout may lack.
+    """Return missing `.git` guard sources for `Box` to create temporarily.
 
-    Split out so `git_binds` stays a pure function: these are the paths the Box
-    creates empty before assembly and removes again on the inspector's staged
-    path (see `EnsurePath`). Some are routinely absent -- config.worktree only
-    exists once someone ran `git config --worktree`, hooks/ can be missing under
-    a core.hooksPath setup, objects/info and objects/pack are absent on a repo
-    never repacked -- and an empty config contributes nothing while an empty
-    hooks dir runs nothing, so the guard is bindable without the file having to
-    pre-exist. Only these; commondir is deliberately NOT here (a missing one is
-    a refusal, not something to paper over). A plain checkout's list is the
-    same minus its own config.worktree, plus the worktrees/ directory the seal
-    needs to exist -- empty, git ignores it. Empty when there is no .git.
+    Fresh repositories may lack `config.worktree`, `hooks`, `objects/info`, or
+    `objects/pack`. Empty versions have no effect but give read-only guard binds
+    a source. `Box` creates them before assembly and removes its additions after
+    running or inspection, keeping `git_binds` pure.
+
+    `commondir` is excluded because a valid linked worktree must provide it; a
+    missing file is an error. Plain checkouts also ensure the `worktrees`
+    directory required by the seal. Repositories without `.git` return no paths.
     """
     layout = _git_layout(worktree)
     if layout is None:
