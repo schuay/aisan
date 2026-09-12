@@ -1,24 +1,19 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Codex subscription traffic with the ChatGPT login kept on the host.
+"""Proxy Codex subscription traffic through the host ChatGPT login.
 
-The boxed Codex uses a custom Responses provider on the in-box relay and sees
-only a placeholder key. The host proxy reads the access token and account id
-from the host Codex login for each request and reconstructs the subscription
-headers. The refresh token and the credential file are never mounted.
+Boxed Codex uses a custom Responses provider with a placeholder key. For each
+request, the host proxy reads the access token and account ID and rebuilds the
+subscription headers. The box never receives the refresh token or login file.
 
-Codex remains the sole writer of its login. Before a session, this backend
-checks the access-token expiry. If less than one day remains, it asks the host
-``codex app-server`` to perform its supported proactive refresh, then rereads
-``auth.json``. aisan never sends a refresh token or writes the credential file.
+Host Codex remains the sole writer. If the token expires within a day, the
+backend asks ``codex app-server`` to refresh it and rereads ``auth.json``.
 
-The backend's command-line config overrides disable non-model egress and point
-the custom provider at a bare loopback origin. CLI overrides outrank Codex's
-writable per-repository user config, so trust and preferences persist without
-letting project config rewrite the route. The real ChatGPT Codex path remains
-host-side, so the box can reach ``/responses`` and no other subscription
-endpoint.
+Command-line overrides disable non-model egress and point the provider at
+loopback. They outrank writable repository configuration, so the agent can't
+change the route. The host proxy adds the real ChatGPT path and exposes only
+``/responses``.
 """
 
 from __future__ import annotations
@@ -162,8 +157,7 @@ class CodexBackend(Backend):
         await self._check_upstream()
 
     async def _check_upstream(self) -> None:
-        # Any HTTP answer proves the hop is up. A redirect is one, but it is not
-        # followed: the hop under test is the one the operator named.
+        # Any HTTP response proves connectivity. Don't follow redirects.
         from aiohttp import ClientError, ClientSession, ClientTimeout
 
         try:
@@ -263,11 +257,8 @@ def _jwt_expiration(token: str, path: Path) -> int:
 
 
 async def _refresh_chatgpt_login(command: tuple[str, ...], codex_home: Path) -> None:
-    # `codex` reads project configuration from the directory it starts in and
-    # has no flag to stop it, and the directory this would otherwise inherit is
-    # the repository the boxed agent has been editing. The child is given an
-    # empty one instead, kept alive for as long as it runs; its real
-    # configuration comes from CODEX_HOME.
+    # Codex reads project configuration from its cwd and has no flag to disable
+    # it. Use an empty directory while loading real configuration from CODEX_HOME.
     with neutral_child({**os.environ, "CODEX_HOME": str(codex_home)}) as child:
         await _drive_account_read(command, child)
 

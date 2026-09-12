@@ -1,53 +1,31 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Host-side proxy for the OpenAI-compatible family: one route, our bearer.
+"""Proxy the OpenAI-compatible chat-completions protocol.
 
-The third transport, and the one that generalises. opencode reaches most of its
-providers (147 of the 186 in its catalog at last count) through
-`@ai-sdk/openai-compatible`, and that whole family speaks ONE wire shape,
-measured against opencode 1.18.18 driving a local stub:
+OpenCode 1.18.18 uses the same wire format for most providers in its catalog::
 
     POST {baseURL}/chat/completions
     Authorization: Bearer <key>
-    "stream": true      # in the BODY; streaming is not negotiated by header
+    {"stream": true}
 
-`baseURL` is whatever the box is told, so the proxy presents the family's
-canonical form -- a bare loopback origin, no path prefix -- and every
-provider-specific fact (the real base URL, `.../api/coding/paas/v4` and
-friends) is data on the BACKEND, not on the transport. The path that crosses
-this allowlist is therefore the same for every provider in the family, and
-adding one is a matter of naming its catalog entry, not of touching policy.
+The box receives a bare loopback origin. Provider-specific path prefixes stay in
+the backend's upstream URL, so one exact route serves the whole family.
 
-Like `vertex.py` and unlike `anthropic.py`, no request header is ever
-forwarded. That is not parsimony: the measured request carries nothing
-protocol-shaped that the upstream needs (`content-type` and `accept` are
-recomputed for the proxy's own connection; `x-session-id` and `user-agent` are
-telemetry describing a client the host half did not open). So the vertex
-invariant holds here in its strong form -- "the proxy builds its own headers,
-so anything the box sends is data" -- and the day a provider of this family
-measures otherwise, the fix is a header policy in this module, exactly as
-`anthropic.py` grew one when a measurement forced it.
+No client headers are forwarded. The proxy rebuilds content and authentication
+headers for its upstream connection. Measurements found no other required
+headers; session IDs, user agents, and similar fields are telemetry.
 
-The body policy is the same posture as anthropic's with one measured
-difference: every tool opencode declares here is `{"type": "function"}` (all
-ten of them, across a full turn and the title-generation call), and absent
-`type` has no meaning in this protocol to measure -- the type is a required
-field, so an absent one is a malformed declaration rather than a variant that
-resolves client-side. Refused rather than guessed at: this transport fronts
-147 upstreams and "some of them might accept it" is the reasoning an allowlist
-exists to stop.
+The body policy permits only ``function`` tools, the client-side type observed
+from OpenCode. Unknown types are refused because this transport fronts many
+providers with independently changing server-side capabilities.
 
-Errors are answered in the family's own envelope, `{"error": {"message",
-"type"}}`, because the message is the field the client surfaces: measured in
-both directions against opencode 1.18.18, an openai-shaped body prints its
-message verbatim ("Error: dummy endpoint refusal") while an anthropic-shaped
-one collapses to a generic "Unexpected server error" that hides the reason.
-A refusal the agent cannot read is a refusal that did not happen.
+Errors use the OpenAI ``{"error": {"message", "type"}}`` envelope. OpenCode
+1.18.18 displayed its message verbatim, while an Anthropic error became the
+unhelpful "Unexpected server error."
 
-Request-size limits, rate limiting, and Unix-socket serving come from the neutral
-`http` module. This module retains only OpenAI-compatible protocol and policy
-behavior.
+The shared ``http`` module provides size limits, rate limiting, and socket
+lifecycle. This module contains protocol and policy rules for chat completions.
 """
 
 from __future__ import annotations
@@ -83,26 +61,18 @@ _SESSION: web.AppKey[ClientSession] = web.AppKey("session")
 _CHUNK = 64 << 10
 _TIMEOUT = ClientTimeout(total=None, sock_read=600, sock_connect=30)
 
-# Observed on the wire from opencode 1.18.18 over @ai-sdk/openai-compatible:
-# the one route a turn needs, plus the title-generation call that rides it.
-# Anchored and exact, as in `anthropic.py` -- a prefix match on
-# "/chat/completions" would also permit "/chat/completions_evil" on an upstream
-# we do not control. The family's other routes (`/models`, `/embeddings`) are
-# deliberately absent: nothing in a turn reads them, measured, and a route on
-# this list is a capability granted, not a URL that happens to exist.
+# OpenCode 1.18.18 used this route for turns and title generation. Exact matching
+# excludes paths such as "/chat/completions_evil". Observed turns didn't use
+# other family routes such as ``/models`` or ``/embeddings``.
 ALLOWED_PATHS = (("POST", "/chat/completions"),)
 
 
 @dataclass(frozen=True)
 class PathAllowlist:
-    """The request shapes the box may reach on the upstream.
+    """Define the upstream routes available to the box.
 
-    Uniform across the whole family by construction: the in-box client is
-    pointed at the proxy's bare origin, so the provider's path prefix never
-    crosses the namespace -- it lives in the upstream URL the backend dials,
-    where scoping by provider is a fact about the route rather than a rule the
-    box could trip over. What this allowlist bounds is the capability: a model
-    call, and nothing else the key opens.
+    The box sends family-wide paths to the proxy while the backend stores each
+    provider's path prefix. This allowlist limits the credential to model calls.
     """
 
     routes: tuple[tuple[str, str], ...] = ALLOWED_PATHS
@@ -111,37 +81,20 @@ class PathAllowlist:
         return (method.upper(), path) in self.routes
 
 
-# Tool types that execute IN THE BOX. In this protocol the client-side tool is
-# `"function"`: the model emits a call, the client runs it, the result goes
-# back as a message. Everything else in the union -- `web_search`,
-# `code_interpreter`, whatever a provider adds next -- makes the UPSTREAM act
-# on the box's behalf, which `unshare_net` does not reach.
+# ``function`` tools execute in the box. Other tool types may make the upstream
+# act for the box, outside the reach of ``unshare_net``.
 #
-# An ABSENT type is refused, unlike anthropic's policy. There it was measured
-# that absent resolves to the client-side variant; here `type` is a required
-# field, this client always sends it explicitly (measured), and an absent one
-# is malformed rather than a variant -- across 147 upstreams there is no one
-# resolution to measure, and permitting on the guess is the denylist's failure
-# mode wearing an allowlist's clothes.
+# OpenCode always sent the required ``type`` field. Unlike Anthropic, this family
+# has no measured default for an absent type, so missing values are refused.
 CLIENT_TOOL_TYPES = frozenset({"function"})
 
-# Top-level keys that make the upstream act on the box's behalf, refused
-# because a model call needs none of them. Not every server-side capability
-# declares itself as a tool type: `web_search_options` turns on hosted web
-# search with no `tools` entry (and carries a free-text `user_location`), so the
-# tool gate above never sees it. That is a route off a box `unshare_net` means
-# to have none. The general guard is the measured-key allowlist below; this
-# denylist stays in front of it so a KNOWN server-acting field is refused by
-# name, and cannot ride back in through a future allowlist addition.
+# Some top-level fields activate upstream behavior without declaring a tool.
+# Keep known server-side fields explicitly refused even if the allowed field set
+# later changes.
 REFUSED_KEYS: tuple[str, ...] = ("web_search_options",)
 
-# Top-level keys measured on the wire from opencode 1.18.23 across a full tool
-# round trip, plus the reasoning knobs measured on 1.18.18 driving a thinking
-# model (temperature, reasoning_effort, thinking). An allowlist for the same
-# reason the tool types are one: this transport fronts ~147 providers that
-# accrete server-side capabilities independently, and `web_search_options`
-# proved not every capability declares itself as a tool. A refused key names
-# itself, and the fix is one measured tag.
+# Fields observed in a full OpenCode 1.18.23 tool round trip, plus reasoning
+# fields observed with a thinking model on 1.18.18. Unknown fields are refused.
 ALLOWED_KEYS = frozenset(
     {
         "max_tokens",
@@ -157,46 +110,35 @@ ALLOWED_KEYS = frozenset(
     }
 )
 
-# Content part types with no URL for the upstream to retrieve. This client
-# sends message content as plain strings (measured: system, user, assistant
-# and tool roles alike); parts appear when rich content is attached, and the
-# fetchable ones -- `image_url`, `file`, `input_audio` -- are exactly what the
-# allowlist refuses.
+# Text parts contain no URL for the upstream to retrieve. Observed system, user,
+# assistant, and tool messages used plain strings. Rich content types that can
+# reference images, files, or audio remain blocked.
 ALLOWED_CONTENT_TYPES = frozenset({"text"})
 
 
 @dataclass(frozen=True)
 class BodyPolicy:
-    """Which capabilities the body may declare.
+    """Limit capabilities declared by a chat-completions body.
 
-    Same reasoning as anthropic's, one protocol over: the path allowlist gates
-    the envelope, and the body is not inert -- a declared tool type can make
-    the upstream fetch, execute, or open sessions on the box's behalf. So this
-    is an allowlist of what runs in the box, and a type the policy does not
-    name is a refusal, which is the only direction in which a protocol that
-    accretes capabilities fails safely.
+    Tool types and content parts can make an upstream fetch or execute work for
+    the box. Allow only measured client-side shapes so new server-side features
+    fail closed.
     """
 
     client_types: frozenset[str] = CLIENT_TOOL_TYPES
     container_types: frozenset[str] = frozenset()
-    # Tool object keys whose value may be structured. Every other key of a
-    # permitted tool has to be a scalar, so a server-side capability cannot
-    # ride in a sibling of a tool the gate just approved -- the tool walk
-    # reads `type` and would never look at it. This transport nests the
-    # declaration under `function`; the Responses one under `parameters` and
-    # its container's `tools`.
+    # Only these tool fields may contain nested declarations. Other fields must
+    # be scalar so uninspected data can't carry another capability.
     structured_tool_keys: frozenset[str] = frozenset({"function"})
     refused_keys: tuple[str, ...] = REFUSED_KEYS
     allowed_keys: frozenset[str] = ALLOWED_KEYS
     content_types: frozenset[str] = ALLOWED_CONTENT_TYPES
 
     def refuse(self, body: bytes) -> str | None:
-        """The reason to refuse `body`, or None to permit it.
+        """Return a refusal reason, or ``None`` if the body is allowed.
 
-        Malformed or ambiguous input is refused. The proxy and upstream are
-        separate JSON parsers, potentially from different implementations; if
-        this parser cannot determine the request's capability-bearing shape,
-        forwarding it would let the upstream make the security decision.
+        Reject malformed or ambiguous input because the proxy and upstream may
+        parse it differently.
         """
         try:
             payload = parse_json_object(body)
@@ -220,7 +162,7 @@ class BodyPolicy:
         return self.refuse_tools(payload["tools"])
 
     def refuse_tools(self, tools: object) -> str | None:
-        """The reason to refuse a tool array, including nested containers."""
+        """Check a tool array, including nested containers."""
         if not isinstance(tools, list):
             return "`tools` must be an array"
         pending = list(tools)
@@ -228,11 +170,7 @@ class BodyPolicy:
             tool = pending.pop()
             if not isinstance(tool, dict):
                 return "every tool must be a JSON object"
-            # A MISSING key, checked as missing. `.get()` would flatten
-            # absent and explicit null into one answer, and the two are
-            # different declarations -- null is a value this policy cannot
-            # resolve to any variant, and it is refused as such below rather
-            # than waved through as "not stated".
+            # Keep an absent type distinct from an explicit null value.
             if "type" not in tool:
                 return (
                     "a tool with no `type` is not a declaration this policy"
@@ -259,7 +197,7 @@ class BodyPolicy:
         return None
 
     def _tool_shape_refusal(self, tool: dict, kind: str) -> str | None:
-        """Refuse a structured value on a permitted tool's other keys."""
+        """Reject structured values in uninspected tool fields."""
         for key, value in tool.items():
             if key in self.structured_tool_keys:
                 continue
@@ -271,12 +209,10 @@ class BodyPolicy:
         return None
 
     def _content_refusal(self, payload: dict[str, object]) -> str | None:
-        """Message content parts as an egress channel, gated like the tools.
+        """Check message content parts for external references.
 
-        The fetchable part types make the UPSTREAM retrieve what the box
-        chose, and the URL is the payload. The Responses transport gates its
-        input items the same way; bodies with no `messages` (Responses bodies
-        among them) have nothing for this walk to read.
+        Fetchable content lets the upstream retrieve a box-controlled URL. Bodies
+        without ``messages`` have no content for this check.
         """
         messages = payload.get("messages")
         if messages is None:
@@ -303,11 +239,10 @@ class BodyPolicy:
 
 
 def parse_json_object(body: bytes) -> dict[str, object]:
-    """Parse one unambiguous JSON object for a body policy to inspect.
+    """Parse one unambiguous JSON object for policy inspection.
 
-    The strictness -- repeated keys and lenient constants both refused -- lives
-    in the shared `load_json_unambiguous`, so this policy and the anthropic and
-    vertex policies read a body the same way.
+    Shared parsing gives Anthropic, Vertex, and OpenAI-compatible policies the
+    same treatment of duplicate keys and nonstandard constants.
     """
     payload = load_json_unambiguous(body)
     if not isinstance(payload, dict):
@@ -316,23 +251,16 @@ def parse_json_object(body: bytes) -> dict[str, object]:
 
 
 def _error(status: int, kind: str, message: str) -> web.Response:
-    """A refusal in the family's own error envelope.
+    """Return a refusal in the OpenAI-compatible error envelope.
 
-    `message` is the model-facing surface: measured, it is the field
-    opencode prints when a request fails, so it names the policy that refused
-    rather than the code that ran. The shape is `{"error": {...}}` because
-    that is what this family parses -- see the module docstring for the
-    measurement in both directions.
+    OpenCode displays the ``message`` field to the user.
     """
     return web.json_response(
         {"error": {"message": message, "type": kind}}, status=status
     )
 
 
-# Returns the bearer to attach. Called PER REQUEST, never captured, for the
-# same reason as anthropic's: the credential file belongs to the HOST's
-# opencode, which rewrites it whenever the user re-runs /connect, and a stale
-# read is worth less than a fresh one.
+# Read the bearer for each request because host OpenCode rewrites it on /connect.
 TokenSource = Callable[[], Awaitable[str]]
 HeaderSource = Callable[[bytes], dict[str, str]]
 AuthorizationSource = Callable[[], Awaitable[dict[str, str]]]
@@ -360,8 +288,7 @@ def make_app(
     async def handle(request: web.Request) -> web.StreamResponse:
         if not token_matches(bearer_token(request), client_token):
             return _error(401, "authentication_error", "invalid aisan proxy token")
-        # Through `policy_permits`, so an allowlist that RAISES denies rather
-        # than tearing the connection down as a retryable transport error.
+        # Convert exceptions from caller-supplied policy into denials.
         path = request_path(request)
         if not policy_permits(
             lambda: path_allow.permits(request.method, path),
@@ -382,9 +309,7 @@ def make_app(
         if len(body) > MAX_BODY_BYTES:
             return _error(413, "invalid_request_error", "request body too large")
 
-        # Before resolving authorization: no reason to read the credential for
-        # a request being refused -- same ordering as anthropic's, for the same
-        # reason.
+        # Check policy before reading the host credential.
         reason = policy_refusal(
             lambda: body_policy.refuse(body), subject=f"body of {request.path}"
         )
@@ -399,18 +324,12 @@ def make_app(
                 assert token is not None
                 authorization_headers = {"Authorization": f"Bearer {await token()}"}
         except Exception as e:
-            # The credential went away mid-session -- the user re-ran /connect,
-            # or the file moved. Answered as an error the agent can read, with
-            # a reason naming a path or a provider, never a key value.
+            # Return a readable error if the credential changes or disappears.
             log.error("openai-compat proxy: no credential to attach: %s", e)
             return _error(503, "api_error", f"sandbox proxy has no credential: {e}")
 
-        # Our own headers only: nothing the box sent is forwarded. See the
-        # module docstring for why that invariant is strong here and what it
-        # takes for a provider to change it. Through the fail-closed wrapper
-        # because `headers` re-parses the body (Responses reconstructs protocol
-        # headers from it): a raise there must refuse, not traceback out of a
-        # request the body policy already passed.
+        # Build all upstream headers locally. Responses may reparse the body to
+        # reconstruct protocol headers, so treat errors as refusals.
         try:
             upstream_headers = headers(body) if headers is not None else {}
         except Exception as e:
@@ -448,31 +367,21 @@ def make_app(
                     status=up.status, headers=relayed_response_headers(up.headers)
                 )
                 try:
-                    # `prepare` writes too, and is where an interrupt usually
-                    # lands: the box hangs up while the upstream is still
-                    # thinking, so the write that fails is the response's own
-                    # header line, not a body chunk.
+                    # ``prepare`` can fail if the box disconnects while the
+                    # upstream is still working.
                     await resp.prepare(request)
                     async for chunk in up.content.iter_chunked(_CHUNK):
                         await resp.write(chunk)
                     await resp.write_eof()
                 except (ConnectionResetError, BrokenPipeError) as e:
-                    # The box hung up -- the agent exited, or its turn was
-                    # cancelled -- before or mid-response. Nothing is lost:
-                    # the only reader of these bytes is already gone. The
-                    # guard must cover `prepare`, because aiohttp raises
-                    # ClientConnectionResetError for a write to a closing
-                    # transport, a ClientError by inheritance as well as a
-                    # ConnectionResetError -- left to the outer ClientError
-                    # branch, a cancelled turn logged as a dead upstream and
-                    # a 502 written to a socket nobody is reading.
+                    # Catch failures from headers and body writes so a downstream
+                    # disconnect isn't reported as an upstream failure.
                     log.debug(
                         "openai-compat proxy: downstream closed: %s", type(e).__name__
                     )
                 return resp
         except ClientError as e:
-            # A dead upstream is one turn's failure with a legible reason,
-            # not a torn connection the client retries into.
+            # Return a readable failure instead of a retryable disconnect.
             log.warning("openai-compat proxy: upstream %s unreachable: %s", base, e)
             return _error(
                 502, "api_error", f"sandbox proxy cannot reach its upstream: {e}"

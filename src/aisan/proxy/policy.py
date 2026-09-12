@@ -1,27 +1,21 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The failure contract for a policy check: raising is a DENY.
+"""Treat an exception from a policy check as a denial.
 
-A transport asks a policy a yes/no question -- does this allowlist permit this
-path, does it permit this authority -- and the policy is caller-supplied. An
-`Allowlist` built from a config with a bad regex, a consumer's own matcher with a
-KeyError in it, a predicate that touches a file that is not there: every one of
-those raises where the transport expected a bool.
+A transport expects a policy predicate to return a decision. Caller-supplied
+predicates can instead raise because of invalid configuration, bugs, or missing
+files.
 
-Left to propagate, the exception unwinds the connection handler, and both proxies
-treat a torn-down connection as transport trouble rather than as a decision. So
-the client retries, and a policy BUG becomes a request the policy never actually
-approved. Routed through here it becomes an outage instead: the request is
-refused in the protocol's own terms, with the reason the client can read.
+Letting the exception unwind the connection handler looks like a transport
+failure, which clients retry. Converting the exception to a protocol refusal
+keeps an unevaluated request from reaching the upstream service.
 
-The fail-closed rule was informed by sandbox-runtime's request-filter contract.
-This implementation is independent: it turns any of its predicate shapes into an
-explicit denial and records the exception.
+These helpers adapt each predicate shape to that fail-closed behavior and log
+the exception.
 
-Logged at exception level, always, and never rate-limited: a mint failure repeats
-thousands of times in a build and is rightly summarised, but a policy that raises
-is a bug in the boundary and there is no volume at which it should get quieter.
+Policy exceptions aren't rate-limited because each one signals a bug in the
+security boundary.
 """
 
 from __future__ import annotations
@@ -33,10 +27,10 @@ log = logging.getLogger(__name__)
 
 
 def permits(check: Callable[[], bool], *, subject: str) -> bool:
-    """`check()`, with any exception answered as False.
+    """Run a boolean check, returning ``False`` if it raises.
 
-    `subject` names what was being decided, for the log line -- the request, not
-    the predicate, since the predicate is in the traceback already.
+    ``subject`` identifies the request in the log. The traceback identifies the
+    predicate.
     """
     try:
         return bool(check())
@@ -46,13 +40,9 @@ def permits(check: Callable[[], bool], *, subject: str) -> bool:
 
 
 def refusal(check: Callable[[], str | None], *, subject: str) -> str | None:
-    """The same contract for a check that answers WHY, not just whether.
+    """Run a refusal check, returning a failure message if it raises.
 
-    `None` permits; a string is the reason, and reaches the client. A policy
-    that needs to name what it refused cannot express that as a bool, and
-    routing it through `permits` would either discard the reason or compute it
-    outside the fail-closed wrapper -- so the contract is restated here rather
-    than worked around at the call site.
+    ``None`` permits the request. A string explains the denial to the client.
     """
     try:
         return check()
@@ -62,12 +52,10 @@ def refusal(check: Callable[[], str | None], *, subject: str) -> str | None:
 
 
 def decision(check: Callable[[], str | None], *, subject: str) -> str | None:
-    """The same contract for a check that answers which shape matched.
+    """Run a matching check, returning ``None`` if it raises.
 
-    `None` denies; a string names the matched shape, which the caller uses to
-    pick the policy for the rest of the request. One evaluation, so the permit
-    and the shape cannot disagree. The sense is inverted against `refusal`
-    (there a string denies), but an exception still yields the denial.
+    ``None`` denies the request. A string identifies the matching request shape
+    and selects its policy. Evaluating once keeps the match and policy aligned.
     """
     try:
         return check()

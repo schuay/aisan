@@ -1,63 +1,29 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The OpenAI Responses transport used by Codex.
+"""Apply Codex-specific policy to the OpenAI Responses transport.
 
-Measured against Codex CLI 0.147.0 with a custom provider and a local recording
-stub. Interactive and headless turns, local function-call round trips, and
-automatic context compaction all use one route::
+Codex CLI 0.147.0 used ``POST {base_url}/responses`` for interactive and
+headless turns, local tool calls, and context compaction. A bare loopback URL
+keeps the real upstream path prefix on the host.
 
-    POST {base_url}/responses
+Codex declares local ``function`` and ``custom`` tools, sometimes grouped in a
+``namespace``. GPT-5.6 also sends declarations through ``additional_tools``.
+The policy walks these forms recursively and rejects server-side tools such as
+web search and code interpreter.
 
-The client requests an SSE response. A bare loopback ``base_url`` keeps the
-upstream's path prefix host-side, matching the chat-completions transport: the
-proxy sees ``/responses`` and an upstream such as ``https://api.openai.com/v1``
-receives ``/v1/responses``.
+Input items fall into three groups: self-contained tagged values, containers of
+content parts, and tool envelopes. Each content part has an exact field set.
+Image and audio URLs must use the inline ``data:`` scheme, and payload-like fields
+outside inspected positions are refused.
 
-Codex 0.147.0 declares local tools as ``function`` or ``custom`` and groups some
-of them in a ``namespace``. GPT-5.6 sends the same declarations through an
-``additional_tools`` input item, which 0.153.4 also stamps with an id.
-Compaction sends no tools. The policy permits those local declarations
-recursively and refuses every server-side tool type, including web search and
-code interpreter.
+Forwarded fields also receive value checks. For example, ``tool_choice`` accepts
+only the observed string form because its object variants can select hosted
+capabilities. ``client_metadata`` is limited to Codex's identifier fields.
 
-An assistant turn arrives back as ``message`` or, on the multi-agent models,
-as ``agent_message`` -- ``author`` and ``recipient`` in place of ``role``, and
-a content union of its own. Codex both replays the upstream's and builds its
-own: an inter-agent message becomes an ``agent_message`` whose text names the
-sender and whose payload rides beside it encrypted.
-
-So the gate is per item type, in three buckets a new type has to be sorted
-into: the tag settles it, it holds parts, or it is the tool envelope. Where the
-parts live differs -- a message keeps them under ``content``, a tool result
-under ``output`` -- and so does what they may be.
-
-Server-side tools stay refused. A ``web_search_call`` names a page for the
-upstream to open and nothing a local turn does needs it; likewise
-``local_shell_call``, ``tool_search_call`` and ``image_generation_call``. Codex
-persists and replays all of them, so a history that collected one outside a box
-cannot be continued inside one. Of the four, only ``web_search_call`` has been
-seen in a recorded session.
-
-Under those gates, two layers that do not depend on knowing the protocol.
-A part is pinned key for key and value by value, because a tag says what a part
-is and not where its bytes come from. And outside the positions this policy
-reads, a key that names a payload -- an ``image_url``, a ``file_id`` -- is
-refused on its name and its value: the spellings a body can smuggle one in
-outnumber the ones worth enumerating, and whether the upstream honours a field in a position its
-schema does not define is the upstream's to change, not a property this side
-gets to hold still.
-
-The keys forwarded without being read are pinned to what the client sends.
-``tool_choice`` to its string form, because the API's own union names hosted
-capabilities there -- an ``mcp`` server, ``image_generation`` -- that never
-appear in ``tools`` for the tool gate to catch, and ``client_metadata`` to
-Codex's six identifier fields.
-
-Forwarding, credential replacement, limits, errors, and streaming are the same
-mechanism as the OpenAI-compatible chat transport. This module supplies the
-Responses route, body policy, and two host-generated protocol headers to its
-existing ``make_app``.
+The OpenAI-compatible proxy handles forwarding, credential replacement, limits,
+errors, and streaming. This module supplies the Responses route, body policy,
+and host-generated protocol headers.
 """
 
 from __future__ import annotations
@@ -95,29 +61,18 @@ ALLOWED_KEYS = frozenset(
     }
 )
 ALLOWED_INCLUDES = frozenset({"reasoning.encrypted_content"})
-# Item types the tag settles, because nothing they carry can name a fetch:
-# `function_call` keeps its arguments in a string, `custom_tool_call` its
-# input, `compaction` nothing but an opaque blob and an id. They hold no parts
-# at all, so a tagged array on one of them is refused outright below.
+# Item types with no external references. Function and custom calls store their
+# input in strings; compaction stores an opaque blob and ID. None contain parts.
 #
-# Compaction is the odd one, and not for the reason it looks like. A boxed
-# client never produces it: remote compaction wants a provider Codex
-# recognises as OpenAI's, and this transport is a loopback under a name of its
-# own, so a box compacts locally and sends plain messages. The beta header
-# `_protocol_headers` sends advertises the client's features rather than asking
-# for any. It is permitted because a history recorded outside a box does carry
-# the item -- measured -- and replaying it is how that session resumes inside
-# one. Its counterpart `compaction_trigger`, the item that ASKS the upstream to
-# compact, stays refused: replaying a summary a recorded session already holds
-# is not the same act as a box asking OpenAI to produce one.
+# Boxed clients compact locally, but a session recorded outside the box may
+# contain a ``compaction`` item. Permit replaying that summary. Continue to block
+# ``compaction_trigger``, which asks the upstream to perform new work.
 TAG_SETTLED_INPUT_TYPES = frozenset({"compaction", "custom_tool_call", "function_call"})
 
-# The parts a container may hold, pinned key for key. The tag alone does not
-# say where a part's bytes come from: a text part carrying an `image_url`
-# beside its text names one past a gate that reads only the tag, which is
-# cfdf7b6's finding one protocol over. Every part observed in a recorded
-# session is exactly one of these key sets. `encrypted_content` is from the
-# protocol type instead, no `agent_message` having been captured on the wire.
+# Exact field sets for content parts. A type alone doesn't prevent an extra URL
+# field from naming external data. Recorded sessions matched these sets;
+# ``encrypted_content`` comes from the protocol definition because no
+# ``agent_message`` was captured.
 PART_KEYS = MappingProxyType(
     {
         "input_text": frozenset({"type", "text"}),
@@ -131,51 +86,36 @@ PART_KEYS = MappingProxyType(
     }
 )
 
-# The part key that names a payload, and the one scheme that keeps the payload
-# inline, as anthropic's source gate does with base64. Codex strips a remote
-# image url before the socket sees it and sends the bytes instead, and every
-# image observed in a recorded session is a `data:` url -- but the box is not
-# its client, and any other scheme is a fetch the box chose and the upstream
-# performs.
+# Images observed from Codex used inline ``data:`` URLs. The box can construct
+# requests directly, so reject schemes that ask the upstream to fetch data.
 INLINE_URL_KEYS = MappingProxyType(
     {"input_image": "image_url", "input_audio": "audio_url"}
 )
 INLINE_URL_SCHEME = "data:"
 
-# Part keys that carry the payload itself. A key outside this set is either the
-# part's inline-url key or an unreviewed way to name a payload, and the test
-# that pins the two together reads this rather than guessing from the name: a
-# key called `url`, `uri`, `src` or `file_id` names one just as well as one
-# ending `_url`.
+# Fields that carry inline content or metadata. Other fields could name external
+# payloads regardless of whether their names end in ``_url``.
 INERT_PART_KEYS = frozenset({"type", "text", "detail", "encrypted_content"})
 
 
 @dataclass(frozen=True)
 class Container:
-    """Where an input item keeps its parts, and which parts it may hold."""
+    """Describe a content field and the part types it accepts."""
 
     field: str
     parts: frozenset[str]
-    # `reasoning` sends an empty summary and a null content, so a part field
-    # is gated when it is there and not required to be.
+    # Reasoning may omit either optional content field.
     optional: bool = False
 
 
-# A tool result carries what a local tool produced: text, an image or audio
-# inline, and the opaque blob an MCP server marks as encrypted content.
+# Content types returned by local tools.
 TOOL_RESULT_PARTS = frozenset(
     {"input_text", "input_image", "input_audio", "encrypted_content"}
 )
 
-# `message` carries Codex's `ContentItem`, `agent_message` an
-# `AgentMessageInputContent` -- text or the encrypted payload, no url in the
-# type at all -- and a tool result the text and images a local tool produced.
-# Each union is the protocol type's, because an image or audio part carries
-# its payload inline or is refused, and a blob names nothing at all -- so which
-# container a part may appear in is a question about the protocol and not about
-# what the box can reach. Narrowing one of these by hand is how `codex review`
-# and an MCP tool result got refused for carrying fields that were never a
-# capability.
+# Allowed content fields and part types for each protocol item. URL-bearing
+# parts receive separate inline checks below. These unions include the complete
+# protocol shapes needed by ``codex review`` and MCP tool results.
 CONTAINERS = MappingProxyType(
     {
         "message": (
@@ -198,26 +138,17 @@ CONTAINERS = MappingProxyType(
 
 TOOL_ENVELOPE_INPUT_TYPE = "additional_tools"
 
-# Measured: the client sends "auto" and has no reason to send the others, but
-# they name no capability either.
+# Codex sends "auto"; the other string variants select no hosted capability.
 TOOL_CHOICES = frozenset({"auto", "none", "required"})
 
-# Key names that name a payload for the upstream to fetch. Inside a gated part
-# `image_url` is settled by the scheme check; anywhere else there is no gate,
-# and the tagged-array walk below only recognises a payload spelled as an array
-# of tagged objects -- a bare object, an array one deeper, or an array of
-# objects with no `type` carry the same url past it. So outside the positions
-# this policy reads, the key name alone refuses, which is how vertex's
-# `contents` gate reads a part: the field that names a URI is the capability.
+# Field names that may tell the upstream to fetch a payload. Inside known parts,
+# scheme checks allow inline data. Elsewhere, the name itself causes refusal.
 PAYLOAD_KEYS = frozenset(
     {"image_url", "file_url", "audio_url", "url", "uri", "file_id"}
 )
 
 
-# Derived, so that permitting a type means sorting it into a bucket. Spelled as
-# a union of its own, this is where a content-carrying type arrives permitted
-# and ungated: `function_call_output` did, holding an `input_image` whose
-# `image_url` nothing on this side read.
+# Derive this set so every allowed type also receives its corresponding checks.
 ALLOWED_INPUT_TYPES = (
     TAG_SETTLED_INPUT_TYPES | frozenset(CONTAINERS) | {TOOL_ENVELOPE_INPUT_TYPE}
 )
@@ -232,12 +163,9 @@ class PathAllowlist(_PathAllowlist):
 class BodyPolicy(_BodyPolicy):
     client_types: frozenset[str] = CLIENT_TOOL_TYPES
     container_types: frozenset[str] = CLIENT_TOOL_CONTAINERS
-    # A function's JSON Schema, a custom tool's grammar, and a namespace's
-    # nested array. Measured: no other key of a real tool holds anything but a
-    # scalar.
+    # Structured fields observed in functions, custom tools, and namespaces.
     structured_tool_keys: frozenset[str] = frozenset({"parameters", "format", "tools"})
-    # The unknown-key refusal itself runs in the base policy; this is the set
-    # it runs against.
+    # The base policy checks unknown top-level fields against this set.
     allowed_keys: frozenset[str] = ALLOWED_KEYS
 
     def refuse(self, body: bytes) -> str | None:
@@ -246,9 +174,7 @@ class BodyPolicy(_BodyPolicy):
             return reason
 
         payload = parse_json_object(body)
-        # Not `.get(..., False)`: the API's own default for an absent `store`
-        # is to retain, so absence is the opposite of what this asks for.
-        # Measured across recorded turns, the client always sends it.
+        # The API retains data when ``store`` is absent, so require explicit false.
         if payload.get("store") is not False:
             return "`store` must be present and false"
         if payload.get("stream") is not True:
@@ -269,24 +195,16 @@ class BodyPolicy(_BodyPolicy):
             if reason is not None:
                 return reason
 
-        # `tool_choice` names a tool for the upstream to prefer, and the
-        # API's own union spells hosted capabilities there by name --
-        # `image_generation`, `code_interpreter`, an `mcp` server label --
-        # none of which appear in `tools` for the tool gate to catch. Measured
-        # across recorded turns the client sends the string form and nothing
-        # else, so the object form is refused entirely.
+        # Object forms of ``tool_choice`` can select hosted capabilities that
+        # don't appear in ``tools``. Recorded turns used only string values.
         choice = payload.get("tool_choice")
         if choice is not None and (
             not isinstance(choice, str) or choice not in TOOL_CHOICES
         ):
             return "`tool_choice` may only be one of " + quoted_names(TOOL_CHOICES)
 
-        # Codex's own turn identifiers. The names are not pinned: a subagent
-        # adds `x-openai-subagent` and its parent ids, and each release adds
-        # more, so a fixed set refuses a feature over an identifier. What is
-        # pinned is that they are strings, which is what keeps this from being
-        # an arbitrary object forwarded unread -- and the sweep below refuses
-        # a payload named among them.
+        # Metadata field names change across Codex releases and subagent calls.
+        # Restrict values to strings, then scan them for payload references.
         metadata = payload.get("client_metadata")
         if metadata is not None and (
             not isinstance(metadata, dict)
@@ -294,8 +212,7 @@ class BodyPolicy(_BodyPolicy):
         ):
             return "`client_metadata` must be an object of string fields"
 
-        # `input` and `tools` are walked above; every other key is forwarded
-        # without this policy reading its shape, so none of them may name one.
+        # Reject payload references in fields whose structure isn't inspected.
         for key, value in payload.items():
             if key in {"input", "tools"}:
                 continue
@@ -318,9 +235,8 @@ class BodyPolicy(_BodyPolicy):
             or text["verbosity"] not in {"low", "medium", "high"}
         ):
             return "`text.verbosity` must be low, medium, or high"
-        # Codex 0.153.4 uses a strict output schema for task recaps and
-        # --output-schema. The schema describes the result; the payload sweep
-        # above still checks it for references, as it does other text fields.
+        # Codex 0.153.4 uses strict output schemas for task recaps and
+        # ``--output-schema``. The payload scan above still covers the schema.
         if "format" in text:
             output_format = text["format"]
             if (
@@ -346,26 +262,19 @@ class BodyPolicy(_BodyPolicy):
                 or item["role"] != "developer"
             ):
                 return "`additional_tools` must be the measured developer envelope"
-            # The rest are identifiers, permitted the way `client_metadata`'s
-            # are: not by name, because each release adds one -- 0.153.4 stamps
-            # an `at_` id on the envelope and pinning the names refused every
-            # turn the client made -- but by shape, so nothing rides inside one.
+            # Identifier names change across releases, so constrain their values
+            # to strings instead of pinning the names.
             for key, value in item.items():
                 if key != "tools" and not isinstance(value, str):
                     return f"`additional_tools` `{key}` must be a string"
             return self.refuse_tools(item["tools"])
-        # Only the envelope declares tools. The item's other keys are left
-        # alone: the upstream returns items carrying ids and metadata this side
-        # has not measured, and pinning those refuses a turn over a field that
-        # was never a capability.
+        # Only the additional_tools envelope may declare tools. Other item fields
+        # include upstream IDs and metadata that vary across releases.
         if "tools" in item:
             return f"{kind} may not declare tools"
 
         containers = CONTAINERS.get(kind, ())
-        # A part array anywhere but the field its own type keeps parts in is a
-        # payload this side never reads. Which field an item keeps parts in
-        # varies by type, so reading one field per type and ignoring the rest
-        # leaves the same hole that `output` was, one key over.
+        # Reject part arrays outside the content fields defined for this type.
         walked = {container.field for container in containers}
         for key, value in item.items():
             if key in walked:
@@ -392,8 +301,7 @@ class BodyPolicy(_BodyPolicy):
             if container.optional:
                 return None
             return f"{kind} `{container.field}` must be text or an array"
-        # Both shapes are measured -- a tool result is a bare string more
-        # often than an array -- and a string names nothing.
+        # Tool results may be either plain strings or arrays of parts.
         if isinstance(parts, str):
             return None
         if not isinstance(parts, list):
@@ -417,9 +325,7 @@ class BodyPolicy(_BodyPolicy):
                 f"{part_kind} field(s) not permitted by the sandbox proxy:"
                 f" {quoted_names(extra)}"
             )
-        # Every value a part carries is a string, measured. Pinning the keys
-        # settles which fields a part has and not what they hold, so without
-        # this a permitted key takes an object and the payload rides inside it.
+        # Observed part values are strings. Reject nested values under allowed keys.
         for key, value in part.items():
             if not isinstance(value, str):
                 return f"{part_kind} `{key}` must be a string"
@@ -437,17 +343,13 @@ class BodyPolicy(_BodyPolicy):
 
 
 def _names_a_payload(value: object) -> str | None:
-    """The first payload-naming key anywhere under `value` that holds a
-    reference, or None.
+    """Find the first field containing an external payload reference.
 
-    Only a string is one. A JSON Schema describes a field named `url` as an
-    object saying what it is, so reading the property's NAME as a payload
-    refuses a structured output for the shape of its own result. The string it
-    does read has to be inline, on the same terms as a gated part: what makes
-    a reference a capability is that the upstream would go and get it.
+    Only string values count. A JSON Schema may describe a property named
+    ``url`` with an object, which doesn't ask the upstream to fetch anything.
+    Inline data URLs remain allowed.
 
-    Iterative because the depth is the box's to choose, and a body deep enough
-    to exhaust the stack should be a refusal rather than a traceback.
+    Walk iteratively because the box controls nesting depth.
     """
     pending = [value]
     while pending:

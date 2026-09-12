@@ -1,7 +1,7 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Shared infrastructure for the aiohttp-based host proxies.
+"""Provide shared infrastructure for aiohttp-based host proxies.
 
 Provider modules own request policy, credentials, upstream behavior, and error
 envelopes. This module owns only the mechanics they share: request-size and rate
@@ -22,31 +22,25 @@ from pathlib import Path
 
 from aiohttp import web
 
-# A prompt plus its history is large but bounded; an exfiltration is not. 32 MiB
-# is far above a normal request and far below a useful bulk-smuggling channel.
+# Allow large prompts and histories while limiting bulk exfiltration.
 MAX_BODY_BYTES = 32 << 20
 
 
 class AmbiguousBody(ValueError):
-    """A body a strict and a lenient JSON parser may read differently.
+    """A body that strict and lenient JSON parsers may interpret differently.
 
-    Distinct from "this is not JSON", and the distinction is what a body policy
-    acts on. Two shapes qualify. A document with a repeated key is accepted by
-    both parsers, but which value survives is unspecified. A bare `NaN` or
-    `Infinity` is a JavaScript extension this parser accepts as a float while a
-    strict parser rejects it outright. Either way the declaration this side
-    inspects need not be the one the upstream acts on, and a policy that
-    approved the reading it happened to get would be approving a capability it
-    never saw.
+    Duplicate keys can resolve to different values, and Python accepts bare
+    ``NaN`` and ``Infinity`` values that strict parsers reject. In either case,
+    the proxy and upstream could apply policy to different data.
     """
 
 
 def json_unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     """Build one JSON object, refusing a key repeated at any depth.
 
-    An `object_pairs_hook`, so it runs on every object in the document rather
-    than only the top level: the shape worth catching is a `type` stated twice
-    inside one tool declaration, not just a `tools` stated twice beside it.
+    This function is an ``object_pairs_hook``, so it checks nested objects as
+    well as the top level. Duplicate fields inside tool declarations matter as
+    much as duplicate top-level fields.
     """
     out: dict[str, object] = {}
     for key, value in pairs:
@@ -59,46 +53,35 @@ def json_unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
 def _reject_constant(value: str) -> object:
     """Refuse the JSON constants only a lenient parser accepts.
 
-    `NaN`, `Infinity`, and `-Infinity` are JavaScript extensions Python reads as
-    floats; a strict parser rejects them. A body carrying one is exactly a body
-    this side and a strict upstream would not agree on, so it is ambiguous, not
-    merely malformed.
+    Python reads ``NaN``, ``Infinity``, and ``-Infinity`` as floats, while a
+    strict parser rejects them. Treat the disagreement as ambiguity.
     """
     raise AmbiguousBody(f"non-JSON constant {value}")
 
 
 def load_json_unambiguous(body: bytes) -> object:
-    """`json.loads` with the seams two JSON parsers disagree on closed.
+    """Parse JSON while rejecting duplicate keys and nonstandard constants.
 
-    Raises `AmbiguousBody` for a document a strict and a lenient parser read
-    differently -- a key repeated at any depth, or a bare `NaN`/`Infinity` this
-    parser accepts as a float -- and a plain ValueError for one that does not
-    parse at all. Two different findings, which is why they are two different
-    exceptions. What each proxy does with them is its own policy -- today every
-    body policy refuses both, `anthropic` excepting only an empty body for the
-    hello routes.
+    Raise ``AmbiguousBody`` when strict and lenient parsers could disagree. Raise
+    ``ValueError`` for malformed JSON. Each proxy decides how to handle them;
+    Anthropic's hello routes also accept an empty body.
     """
     return json.loads(
         body, object_pairs_hook=json_unique_pairs, parse_constant=_reject_constant
     )
 
 
-# Response headers worth relaying back to the box. Without them a 429/529 makes
-# the client retry blind: `retry-after` is the backoff, the ratelimit families
-# say how much budget is left, and a request id is what a bug report quotes.
-# content-type is relayed by the caller (it carries a default); this is the
-# diagnostic set, matched exactly or by the rate-limit prefix each provider
-# spells its own way (anthropic-ratelimit-*, x-ratelimit-*, ratelimit-*).
+# Relay backoff, quota, and request identifiers. The caller handles Content-Type
+# separately because it supplies a default.
 _RELAYED_RESPONSE_HEADERS = frozenset({"retry-after", "x-request-id", "request-id"})
 _RELAYED_RESPONSE_PREFIXES = ("anthropic-ratelimit-", "x-ratelimit-", "ratelimit-")
 
 
 def quoted_names(names: set[str]) -> str:
-    """Box-chosen field names for a refusal message, sorted and quoted.
+    """Sort and quote box-controlled field names for a refusal message.
 
-    `repr` because the refusal is logged host-side and the box picks the
-    string: a raw name carrying a newline writes the operator's log a line of
-    its own choosing.
+    ``repr`` prevents a field name containing a newline from forging host log
+    lines.
     """
     return ", ".join(repr(name) for name in sorted(names))
 
@@ -106,11 +89,11 @@ def quoted_names(names: set[str]) -> str:
 def relayed_response_headers(
     up_headers, *, content_type_default: str = "application/json"
 ) -> dict[str, str]:
-    """Content-Type plus the diagnostic headers a client needs to back off well.
+    """Return Content-Type and headers used for diagnostics and backoff.
 
-    Everything else the upstream sent is dropped: the proxy owns the connection
-    to the box, so hop-by-hop framing and the upstream's own transport headers
-    describe a connection the box is not on."""
+    Drop other upstream headers because they describe a different connection
+    from the one between the proxy and box.
+    """
     out = {"Content-Type": up_headers.get("Content-Type", content_type_default)}
     for name in up_headers:
         low = name.lower()
@@ -121,12 +104,9 @@ def relayed_response_headers(
     return out
 
 
-# A 3xx from the upstream is the one answer no proxy here follows. The operator
-# named exactly one upstream, and the credential attached on the way out belongs
-# to that name only: aiohttp drops `authorization` when a redirect crosses
-# origins but keeps `x-api-key`, so a followed hop can carry a key -- and the
-# request body -- to a host nobody approved. Refusing is also no loss to a real
-# client, since the API this fronts does not redirect.
+# Never follow upstream redirects. aiohttp drops Authorization across origins
+# but retains x-api-key, which could send the key and request body to an
+# unapproved host. The proxied APIs don't use redirects.
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
@@ -135,25 +115,21 @@ def is_redirect(status: int) -> bool:
 
 
 def request_path(request) -> str:
-    """The request path as it will be FORWARDED -- the raw, still-encoded form,
-    minus the query.
+    """Return the raw request path that will be forwarded, without its query.
 
-    The path allowlists must gate this, not `request.path`: aiohttp decodes
-    `request.path` (a `%2F` becomes `/`), so `/v1%2Fmessages` decodes to the
-    permitted `/v1/messages` while the forward sends the raw `/v1%2Fmessages`
-    the upstream routes differently. Checking the same bytes the forward sends
-    closes that gap -- a legitimate client sends no encoding, so nothing real is
-    refused."""
+    ``request.path`` decodes escapes before an allowlist can inspect them. For
+    example, ``/v1%2Fmessages`` becomes the permitted ``/v1/messages`` even
+    though forwarding preserves the encoded path. Check the forwarded form.
+    """
     return request.rel_url.raw_path
 
 
 @dataclass
 class RateLimit:
-    """Token bucket, so a runaway client burns its allowance, not the quota.
+    """Use a token bucket to bound requests from a runaway client.
 
-    Deliberately crude: this bounds a loop that has gone wrong, it is not a
-    fairness mechanism. `monotonic` avoids handing out tokens after a wall-clock
-    step.
+    This limits faulty loops rather than allocating quota fairly. A monotonic
+    clock prevents wall-clock changes from creating tokens.
     """
 
     per_minute: int = 120
@@ -176,18 +152,14 @@ class RateLimit:
 
 
 class LogGate:
-    """Bounds refusal WARNINGs so an in-box loop cannot flood the log.
+    """Limit refusal warnings from an in-box loop.
 
-    The request limiter cannot do this job: the path refusal is decided (and
-    logged) before it runs, and even behind it a steady 120 requests a minute
-    is a log nobody can read. The gate lets a burst through, then counts what
-    it suppressed and reports the count when it reopens -- the boundary keeps
-    refusing either way, only the logging is bounded.
+    Path refusals occur before request rate limiting, and 120 warnings per minute
+    would still obscure useful logs. Allow a short burst, count suppressed
+    warnings, and report the count when logging resumes.
 
-    Refusal warnings only. `policy`'s fail-closed exceptions stay unlimited by
-    design (a raising policy is a bug in the boundary, and there is no volume
-    at which it should get quieter), and so do upstream-outage warnings, which
-    the box does not control.
+    Policy exceptions and upstream outage warnings remain unlimited. The former
+    signal boundary bugs, while the box doesn't control the latter.
     """
 
     def __init__(self, per_minute: int = 12) -> None:
@@ -210,18 +182,17 @@ class LogGate:
 async def serve(socket_path: Path, app: web.Application) -> web.AppRunner:
     """Serve `app` on `socket_path`; the caller owns the runner's lifetime.
 
-    The socket lives in a box's control directory, which is already mounted into
-    the box. A stale socket from a crashed run would make bind fail, so it is
-    removed first. Runtime paths are per box, so this cannot unlink a live peer.
+    The socket lives in the box's mounted runtime directory. Remove stale sockets
+    before binding. Per-box runtime paths prevent this from unlinking a peer's
+    live socket.
     """
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     socket_path.unlink(missing_ok=True)
-    # The policy modules log decisions explicitly. aiohttp's access log would
-    # add one uninformative INFO line per model request and bury refusals.
+    # Policy modules log decisions; aiohttp access logs would bury refusals.
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     await web.UnixSite(runner, str(socket_path)).start()
-    # The box runs as the same uid; keep the socket off-limits to anyone else.
+    # The box runs as the same user, so exclude other users from the socket.
     socket_path.chmod(0o600)
     return runner
 

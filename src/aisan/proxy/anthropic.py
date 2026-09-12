@@ -1,87 +1,37 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Host-side Anthropic proxy: the box reaches a model holding only a placeholder.
+"""Proxy Anthropic requests without exposing the host credential to the box.
 
-Same two-half shape as `vertex.py` -- a UNIX socket the box's relay splices to, a
-path allowlist, an injected credential, a streamed response -- and deliberately a
-SEPARATE module, because one of the three properties that make `vertex.py` a
-security boundary is false here:
+The proxy accepts requests through a UNIX socket, checks the path, headers, and
+body, adds a host credential, and streams the response. Anthropic needs a
+separate proxy from Vertex because some client headers must pass through.
 
-    "Request headers are never passed through. The proxy builds its own, so
-    anything the box sends is data."
+Tests with Claude Code 2.1.219 showed that ``anthropic-version`` is required and
+that ``anthropic-beta`` selects behavior expected by the client. Reusing the
+Vertex proxy would weaken its rule that no client headers reach the upstream.
 
-That cannot hold for this upstream. Measured against the real Claude Code
-(2.1.219): a request built from our own headers only is answered
-`400 anthropic-version: header is required`, and the `anthropic-beta` list the
-client sends selects API behaviour it then expects (`claude-code-*`,
-`interleaved-thinking-*`, `context-management-*`, `effort-*`, ...). Those headers
-are protocol, not payload. Reusing `make_app` would mean giving that stated
-invariant a caller-supplied parameter -- a boundary whose strength depends on
-what the last caller passed -- so the header policy lives here, as its own
-allowlist, and vertex's "none, ever" stays absolute.
+The proxy forwards ``anthropic-version``, ``anthropic-beta``, ``accept``, and
+``x-claude-code-session-id``. It drops authentication, framing, hop-by-hop,
+telemetry, and unknown headers. The per-box token in ``authorization`` or
+``x-api-key`` never reaches the upstream; the proxy adds the only upstream
+credential. Dropping ``x-stainless-*``, ``user-agent``, and ``x-app`` was
+verified with a real ``claude -p`` request.
 
-The header allowlist is therefore the new policy surface, and it is an
-allowlist in both directions:
+``x-claude-code-session-id`` lets custom upstreams distinguish boxed sessions.
+The API doesn't require it, but dropping it would combine all boxes in one
+session bucket on an upstream that uses the header. The box chooses the value,
+so upstreams must namespace or sanitize client-provided IDs.
 
-- FORWARDED: what the API needs to answer correctly. `anthropic-version` and
-  `anthropic-beta` (protocol selectors, measured required), `accept` (the client
-  asks for SSE and parses what it asked for). Plus `x-claude-code-session-id`,
-  which is none of those and is explained on its own below.
-- DROPPED, always: `x-api-key` and `authorization`. Whichever of the two the
-  box was dressed to use, its value is a per-box relay token by construction, so
-  forwarding it forwards nothing useful -- and a prompt-injected agent that sets
-  one would be choosing the string we send upstream. The drop is unconditional
-  and comes BEFORE the allowlist loop, so the credential this proxy attaches is
-  the only one on the wire no matter which header the box presented. Also every hop-by-hop and body-framing header (`host`, `connection`,
-  `content-length`, `accept-encoding`): the client session computes those for the
-  connection it actually opens, and a forwarded copy describes the wrong one.
-- DROPPED, by judgement: the `x-stainless-*` set (arch, os, lang, runtime,
-  runtime-version, package-version, retry-count, timeout), plus `user-agent`
-  and `x-app`. These are SDK telemetry. Six of them describe the MACHINE --
-  operating system, architecture, runtime version -- and the point of the box
-  is that it is not the host. None is required: verified by driving a real
-  `claude -p` through this proxy with them dropped. Dropping is the
-  fail-closed direction and it costs nothing measurable.
+Unknown headers are dropped. Client upgrades may require an explicit allowlist
+update before new protocol behavior works.
 
-`x-claude-code-session-id` is forwarded, and it is the one entry here that buys
-something at a cost rather than nothing at a cost. It is a client-generated
-identifier for the session making the request. The API does not require it --
-`claude -p` completes with it dropped -- but an upstream that keys PER-SESSION
-state off it cannot tell two boxed sessions apart without it, and collapses
-every one of them into a single bucket. That is the whole reason it is here: an
-operator pointing this proxy at such an upstream gets per-session behaviour that
-matches an unsandboxed client, which is the parity the box is otherwise trying
-to preserve.
+The body also needs policy checks. Tools and content blocks can ask Anthropic to
+fetch a URL chosen by the box, bypassing network isolation. ``BodyPolicy`` only
+allows request shapes measured from the client and refuses unknown additions.
 
-What it costs is a difference in KIND from the other three. Those are protocol:
-box-chosen bytes whose effect is bounded by the API's own parser. An identifier
-is bytes an upstream may use as a state key, so forwarding it means the box can
-name a session it did not open -- writing its own state into another session's
-bucket, on an upstream that trusts the id. It is not a credential and it does
-not describe the host, which is what separates it from the set above; it is a
-capability only against an upstream that treats client-supplied ids as
-authoritative, and such an upstream has to namespace or sanitise them anyway.
-
-The narrower rule -- forward it only for upstreams that want it -- is
-deliberately NOT taken: it would make this allowlist depend on which upstream a
-caller configured, and a boundary whose strength depends on the last caller is
-the property this module exists to avoid.
-
-Everything not named is dropped. A new header the client starts sending arrives
-as "the API behaves slightly differently", which is a debuggable outcome; the
-alternative -- a denylist -- arrives as "the box's chosen bytes reached the
-upstream", which is not.
-
-The third surface is the BODY, and it exists because the first two gate only the
-envelope of a model call. `POST /v1/messages` is not a leaf capability on this
-upstream: the tools its body declares make Anthropic's servers fetch URLs the
-box chose, so `unshare_net` stops the box dialling out while leaving it able to
-ask the API to dial out on its behalf. `BodyPolicy` answers that, on the same
-allowlist posture as the headers -- see its docstring for what is measured.
-
-Request-size limits, rate limiting, and Unix-socket serving come from the neutral
-`http` module. This module retains only Anthropic protocol and policy behavior.
+The shared ``http`` module provides size limits, rate limiting, and socket
+lifecycle. This module contains Anthropic-specific protocol and policy rules.
 """
 
 from __future__ import annotations
@@ -118,24 +68,19 @@ _SESSION: web.AppKey[ClientSession] = web.AppKey("session")
 _CHUNK = 64 << 10
 _TIMEOUT = ClientTimeout(total=None, sock_read=600, sock_connect=30)
 
-# Lowercased; aiohttp's CIMultiDict compares case-insensitively but a frozenset
-# does not, so the lookup lowercases too.
+# Store lowercase names because frozenset membership is case-sensitive.
 FORWARD_HEADERS = frozenset(
     {
         "anthropic-version",
         "anthropic-beta",
         "accept",
-        # Not protocol: an identifier, forwarded so a session-keyed upstream can
-        # tell boxed sessions apart. The box chooses its value -- see the module
-        # docstring for what that is and is not worth.
+        # Let session-aware upstreams distinguish boxed sessions.
         "x-claude-code-session-id",
     }
 )
 
-# Observed on the wire from claude-cli 2.1.219 in a full one-shot turn: the
-# messages call, and the reachability check it makes at startup. Anchored and
-# exact -- a prefix match on "/v1/messages" would also permit "/v1/messages_evil"
-# on an upstream we do not control.
+# Observed during a complete Claude Code 2.1.219 turn. Exact matching prevents a
+# path such as "/v1/messages_evil" from passing as a messages request.
 ALLOWED_PATHS = (
     ("POST", "/v1/messages"),
     ("POST", "/v1/messages/count_tokens"),
@@ -146,13 +91,10 @@ ALLOWED_PATHS = (
 
 @dataclass(frozen=True)
 class PathAllowlist:
-    """The request shapes the box may reach on the upstream.
+    """Define the upstream routes available to the box.
 
-    Narrow on purpose. The credential this proxy attaches is a subscription
-    bearer, which is accepted by more of the API than a model call needs -- so
-    without this, a prompt-injected agent's route off the machine is also a route
-    to whatever else that token opens. The allowlist is what makes the box's
-    capability "talk to a model" rather than "act as the user".
+    The injected subscription bearer may authorize more than model calls. This
+    allowlist limits the box to the routes needed by Claude Code.
     """
 
     routes: tuple[tuple[str, str], ...] = ALLOWED_PATHS
@@ -161,41 +103,24 @@ class PathAllowlist:
         return (method.upper(), path) in self.routes
 
 
-# Tool types that execute IN THE BOX. Everything else in the upstream's union is
-# the upstream acting on the box's behalf, which `unshare_net` does not reach.
+# Tool types executed inside the box. Other types may execute upstream, outside
+# the reach of ``unshare_net``.
 #
-# Only `"custom"` is named here, and an ABSENT `type` is permitted separately in
-# `refuse` -- absent is not a value and encoding it as one would conflate it with
-# an explicit `null`, which is a different thing to the upstream (see below).
+# An absent ``type`` selects the ``custom`` variant. Anthropic's validation error
+# for an untyped tool with ``max_uses`` identifies it as ``custom``. An explicit
+# null is a different value and remains invalid.
 #
-# The upstream's `tools` is a discriminated union keyed on `type`, and an absent
-# `type` resolves to the `custom` variant. Measured, from the upstream's own
-# validation errors: an untyped tool carrying web_fetch's `max_uses` is refused
-# `tools.0.custom.max_uses: Extra inputs are not permitted`, naming the variant
-# it resolved to. So absent and `"custom"` are one variant under two spellings.
-#
-# The API also defines client-side tools that DO carry a type (`bash_*`,
-# `text_editor_*`, `memory_*`). They are deliberately absent: Claude Code 2.1.219
-# declares none of them (measured, 646 declarations across chat, Bash, edits,
-# Skill, subagent, plan mode and a TUI session -- every one untyped), and adding
-# them here on the strength of the API reference alone is the guess this policy
-# exists to avoid. If a client adopts one, this refuses its own turn loudly on
-# the next upgrade, and the fix is one measured tag.
+# Claude Code 2.1.219 used no typed client tools in 646 observed declarations
+# across chat, shell, editing, skills, subagents, plan mode, and a TUI session.
+# Refuse new types until their behavior has been measured.
 CLIENT_TOOL_TYPES = frozenset({"custom"})
 
-# Top-level keys that make the upstream act. `mcp_servers` pairs with the
-# `mcp_toolset` tool type and the upstream requires both together, so either
-# check alone closes that path; both are refused because MCP is the one
-# capability here that is bidirectional -- results come back INTO the
-# conversation, and the far side executes.
+# Top-level fields that make the upstream execute work outside the box.
 REFUSED_KEYS = ("mcp_servers", "container")
 
-# Top-level keys measured on the wire from claude-cli 2.1.246 across a full
-# tool round trip (the model turn, the topic-detection call; count_tokens takes
-# a subset). An allowlist, not a denylist, for the same reason as the tool
-# types: a server-acting field need not declare itself as a tool --
-# `mcp_servers` does not -- so a key this policy does not know arrives as a
-# loud refusal naming itself, and the fix is one measured tag.
+# Top-level fields observed during a complete tool round trip with Claude Code
+# 2.1.246. Unknown fields are refused because server-side behavior doesn't have
+# to be declared as a tool.
 ALLOWED_KEYS = frozenset(
     {
         "context_management",
@@ -212,113 +137,69 @@ ALLOWED_KEYS = frozenset(
     }
 )
 
-# Content block types that carry no payload by reference, so the type alone
-# settles them. Measured from the same round trip: text (and system's text
-# blocks), tool_use and tool_result on the turn after a tool call, thinking
-# when extended thinking is on; redacted_thinking is the API's own transform of
-# thinking and rides with it.
+# Content block types that don't reference external data. These were observed in
+# the same tool round trip; ``redacted_thinking`` is Anthropic's transformation
+# of a thinking block.
 INERT_CONTENT_TYPES = frozenset(
     {"text", "tool_use", "tool_result", "thinking", "redacted_thinking"}
 )
 
-# The two blocks whose payload can arrive by reference, and the one source that
-# does not. A `url` source makes ANTHROPIC's servers fetch a URL the box chose,
-# which is the route the tool-type gate closes one level up; a `file` source
-# names Files API state, which nothing reaches through this proxy's paths.
+# Image and document payloads may arrive by reference. A ``url`` source makes
+# Anthropic fetch a box-controlled URL, while ``file`` refers to Files API state.
 #
-# `base64` carries the bytes themselves and asks the upstream for nothing, so it
-# is as inert as a text block -- and it is what the real client sends. Measured
-# on claude-cli 2.1.259: a Read of a PNG arrives as an `image` and a Read of a
-# PDF as a `document`, both `{"type": "base64", "media_type": ..., "data": ...}`
-# nested in a tool_result's content, and a pasted image as the same block
-# directly in the user message. `vertex.py` draws this line in the same place
-# one protocol over, permitting inlineData and refusing fileData.
+# ``base64`` carries bytes inline and triggers no fetch. Claude Code 2.1.259 used
+# this form for PNGs, PDFs, and pasted images. Vertex applies the same distinction
+# by allowing ``inlineData`` and refusing ``fileData``.
 #
-# An allowlist, like every other tag here. A document's `text` and `content`
-# sources carry no fetch either, but nothing was measured sending them, and
-# `content` nests blocks of its own -- so they arrive as a refusal naming the
-# source type rather than as a walk this does not have.
+# Refuse unobserved source types, including document ``text`` and ``content``.
+# The latter also contains nested blocks that this policy doesn't inspect.
 SOURCED_CONTENT_TYPES = frozenset({"image", "document"})
 INLINE_SOURCE_TYPES = frozenset({"base64"})
 
-# The measured source shape, key for key, because `type` alone does not say
-# where the bytes come from when a source names two payloads: base64 data AND a
-# url. Two things already stop that one, and this check deliberately trusts
-# neither. The client normalises the extra key away before it reaches the
-# socket (measured: claude-cli 2.1.259 sends exactly these three), and the
-# upstream refuses the shape (measured, posted through this proxy: `400
-# messages.0.content.0.image.source.base64.url: Extra inputs are not
-# permitted`). But the client is not the boundary -- a box holds the relay
-# token and can post a body its client would never build -- and which shapes
-# the upstream validates is the upstream's to change, not a property this side
-# gets to hold still. So: cheap, fail closed, and depending on neither.
+# Require the exact source shape observed from Claude Code 2.1.259. Checking only
+# ``type`` could allow a source with both inline data and a URL. The current
+# client strips extra fields and Anthropic rejects them, but the box can construct
+# requests directly and upstream validation may change.
 INLINE_SOURCE_KEYS = frozenset({"type", "media_type", "data"})
 
-# Derived rather than spelled a third time: a type is permitted because it
-# carries nothing by reference, or because the source gate covers it. A
-# hand-written union is how a sourced type arrives permitted and ungated.
+# Derive the union so every sourced type also passes through the source check.
 ALLOWED_CONTENT_TYPES = INERT_CONTENT_TYPES | SOURCED_CONTENT_TYPES
 
-# The two additions a box on the HOST'S network may make, and nothing else.
+# Extra fields allowed when the box shares the host network.
 #
-# `web_search_20250305` executes upstream: it makes Anthropic's servers issue a
-# query the box chose, which is exactly the route the isolated policy closes.
-# `tool_choice` rides with it -- measured on 2.1.246, Claude Code issues a
-# DEDICATED single-shot request carrying only the server tool plus a tool_choice
-# forcing it, and folds the answer back into the conversation as an ordinary
-# `tool_result`. So no new content block type is needed, and the main
-# conversation's shape is unchanged.
+# ``web_search_20250305`` makes Anthropic issue a box-controlled query. Claude
+# Code 2.1.246 sent it in a dedicated request with ``tool_choice`` and returned
+# the result as an ordinary ``tool_result``.
 #
-# Deliberately measured-only, like every other tag here. Claude Code's WebFetch
-# is NOT in this set because it does not need to be: with the host's network the
-# box fetches the URL itself and sends the model text (measured -- a WebFetch of
-# example.com completes with the isolated policy in force). A server-side fetch
-# tool would be a new tag, added when something is measured sending one.
+# Claude Code's WebFetch isn't included because the box fetches the URL itself
+# and sends text to the model. Add other server-side tools only after measuring
+# their request shapes.
 SHARED_NET_TOOL_TYPES = CLIENT_TOOL_TYPES | {"web_search_20250305"}
 SHARED_NET_KEYS = ALLOWED_KEYS | {"tool_choice"}
 
 
 @dataclass(frozen=True)
 class BodyPolicy:
-    """Which capabilities the body may declare.
+    """Limit the capabilities declared by an Anthropic request body.
 
-    The path and header allowlists gate the ENVELOPE of a model call. Neither
-    reads the body, and on this upstream the body is not inert: `POST
-    /v1/messages` is not a leaf capability, because the tools it declares make
-    ANTHROPIC's servers issue requests to URLs the box chose. `--unshare-net`
-    stops the box dialling out; it does not stop the box asking the API to dial
-    out for it, and the URL IS the payload -- a fetch of
-    `https://x.example/<bytes>` has already exfiltrated them whatever the
-    response.
+    Tools and content blocks can make Anthropic fetch a box-controlled URL.
+    ``--unshare-net`` doesn't stop this indirect route, and the URL itself can
+    carry data out of the box.
 
-    So this is an allowlist of what runs in the box, not a denylist of what does
-    not. A new server-side tool type is then a refusal rather than a hole, which
-    is the same posture the header allowlist takes and for the same reason.
+    The policy allows only observed client-side operations. Unknown server-side
+    tools and fields are refused.
 
-    Three gates, one posture: the top-level keys (a server-acting field need
-    not declare itself as a tool), the tool types, and the message content --
-    where the block type settles most blocks, and `image` and `document` are
-    settled instead by their source, because that is the field that can name a
-    URL for the upstream to fetch. All of it is measured from the real client,
-    so a key, block or source it grows next year is a refusal naming itself
-    rather than a hole.
+    Checks cover top-level fields, tool types, and message content. Most content
+    blocks are classified by type; images and documents also require an inline
+    source. The allowlists come from observed client requests.
 
-    Bounded, and worth stating so the claim is not overread: this refuses a route
-    off the machine for bytes the box already holds. It is not what keeps the
-    credential out -- that is the absence of any bind naming it.
+    This policy closes an egress route for data already inside the box. Mount
+    policy keeps the host credential out of the box.
 
-    Which is also why there are two of these. The gate is worth exactly what the
-    box's OWN route off the machine is not worth: under `unshare_net` there is
-    none, and this is the boundary. Without it the box is in the host's network
-    namespace with the host's full connectivity (`explain` prints it in those
-    words), so it can dial `https://x.example/<bytes>` directly, and refusing to
-    let it ask the upstream to do the same protects nothing while breaking web
-    search. `for_shared_network` is that second policy, and it is DERIVED, never
-    passed: the backend builds it in `serve_shared`, which the Box calls only
-    when the spec says the network is shared. No caller can ask the isolated
-    policy to relax, which is the property this module insists on everywhere
-    else -- a boundary whose strength depends on what the last caller passed is
-    not a boundary.
+    A box sharing the host network can already send data directly, so
+    ``for_shared_network`` also permits the measured web-search request. The
+    backend selects that policy only from ``serve_shared``; callers can't relax
+    the isolated policy.
     """
 
     client_types: frozenset[str] = CLIENT_TOOL_TYPES
@@ -331,28 +212,19 @@ class BodyPolicy:
 
     @classmethod
     def for_shared_network(cls) -> BodyPolicy:
-        """The policy for a box that already has the host's network.
+        """Return the policy for a box that shares the host network.
 
-        Narrow on purpose: two tags, both measured. Everything else the strict
-        policy refuses is still refused here -- `mcp_servers` and `container`,
-        every other server-side tool type, and `image`/`document` blocks whose
-        url source would make the upstream fetch for the box. A box with the
-        host's network needs none of those to reach the network, so relaxing
-        them would buy nothing and lose the refusal that names them.
+        This adds only the two fields observed for web search. MCP, containers,
+        other server-side tools, and URL-backed content remain blocked.
         """
         return cls(client_types=SHARED_NET_TOOL_TYPES, allowed_keys=SHARED_NET_KEYS)
 
     def refuse(self, body: bytes) -> str | None:
-        """The reason to refuse `body`, or None to permit it.
+        """Return a refusal reason, or ``None`` if the body is allowed.
 
-        An empty body is permitted -- the hello routes send none, and a request
-        with nothing in it declares nothing. Anything else this parser cannot
-        read as one unambiguous JSON object IS refused. The old leniency ("the
-        upstream rejects malformed bodies itself") assumed the two parsers
-        agree on what is malformed, and a streaming upstream decoder does not:
-        it reads `{...}{}` value by value and honors tools in the first object,
-        which this policy never inspected. A body this side cannot classify
-        would leave the capability decision to the upstream.
+        Hello routes use an empty body. Other bodies must contain one unambiguous
+        JSON object. A streaming upstream might accept ``{...}{}`` as separate
+        values, so passing malformed input through could bypass inspection.
         """
         if not body:
             return None
@@ -386,11 +258,8 @@ class BodyPolicy:
         for tool in tools:
             if not isinstance(tool, dict):
                 return "every tool must be a JSON object"
-            # Absent is checked as a MISSING KEY, not as a `None` value. The two
-            # are different to the upstream -- absent selects `custom`, while an
-            # explicit null is refused outright as `Input tag 'None'` -- so a
-            # `.get()` that flattened them together would permit a null this
-            # policy cannot resolve to any variant.
+            # Anthropic treats an absent type as custom and rejects an explicit
+            # null, so don't collapse both cases with ``get``.
             if "type" not in tool:
                 continue
             kind = tool["type"]
@@ -402,13 +271,10 @@ class BodyPolicy:
         return None
 
     def _content_refusal(self, payload: dict[str, object]) -> str | None:
-        """Message content as an egress channel, gated like the tools.
+        """Check message and system content for external references.
 
-        Neither the key nor the tool gate reads message content, and content is
-        not inert: an `image` or `document` block with a url source makes the
-        UPSTREAM fetch a URL the box chose, and the URL is the payload --
-        `openai_responses` closed exactly this on day one. `system` takes the
-        same block shape and is walked too.
+        An image or document with a URL source makes Anthropic fetch a
+        box-controlled URL. ``system`` accepts the same block shape as messages.
         """
         messages = payload.get("messages")
         if messages is not None:
@@ -425,7 +291,7 @@ class BodyPolicy:
     def _blocks_refusal(self, content: object) -> str | None:
         """One content value: absent, a plain string, or allowlisted blocks.
 
-        A `tool_result` nests another content value of the same shape, which
+        A ``tool_result`` nests another content value of the same shape, which
         recurses through the same allowlist.
         """
         if content is None or isinstance(content, str):
@@ -449,11 +315,7 @@ class BodyPolicy:
         return None
 
     def _source_refusal(self, kind: str, source: object) -> str | None:
-        """Where an `image` or `document` block's bytes come from.
-
-        Inline or nothing: the block is permitted, the fetch it could ask for
-        is not.
-        """
+        """Require inline bytes for an image or document block."""
         if not isinstance(source, dict):
             return f"{kind} blocks must carry a `source` object"
         origin = source.get("type")
@@ -473,11 +335,10 @@ class BodyPolicy:
 
 @dataclass(frozen=True)
 class HeaderAllowlist:
-    """Which of the box's request headers reach the upstream.
+    """Select box request headers to forward upstream.
 
-    A predicate per header rather than a filter over the whole mapping, so the
-    fail-closed wrapper applies to each decision: a matcher that raises on one
-    header drops that header instead of failing (or forwarding) the rest.
+    Checking each header separately lets the fail-closed wrapper drop a header
+    whose predicate raises while still evaluating the rest.
     """
 
     allow: frozenset[str] = FORWARD_HEADERS
@@ -487,31 +348,20 @@ class HeaderAllowlist:
 
 
 def _error(status: int, kind: str, message: str) -> web.Response:
-    """A refusal in the API's own error shape.
+    """Return a refusal in Anthropic's error format.
 
-    Model-facing, like vertex's: this reaches the client and, for an agent, the
-    transcript. So it names the policy that refused rather than the code that
-    ran. The shape is Anthropic's (`{"type": "error", "error": {...}}`) so the
-    SDK surfaces the message instead of failing to parse a body it did not
-    expect -- the same lesson vertex's array-wrapped errors record, arrived at
-    from the other end.
+    The SDK can then show the policy message to the client instead of failing to
+    parse an unexpected response.
     """
     return web.json_response(
         {"type": "error", "error": {"type": kind, "message": message}}, status=status
     )
 
 
-# Returns the bearer to attach. Called PER REQUEST, never captured: the host's
-# own Claude Code owns that credential and may rewrite the file at any moment, so
-# a value captured once would miss either its refresh or the backend's delegated
-# host-side refresh.
+# Resolve the bearer for each request because host Claude may refresh it.
 TokenSource = Callable[[], Awaitable[str]]
-# The headers that authenticate ONE request upstream. A callable rather than a
-# value for the same reason `TokenSource` is: the credential is re-read per
-# request, never captured. A dict rather than a bearer string because the header
-# depends on the credential kind -- a subscription authenticates with
-# `authorization`, a static key with `x-api-key` -- and the kind is the caller's
-# to know. Same shape as `openai_compat.AuthorizationSource`.
+# Resolve authentication headers for each request. Subscriptions use
+# ``authorization`` while static keys use ``x-api-key``.
 AuthorizationSource = Callable[[], Awaitable[dict[str, str]]]
 
 
@@ -536,12 +386,9 @@ def make_app(
     base = upstream.rstrip("/")
 
     async def handle(request: web.Request) -> web.StreamResponse:
-        # Either location, because the box's dress depends on the credential
-        # kind: an API-key-dressed client sends `x-api-key`, a subscription
-        # dressed one sends `authorization` (measured). What is checked is the
-        # VALUE -- a per-box secret -- so a second place to present it adds no
-        # second principal, and both arms reject duplicates and compare in
-        # constant time. Neither header is ever forwarded, whichever carried it.
+        # Accept the per-box token in the header used by the selected credential
+        # type. Both paths reject duplicates and compare in constant time. The
+        # token isn't forwarded in either header.
         presented = request.headers.getall("x-api-key", [])
         api_key = presented[0] if len(presented) == 1 else None
         if not (
@@ -549,8 +396,7 @@ def make_app(
             or token_matches(bearer_token(request), client_token)
         ):
             return _error(401, "authentication_error", "invalid aisan proxy token")
-        # Through `policy_permits`, so an allowlist that RAISES denies rather
-        # than tearing the connection down as a retryable transport error.
+        # Convert exceptions from caller-supplied policy into denials.
         path = request_path(request)
         if not policy_permits(
             lambda: path_allow.permits(request.method, path),
@@ -569,9 +415,8 @@ def make_app(
         if len(body) > MAX_BODY_BYTES:
             return _error(413, "request_too_large", "request body too large")
 
-        # Before `token()`: no reason to read the credential for a request being
-        # refused. Gating the body rather than the route also covers
-        # `count_tokens` for free -- it takes the same tool declarations.
+        # Check the body before reading the credential. ``count_tokens`` uses the
+        # same tool declarations and therefore needs the same check.
         reason = policy_refusal(
             lambda: body_policy.refuse(body), subject=f"body of {request.path}"
         )
@@ -586,10 +431,8 @@ def make_app(
                 else {"authorization": f"Bearer {await token()}"}
             )
         except Exception as e:
-            # The credential went away mid-session, or host Claude could not
-            # refresh it. Answered as an error the agent can read rather than a
-            # traceback. Credential failures name paths and expiry, never token
-            # values.
+            # Return credential failures to the agent without exposing token
+            # values. The credential may have disappeared or failed to refresh.
             log.error("anthropic proxy: no usable credential to attach: %s", e)
             return _error(
                 503,
@@ -597,10 +440,7 @@ def make_app(
                 f"sandbox proxy has no usable credential: {e}",
             )
 
-        # A list of pairs, not a dict: `anthropic-beta` is a list the client may
-        # send as several headers, and a dict keyed by name would keep only the
-        # last -- dropping betas the request depends on. aiohttp forwards an
-        # iterable of pairs verbatim, so every one survives.
+        # Preserve repeated ``anthropic-beta`` headers with a list of pairs.
         out: list[tuple[str, str]] = [
             *injected.items(),
             ("content-type", "application/json"),
@@ -636,32 +476,23 @@ def make_app(
                     status=up.status, headers=relayed_response_headers(up.headers)
                 )
                 try:
-                    # `prepare` writes too, and is where an interrupt usually
-                    # lands: the box hangs up while the upstream is still
-                    # thinking, so the write that fails is the response's own
-                    # header line, not a body chunk.
+                    # ``prepare`` also writes and can fail if the box disconnects
+                    # while the upstream is still working.
                     await resp.prepare(request)
                     async for chunk in up.content.iter_chunked(_CHUNK):
                         await resp.write(chunk)
                     await resp.write_eof()
                 except (ConnectionResetError, BrokenPipeError) as e:
-                    # The box hung up -- the agent exited, or its turn was
-                    # cancelled -- before or mid-response. Nothing is lost:
-                    # the only reader of these bytes is already gone. The
-                    # guard must cover `prepare`, because aiohttp raises
-                    # ClientConnectionResetError for a write to a closing
-                    # transport, a ClientError by inheritance as well as a
-                    # ConnectionResetError -- left to the outer ClientError
-                    # branch, a cancelled turn logged as a dead upstream and
-                    # a 502 written to a socket nobody is reading.
+                    # The agent exited or cancelled its turn. Catch failures from
+                    # both ``prepare`` and body writes so a downstream disconnect
+                    # isn't reported as an upstream failure.
                     log.debug(
                         "anthropic proxy: downstream closed: %s", type(e).__name__
                     )
                 return resp
         except ClientError as e:
-            # The upstream is the user's own local proxy, which they may restart
-            # under a running box. A dead upstream is one turn's failure with a
-            # legible reason, not a torn connection the client will retry into.
+            # A local upstream may restart while the box is running. Return a
+            # readable error instead of a disconnected transport that gets retried.
             log.warning("anthropic proxy: upstream %s unreachable: %s", base, e)
             return _error(
                 502, "api_error", f"sandbox proxy cannot reach its upstream: {e}"
