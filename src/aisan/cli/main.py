@@ -24,12 +24,8 @@ COMMANDS: dict[str, Command] = {
     "explain": explain.main,
 }
 
-# Out-of-tree commands register here (see README, "Plugin commands"). The group
-# is read only when the first token names no built-in and when help is printed,
-# so the dispatch a built-in takes is the one it took before plugins existed:
-# no metadata scan, no plugin import. An eager merge into COMMANDS would give
-# that up, and would also make this CLI's behaviour a function of whatever else
-# happens to be installed beside it.
+# Read plugin metadata only for help or an unknown command. Built-in dispatch
+# must remain independent of other installed distributions.
 PLUGIN_GROUP = "aisan.commands"
 
 _HELP = """usage: aisan <command> [args...]
@@ -45,32 +41,25 @@ _HELP_TAIL = "\nRun `aisan <command> --help` for command-specific help.\n"
 
 
 def _installed_entry_points() -> list[EntryPoint]:
-    """Plugin commands the environment declares. The seam tests replace."""
+    """Return plugin commands declared by installed distributions."""
     return list(entry_points(group=PLUGIN_GROUP))
 
 
 def _origin(ep: EntryPoint) -> str:
-    """The distribution to name in a diagnostic, or the target it points at."""
+    """Return the plugin distribution name or entry-point target."""
     return ep.dist.name if ep.dist is not None else ep.value
 
 
 def plugin_commands() -> tuple[dict[str, EntryPoint], list[str]]:
-    """Resolved plugin commands, and one line per claim that was refused.
+    """Resolve plugin commands and report rejected name claims.
 
-    Built-ins are not overridable. `aisan claude` has to mean this package's
-    launcher whatever else the environment holds, and installing a plugin pulls
-    in its whole dependency closure -- every distribution of which can register
-    in this group, though only the plugin itself was ever trusted.
-
-    Two plugins claiming one name resolve by sorting, so the winner is not a
-    function of sys.path order. Nothing here is silent: a refused claim would
-    otherwise present as a command that is simply missing.
+    Plugins can't override built-ins. Sort duplicate claims by provider so the
+    winner doesn't depend on ``sys.path`` order.
     """
     try:
         found = _installed_entry_points()
     except Exception as e:
-        # Unreadable metadata somewhere in the environment. Built-in commands
-        # do not depend on this and must survive it.
+        # Broken package metadata must not disable built-in commands.
         return {}, [f"cannot read plugin commands: {e}"]
 
     resolved: dict[str, EntryPoint] = {}
@@ -95,11 +84,7 @@ def _report(refused: list[str]) -> None:
 
 
 def _print_help(stream: TextIO) -> None:
-    """Help, with installed plugin commands listed by name and provider.
-
-    Name and provider only: a summary would need a convention for plugins to
-    declare one, and that is API surface this does not commit to yet.
-    """
+    """Print built-in help and installed plugin names and providers."""
     plugins, refused = plugin_commands()
     _report(refused)
     listing = ""
@@ -110,7 +95,7 @@ def _print_help(stream: TextIO) -> None:
 
 
 def _load_plugin(command: str) -> Command | None:
-    """The named plugin command, or None after saying why there is none."""
+    """Load a plugin command, reporting lookup and import failures."""
     plugins, refused = plugin_commands()
     _report(refused)
     ep = plugins.get(command)
@@ -121,8 +106,7 @@ def _load_plugin(command: str) -> Command | None:
     try:
         return ep.load()
     except Exception as e:
-        # One broken plugin is not an unusable aisan: the import happens here,
-        # on the path that asked for it, and takes nothing else down with it.
+        # A broken plugin affects only its own command.
         print(
             f"aisan: plugin command {command!r} from {_origin(ep)} "
             f"failed to load: {e!r}",

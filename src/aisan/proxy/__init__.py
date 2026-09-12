@@ -1,7 +1,7 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Host-side egress proxies for a sandboxed process.
+"""Host-side egress proxies for sandboxed processes.
 
 The box holds no upstream credential. With `Sandbox.unshare_net`, it reaches
 the outside world only through these proxies over UNIX sockets bound into the
@@ -9,11 +9,10 @@ box. Opted-in interactive boxes sharing the host network instead use
 authenticated host-loopback TCP. The configured credential stays host-side in
 both modes; the proxy route remains narrowed by its allowlist.
 
-The isolated path has two parts: a host-side proxy listening on a UNIX socket,
-and `relay`, the in-box half that offers a loopback port and splices it to that
-socket. The shared-network HTTP path binds an authenticated random TCP port on
-host loopback and needs no relay. HTTP provider modules handle model protocols;
-`rbe` handles plaintext HTTP/2 REAPI traffic and remains isolated-only.
+For isolated networks, an in-box relay connects a loopback port to the proxy's
+Unix socket. Shared-network HTTP proxies listen on an authenticated random port
+on host loopback. RBE uses unauthenticated HTTP/2 and supports only isolated
+networks.
 """
 
 from .http import RateLimit, run_forever, serve

@@ -1,18 +1,12 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Presets: pure functions from arguments to a `BoxSpec`. Data, not behaviour.
+"""Pure functions that build adjustable ``BoxSpec`` values.
 
-A preset may not do anything a caller could not have written by hand. It picks
-binds, an environment and limits, and returns them; it does not start anything,
-read a config file, consult the network, or hold state. That is what makes the
-spec it returns adjustable (`with_binds`, `with_egress`) instead of a black box
-somebody has to re-implement the moment their case differs by one mount.
-
-The registry below is the `explain --dry-run` surface: `PRESETS[name](root)`
-gives a full spec with no config file, no deployment and no credential, which is
-what lets a reviewer see the profile a diff produces on a host that has never
-run the app.
+Presets select binds, environment, and limits without starting services,
+reading configuration, using the network, or retaining state. Registry entries
+remain deployment-independent so ``explain --dry-run`` can inspect them on a
+fresh host.
 """
 
 from __future__ import annotations
@@ -40,23 +34,14 @@ PRESETS: dict[str, Callable[[Path], BoxSpec]] = {
     "depot_tools_job": depot_tools_job_default,
 }
 
-# What `--egress NAME` resolves through. A profile is a function from the box's
-# root to the backends that tree wants, so everything project-specific about an
-# egress route -- an RBE project, where a checkout keeps its config -- lives in
-# the preset module that already owns those facts, and the launchers know only
-# that names exist.
+# Egress profiles resolve project-specific backends and mounts from the box root.
 EGRESS_PROFILES: dict[str, Callable[[Path], EgressProfile]] = {
     "v8-rbe": v8_rbe,
-    # The shared-network route, which trades the proxy's whole property away.
-    # Spelled out in the name because the flag is the only place an operator
-    # sees the choice.
+    # This profile exposes the LUCI credential to a shared-network box.
     "v8-rbe-with-net-unsafe": v8_rbe_shared_net,
 }
 
-# What `--grant NAME` resolves through. A grant is a fact about the HOST rather
-# than about the checkout -- where depot_tools is installed, where vpython keeps
-# its venvs -- so unlike an egress profile it takes no root, and a box rooted
-# anywhere gets the same one.
+# Grants describe host tools and caches and don't depend on the box root.
 GRANTS: dict[str, Callable[[], Grant]] = {
     "depot_tools": depot_tools_grant,
 }

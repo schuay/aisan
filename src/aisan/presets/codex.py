@@ -1,7 +1,7 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The Codex profile: an externally sandboxed CLI with isolated state.
+"""Confine Codex with isolated per-repository state.
 
 ``CODEX_HOME`` points at a per-repository writable state directory, never the
 host's ``~/.codex``. Sessions and local preferences persist there, while the
@@ -9,15 +9,11 @@ Responses backend supplies highest-precedence CLI config for the provider route
 and disabled non-model egress. The user config remains writable for repository
 trust and TUI preferences.
 
-The host credential remains absent by subtraction. Codex sees only the
-backend's placeholder environment variable, and the host-side proxy replaces
-that bearer after the request has crossed the network namespace.
+The box doesn't mount the host credential. Codex sends a placeholder bearer to
+the local backend, which replaces it with the host credential.
 
-Codex normally creates its own command sandbox. This profile already runs the
-whole client inside bubblewrap, including every command it launches, so callers
-must use ``codex_argv``: its external-sandbox flag avoids nesting a second
-sandbox whose namespace operations may be unavailable and whose writable-root
-model would duplicate the outer box.
+``codex_argv`` tells Codex that bubblewrap already confines the client and every
+command it launches. This avoids a nested command sandbox.
 """
 
 from __future__ import annotations
@@ -32,7 +28,7 @@ from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
 
 
 def codex_binary() -> Path | None:
-    """The ``codex`` entry point on this host, or None."""
+    """Return the host ``codex`` entry point, if installed."""
     found = shutil.which("codex")
     return Path(found) if found else None
 
@@ -40,7 +36,7 @@ def codex_binary() -> Path | None:
 def codex_argv(
     extra: tuple[str, ...] = (), *, overrides: tuple[str, ...] = ()
 ) -> list[str]:
-    """Codex argv for a client already confined by this profile."""
+    """Build arguments for Codex running in the outer sandbox."""
     config = [arg for value in overrides for arg in ("--config", value)]
     return [
         "codex",
@@ -65,21 +61,16 @@ def codex(
     cpu_quota: str = "",
     tasks_max: int = 4096,
 ) -> BoxSpec:
-    """The spec for a Codex session on ``worktree``."""
+    """Build a Codex confinement spec for ``worktree``."""
     home = Path.home()
     binds: list[BindSpec] = [
         *(Bind(p, RO, optional=True) for p in extra_ro),
-        # The .git policy for a linked worktree: the common dir rw so git works,
-        # its steering files pinned ro, sibling worktrees sealed away, and this
-        # session's own dir punched back through. A plain checkout gets the
-        # same pins on the .git inside its root, made a mount point so it cannot
-        # be renamed out from under them.
+        # Keep shared Git objects writable, pin steering files read-only, and
+        # hide sibling worktrees. Plain checkouts receive the same steering pins.
         #
-        # `pin_packs` under unshare_net: the seal removes the siblings' HEAD and
-        # index as reachability roots, so an in-box `git gc` would prune objects
-        # only they reference out of the SHARED store (measured -- gitbinds
-        # documents it). A ro objects/pack stops that; it also stops any in-box
-        # fetch, which a box with its own network namespace cannot do anyway.
+        # Hiding sibling refs makes their unique objects appear unreachable.
+        # Pin packs read-only in an isolated network to prevent Git GC pruning
+        # those objects from the shared store.
         *git_binds(worktree, pin_packs=unshare_net),
         *([] if state.is_relative_to(worktree) else [Bind(state, RW)]),
     ]

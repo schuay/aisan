@@ -1,71 +1,20 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The Claude Code profile: an agent CLI in a box, holding no credential.
+"""Confine Claude Code with isolated state and host-side credentials.
 
-The payload is an external CLI rather than Python code in this package. Its
-mount and environment requirements are recorded here because they are facts
-about Claude Code rather than the confinement mechanism.
+The profile mounts a writable worktree and state directory plus an optional
+read-only settings file. It doesn't mount ``~/.claude/.credentials.json``.
+Claude Code sends a per-box placeholder to the local relay, which replaces it
+with the host OAuth token or API key.
 
-The profile: the worktree rw at its real absolute path, a rw STATE dir the CLI
-owns, an optional ro CONFIG dir, `unshare_net` and the Anthropic backend. There
-is no bind for node, for the CLI, or for its package tree -- see below.
+``CLAUDE_CONFIG_DIR`` points to writable session state and user instructions.
+Operator settings remain read-only through ``--settings``. Standard installs
+need no extra runtime bind because Claude Code and Node live beneath the
+read-only ``/usr`` mount; other installations must supply ``extra_ro`` paths.
 
-**The credential is not in the box, and that is the whole safety claim.**
-`~/.claude/.credentials.json` is never bound, and the mechanism is subtraction:
-bwrap composes a box out of what it is GIVEN, so a path nobody names is a path
-that does not exist there. It is not the HOME tmpfs that hides it -- measured, by
-building this box with that tmpfs removed, where the credential is still absent
-and HOME holds only what other binds happened to create. The tmpfs is there to
-give tools a writable scratch at the real HOME path, not to conceal anything, and
-reading it as the safety mechanism would put the claim on the wrong line.
-
-What the box gets instead is a base URL pointing at the in-box relay and a
-per-box relay token, in whichever variable matches the credential the proxy will
-attach (`CLAUDE_CODE_OAUTH_TOKEN` for the host's subscription login,
-`ANTHROPIC_API_KEY` for a static key -- see `egress.anthropic`). The real
-credential is attached host-side, on the far side of a namespace the box cannot
-cross.
-`test_the_credential_is_not_in_the_box` asserts it from inside a real box,
-because a preset that grew the bind later would otherwise pass every other test
-in the suite.
-
-No node bind, no CLI bind. Measured, not assumed: `/usr` is bound ro
-unconditionally (`_SYSTEM_ARGS`), and on a normal install `claude`, `node` and
-`@anthropic-ai/claude-code` all live under it -- so a box with no extra binds
-already resolves and runs the CLI. An install somewhere else (an npm prefix
-under $HOME, a nodenv shim) is NOT covered by that, and would need its package
-root and interpreter in `extra_ro`; `claude_code_binary` finds the path so a
-caller can check rather than discover it as an exec failure.
-
-The config/state split. `~/.claude` is one directory doing two jobs on the host,
-and the two want opposite bindings -- so the preset separates them by mechanism
-rather than by hoping:
-
-  STATE (rw)  -- `CLAUDE_CONFIG_DIR`. Measured: the CLI writes `.claude.json`,
-                 `projects/`, `sessions/`, `telemetry/` and `.last-cleanup` here
-                 within one `-p` turn, so this half cannot be ro. It is also
-                 where a `CLAUDE.md` is read from (a marker instruction placed
-                 there was obeyed), which means `CLAUDE_CONFIG_DIR` alone is
-                 BOTH halves and cannot be the ro one.
-  CONFIG (ro) -- a `settings.json` passed with `--settings`. Measured readable
-                 from a read-only bind: a settings file whose `env` block named
-                 a dead port made the turn fail to connect, which an unread file
-                 could not have done. This is the half an operator controls and
-                 the agent must not edit.
-
-The seam is therefore the `--settings` FLAG, not an environment variable, and
-`claude_code_argv` builds the argv that uses it -- the preset returns a spec, so
-the flag belongs to a helper the caller composes with, not to the spec.
-
-`--new-session` is deliberately NOT set, and this preset does not decide the TTY
-question. bwrap's `--new-session` protects against TIOCSTI injection back into
-the terminal that launched the box, which matters for a payload the operator
-sits in front of; it also detaches the controlling terminal, and whether an
-interactive Claude Code survives that is unvalidated here. Every measurement
-behind this file used `-p` (headless), where it does not arise. So the option
-stays unset, an interactive caller should treat it as an open question, and
-there is no test here pretending to have settled it.
+Interactive use with bubblewrap's ``--new-session`` remains untested. The
+measurements for this profile used headless ``-p`` turns.
 """
 
 from __future__ import annotations
@@ -78,49 +27,21 @@ from ..gitbinds import GC_ENV, git_binds, git_host_files
 from ..sandbox import RO, RW, Bind, BindSpec
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
 
-# Turn off the CLI's own retry ladder. A box whose host half is missing gets a
-# connection reset on the relay port immediately, but the client retries with
-# backoff and the failure surfaces minutes later (measured: no answer at 180s,
-# versus RC 1 in 1.0s with this set). For a supervised, headless turn a fast
-# refusal is worth more than a retry -- the supervisor can retry a whole turn,
-# and it can see that it did.
-#
-# Not a security control. It is set here because an unattended box that hangs
-# looks exactly like an unattended box that is working.
+# Return promptly when the relay is unavailable. Testing reached no answer after
+# 180 seconds with retries and returned code 1 in one second with retries disabled.
 _RETRY_ENV = (("CLAUDE_CODE_MAX_RETRIES", "0"),)
 
-# Turn off the CLI's own updater. Under `unshare_net` the npm reach cannot
-# succeed, so the startup attempt only buys a delay and a red line in the status
-# bar -- measured: "Auto-updating..." then "Auto-update failed - Try claude
-# doctor", gone with this set and nothing else changed.
-#
-# Not a security control either: the box has no route to the registry with or
-# without it. It is here so a failure the operator cannot act on stops being
-# reported as one.
+# Disable the updater because the isolated network can't reach npm.
 _UPDATER_ENV = (("DISABLE_AUTOUPDATER", "1"),)
 
-# Stop the CLI dialling Anthropic behind the relay's back, and keep the feature
-# flags it would have fetched readable off disk while it cannot.
+# Disable direct feature-flag, telemetry, and error-reporting connections to
+# api.anthropic.com. ANTHROPIC_BASE_URL doesn't redirect them. A strace run saw
+# ten direct connection attempts, including four successful connections with
+# shared networking.
 #
-# The client reaches api.anthropic.com at that compiled-in address for work that
-# is not a model call -- feature-flag evaluation, telemetry, error reporting --
-# and ANTHROPIC_BASE_URL redirects none of it. Measured with strace, on a client
-# dressed exactly as the box's (placeholder bearer, base URL pointed elsewhere):
-# ten connect() calls to api.anthropic.com:443, four established, and none of
-# them through the proxy. Under `unshare_net` they all fail and cost only the
-# attempt; with `--net` they succeed, which is unaudited egress out of a box
-# whose whole model route is an allowlisted relay.
-#
-# They also achieve nothing. The bearer is the per-box relay token, which the
-# real API does not know, so the flag evaluation cannot come back as the
-# operator's account -- measured: a `--net` turn leaves the seeded flag cache
-# untouched, sentinel key and all.
-#
-# The variables come as a PAIR and the second one is not optional.
-# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC turns the traffic off, and on its own
-# it also stops the CLI reading the flags `cli.claude` seeded, dropping every one
-# to its compiled-in default. The second is the CLI's own switch for that case.
-# Measured, from its debug log, with a flag seeded off on disk:
+# Both variables are required. The first disables traffic; the second retains
+# disk-cached feature flags instead of using compiled defaults. Debug logs with
+# a disabled flag showed:
 #
 #   both set   -- "off, from GrowthBook (the disk cache of an earlier session)"
 #   first only -- "off, from the default (GrowthBook is off for this session)"
@@ -131,13 +52,7 @@ _FLAGS_ENV = (
 
 
 def claude_code_binary() -> Path | None:
-    """The `claude` entry point on this host, or None.
-
-    Returned rather than raised on: a preset is a pure function and a host
-    without the CLI can still describe the profile. A caller that intends to RUN
-    it should check -- an absent binary is an exec failure inside bwrap, which
-    reads as a broken box rather than a missing package.
-    """
+    """Return the host ``claude`` entry point, if installed."""
     found = shutil.which("claude")
     return Path(found) if found else None
 
@@ -145,12 +60,7 @@ def claude_code_binary() -> Path | None:
 def claude_code_argv(
     prompt: str, *, settings: Path | None = None, extra: tuple[str, ...] = ()
 ) -> list[str]:
-    """A headless one-shot turn, with the ro settings file if there is one.
-
-    Here rather than in the spec because `--settings` is the read-only half of
-    the config split and the split is this preset's decision -- but argv is the
-    caller's, so this composes with `Box.command` instead of hiding inside it.
-    """
+    """Build a headless command with an optional read-only settings file."""
     argv = ["claude"]
     if settings is not None:
         argv += ["--settings", str(settings)]
@@ -173,51 +83,27 @@ def claude_code(
     cpu_quota: str = "",
     tasks_max: int = 4096,
 ) -> BoxSpec:
-    """The spec for one Claude Code turn on `worktree`.
-
-    `state` is required and has no default: it is the one directory the agent
-    writes its own session history into, so it belongs to the JOB, and a preset
-    that picked it would have every box in a fleet sharing one. `config` is
-    optional -- a box with no settings file is a box running the CLI's defaults,
-    which is a real configuration rather than a broken one.
-    """
+    """Build a Claude Code confinement spec for ``worktree``."""
     home = Path.home()
     binds: list[BindSpec] = [
         *(Bind(p, RO, optional=True) for p in extra_ro),
-        # The .git policy for a linked worktree: the common dir rw so git works,
-        # its steering files pinned ro, sibling worktrees sealed away, and this
-        # session's own dir punched back through. A plain checkout gets the
-        # same pins on the .git inside its root, made a mount point so it cannot
-        # be renamed out from under them.
+        # Keep shared Git objects writable, pin steering files read-only, and
+        # hide sibling worktrees. Plain checkouts receive the same steering pins.
         #
-        # `pin_packs` under unshare_net: the seal removes the siblings' HEAD and
-        # index as reachability roots, so an in-box `git gc` would prune objects
-        # only they reference out of the SHARED store (measured -- gitbinds
-        # documents it). A ro objects/pack stops that; it also stops any in-box
-        # fetch, which a box with its own network namespace cannot do anyway.
+        # Hiding sibling refs makes their unique objects appear unreachable.
+        # Pin packs read-only in an isolated network to prevent Git GC pruning
+        # those objects from the shared store.
         *git_binds(worktree, pin_packs=unshare_net),
-        # After the ro binds: the state dir is the box's own and nothing may
-        # shadow it. `config` stays ro even though it sits under the same HOME
-        # tmpfs -- the agent reads its policy, it does not edit it.
+        # Keep operator settings read-only above the writable home tmpfs.
         *([Bind(config, RO)] if config is not None else []),
-        # No bind when the state dir is already inside the rw root: it is
-        # writable there by the root's own mount, and binding it again would
-        # require it to EXIST at assembly time -- which a caller that expects
-        # the CLI to create it has no reason to arrange. Verified: with no bind
-        # of its own, a state dir under the root is created from inside the box
-        # and its contents are on the host afterwards.
+        # The writable root already exposes an embedded state directory and
+        # allows Claude Code to create it after assembly.
         *([] if state.is_relative_to(worktree) else [Bind(state, RW)]),
     ]
     return BoxSpec(
         root=worktree,
         binds=tuple(binds),
-        # A writable scratch at the real HOME path, for tools that insist on
-        # writing under $HOME. NOT what hides the credential -- that is the
-        # absence of any bind naming it, which holds with this tmpfs removed
-        # (measured). The worktree and state binds land on top.
-        #
-        # "/tmp" is the mount POINT of the box's private tmpfs, not a host path
-        # written to here.
+        # Private tmpfs mounts provide writable home and /tmp scratch space.
         tmpfs=(("/tmp", tmp_size_mb << 20), (str(home), home_size_mb << 20)),  # noqa: S108
         env=(
             *DEFANG_ENV.items(),
@@ -225,8 +111,7 @@ def claude_code(
             *GC_ENV,
             ("HOME", str(home)),
             ("PATH", "/usr/bin"),
-            # The rw half of the config split. Also where a CLAUDE.md is read
-            # from, so it is not "just" state -- see the module docstring.
+            # Claude Code stores sessions and reads user instructions here.
             ("CLAUDE_CONFIG_DIR", str(state)),
             *_RETRY_ENV,
             *_UPDATER_ENV,
@@ -246,13 +131,5 @@ def claude_code(
 
 
 def claude_code_default(worktree: Path) -> BoxSpec:
-    """The preset as `explain --dry-run` invokes it: a worktree and nothing else.
-
-    Egress-less, like `depot_tools_job_default`, and for the same reason -- a registry
-    entry has to be describable on a host with no deployment. The state dir
-    defaults to one INSIDE the worktree here, which a real caller should not do:
-    it puts the agent's session history in the tree the agent is editing. A dry
-    run has no job to own it, and inventing a path outside the root would put a
-    host directory in the audit artifact.
-    """
+    """Build the deployment-independent profile used by ``explain``."""
     return claude_code(worktree, state=worktree / ".aisan-claude-state")

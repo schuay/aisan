@@ -1,40 +1,16 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""An interactive opencode session in a box, rooted at a git repo.
+"""Launch an interactive OpenCode session inside a repository box.
 
-The sibling of the Claude session launcher, and most of that launcher's
-reasoning carries across unchanged: the boundary is the perimeter, not
-the repo (an interactive session on a tree the operator chose, so the worktree
-is the session's to write, with the same `gitbinds.git_binds` policy the Claude
-launcher applies to a linked worktree's shared `.git`); the host half of egress
-is an aiohttp server on this process's event loop, so the payload waits in a
-thread or every model call hangs; and TERM travels with the caller because a TUI
-in a cleared environment renders as a dumb terminal.
+The worktree is writable, while Git steering files remain read-only and sibling
+worktrees remain hidden. The payload runs in a thread so the host proxy event
+loop can serve model requests. Terminal settings survive the cleared
+environment.
 
-What does NOT carry across: the first-run seeding. Claude Code's onboarding
-begins with a connectivity check that ignores the proxy and exits on failure,
-so its flag has to arrive already set. opencode has no such gate -- measured,
-a headless turn against a stub upstream ran first-try on a clean XDG surface,
-and anything the TUI asks on first run (a theme, a trust prompt) is a dialog
-that persists in the state dir once answered, not a dead end.
-
-The model rides the backend's inline config rather than argv because the TUI
-takes no `--model` flag (measured, 1.18.18: only `opencode run` has one).
-The launcher also passes opencode's `--auto` flag so tool permissions are
-approved automatically during a session.
-
-The CLI: launcher flags are parsed STRICTLY (no abbreviation -- `--bind` must
-not resolve to `--binds` in a tool whose flags gate mounts), and everything
-after a literal `--` is forwarded to opencode verbatim. The split is manual
-because argparse's own `--` handling would let the `repo` positional eat a
-payload flag. `--binds` names a user bind spec (see `aisan.userbinds`), and is
-repeatable so a shared tool spec and a per-project one compose; it is
-appended after the preset's binds, so user mounts shadow the template.
-`--explain` prints the resolved profile and exits -- the review path for a
-merge of several bind sources, rendered from the same Box the real path uses. `--egress NAME` adds a named egress profile's backends (see
-`aisan.presets.EGRESS_PROFILES`), which needs the box's own network and so
-refuses alongside `--net`.
+OpenCode 1.18.18 has no first-run network gate. Its TUI also has no model flag,
+so the backend selects the model through inline config. ``--auto`` approves
+tool use because the outer box is the permission boundary.
 
 Usage:
     aisan opencode [repo] [flags] -- [opencode args...]
@@ -65,14 +41,7 @@ from aisan.session import (
 )
 from aisan.session_mcp import mcp_search_path, opencode_host_mcp
 
-# HOME is a tmpfs in the box, so anything under it the payload needs must be
-# named. Git's identity lives here; without it a commit inside the box dies
-# with "Please tell me who you are". ro: the agent reads config, it does not
-# edit it.
-
-# Where the HOST's opencode reads its global instructions from. XDG-aware for
-# the same reason the preset's catalog path is: this is wherever the host's own
-# opencode looks.
+# Honor the host's XDG config location for global OpenCode instructions.
 USER_MEMORY = (
     Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     / "opencode"
@@ -81,20 +50,11 @@ USER_MEMORY = (
 
 
 def user_memory_bind(source: Path) -> list[BindSpec]:
-    """The host's global AGENTS.md mounted where the BOX reads it, or nothing.
+    """Bind host instructions at the default path used inside the box.
 
-    A bind and not a copy, unlike the other two launchers: opencode's config
-    root is not redirected at the state dir -- XDG_CONFIG_HOME deliberately
-    stays unset (the preset says why: setting it would bypass the ro
-    ~/.config/git bind), so the config root lands on the HOME tmpfs and there
-    is no host directory to seed.
-
-    BindOver rather than a plain bind because the source is XDG-resolved on the
-    host while the box always reads $HOME/.config: those are the same path only
-    when XDG_CONFIG_HOME is unset, and a plain bind on a host that sets it would
-    mount the file where nothing looks. Guarded on exists() because a BindOver
-    is never optional, and a host with no global AGENTS.md is a host without
-    one, not a broken profile.
+    The host source honors ``XDG_CONFIG_HOME``. The box leaves that variable
+    unset to preserve Git config lookup, so use ``BindOver`` when the source
+    exists.
     """
     if not source.exists():
         return []
@@ -129,9 +89,7 @@ async def _main(argv: list[str]) -> int:
     args, payload = parse_args(argv)
     repo = Path(args.repo).resolve()
 
-    # Outside the repo, deliberately: this is the agent's own session history,
-    # and the preset only puts it inside the root when a dry run has no job to
-    # own it.
+    # Keep session history outside the worktree.
     state = state_dir("opencode", repo)
     mcp = opencode_host_mcp()
     mcp_config = state / "aisan-host-mcp.json"
@@ -145,18 +103,16 @@ async def _main(argv: list[str]) -> int:
         egress=(backend,),
         extra_ro=mcp_launcher_binds(mcp),
         extra_env=(
-            # /usr is bound ro unconditionally, but the preset's PATH is only
-            # /usr/bin -- anything elsewhere has to be named.
+            # Include mounted home launchers when MCP is enabled.
             ("PATH", mcp_search_path(local_bin=mcp.enabled)),
             *((("OPENCODE_CONFIG", str(mcp_config)),) if mcp.enabled else ()),
             *terminal_env(),
         ),
         unshare_net=not args.net,
     )
-    # Only the git config FILE, XDG-aware; see session.git_config_binds.
+    # Bind the XDG-aware Git config file without its credential directory.
     spec = spec.with_binds(git_config_binds())
-    # After the preset's binds, before any user spec: the operator's own
-    # instructions are part of the template, and a user spec still shadows.
+    # User bind files may shadow the operator's global instructions.
     spec = spec.with_binds(user_memory_bind(USER_MEMORY))
     return await run_interactive(
         client="opencode",
@@ -165,8 +121,7 @@ async def _main(argv: list[str]) -> int:
         repo=repo,
         state=state,
         spec=spec,
-        # The sandbox is the permission boundary for this launcher; opencode's
-        # own approval prompts would otherwise interrupt tool use in the TUI.
+        # The outer sandbox provides the tool permission boundary.
         command=lambda _box: ["opencode", "--auto", *payload],
         binary=opencode_binary,
         binds=args.binds,
