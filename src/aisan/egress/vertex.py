@@ -1,14 +1,13 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The Vertex backend: the box's only model route, and no credential with it.
+"""Configure Vertex model access without giving the box a credential.
 
-`aisan.proxy` owns the mechanism (allowlist, auth injection, forwarding);
-this owns the backend -- which project and models are allowed, which principal
-the token is minted as, and what the box has to read to find the endpoint.
+``aisan.proxy.vertex`` filters and forwards requests. This backend selects the
+project, models, impersonated principal, and box-facing endpoint.
 
-The credential never enters the box: it is minted here, host-side, by
-`mint.vertex_fetch`, and attached to a request the box never sees.
+``mint.vertex_fetch`` creates short-lived tokens on the host. The proxy adds them
+after receiving a request from the box.
 """
 
 from __future__ import annotations
@@ -29,29 +28,24 @@ from .base import Backend, PreflightError
 
 log = logging.getLogger(__name__)
 
-# Re-mint this long before expiry. Tokens live ~1h and a single model call is
-# minutes at worst, so this is generous; the point is that a long job never
-# reaches for one that has just expired.
+# Refresh one-hour tokens five minutes before expiry.
 _REFRESH_MARGIN_S = 300
 
 PORT = 8711
 
 
 class _Token:
-    """Mints on demand and caches until nearly expired.
+    """Mint on demand and cache the token until close to expiry.
 
-    Read per request by the proxy rather than captured, because jobs run for
-    hours and tokens live ~1h -- a value fetched once would strand a long job
-    mid-flight. Refreshing lazily (rather than on a timer) keeps this a plain
-    object with no task to leak.
+    Jobs can outlive one-hour tokens, so the proxy reads this provider for every
+    request. Lazy refresh needs no background task.
     """
 
     def __init__(self, fetch) -> None:
         self._fetch = fetch
         self._token = ""
         self._expiry = datetime.fromtimestamp(0, UTC)
-        # One fetch under contention (see reapi.RefreshingToken): the lock
-        # serialises the refresh, the double-check lets a waiter reuse it.
+        # Serialize refreshes and let waiters reuse the new token.
         self._lock = asyncio.Lock()
 
     def _fresh(self, now: datetime) -> bool:
@@ -70,14 +64,11 @@ class _Token:
 
 
 def default_credentials() -> tuple[Path, ...]:
-    """Every file Application Default Credentials may be read from here.
+    """Return every file Application Default Credentials may read.
 
-    Two, because `google.auth.default()` takes GOOGLE_APPLICATION_CREDENTIALS
-    when it is set and the gcloud well-known file otherwise (CLOUDSDK_CONFIG
-    moving the directory), and the guards want the paths a box must not reach
-    rather than the one this process would pick. Naming only the live one would
-    leave the other bindable: any process in a box holding it can point ADC
-    back at it.
+    ``google.auth.default()`` uses ``GOOGLE_APPLICATION_CREDENTIALS`` when set
+    and otherwise checks the gcloud file under ``CLOUDSDK_CONFIG``. Protect both
+    because a process in the box could redirect ADC to either path.
     """
     paths = []
     explicit = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
@@ -111,37 +102,25 @@ class VertexBackend(Backend):
         self._project = project
         self._location = location
         self._models = models
-        # Claude on Vertex is a different path shape on the same host, so the
-        # allowlist needs to know which names belong on which route. Empty by
-        # default: a deploy with no Claude model gets no Anthropic route.
+        # Keep Claude model names on their separate Anthropic route.
         self._anthropic_models = anthropic_models
-        # The header carrying session affinity on the Anthropic route, named by
-        # the deploy because the upstreams spell it differently. None leaves the
-        # mechanism off; see make_app.
+        # The deployment supplies its Anthropic session-affinity header name.
         self._session_header = session_header
         self._impersonate = impersonate
-        # ADC is minted in memory, but what it is minted FROM is a file, and a
-        # box that can read it can mint the same token for itself.
+        # A box that reads the ADC source file could mint its own tokens.
         self.credentials = default_credentials()
-        # A test may inject `fetch` in place of the real mint -- otherwise
-        # exercising this backend would require a real cloud credential, which is
-        # exactly the dependency the proxy exists to keep out of the loop.
+        # Tests can replace the real cloud credential provider.
         self._injected = fetch
         self._cached: _Token | None = None
 
     @property
     def _token(self) -> _Token:
-        """The mint, built on first use and then cached.
+        """Build the token provider on first use and then cache it.
 
-        Lazy for one reason: constructing the real provider validates the
-        impersonation target, and a backend that raises in its constructor
-        cannot be DESCRIBED -- `explain` would have to build a different object
-        than the configured one, which is the exact fidelity the inspector
-        exists to preserve. Nothing is lost: `preflight` runs before bwrap, so a
-        missing target still fails early, and now with a fix command attached.
+        Lazy construction lets ``explain`` describe invalid configuration.
+        ``preflight`` still validates the target before bubblewrap starts.
 
-        Cached rather than rebuilt so preflight's mint is the same one the first
-        request reads, instead of costing an extra IAM round trip per box.
+        Reusing the provider also avoids an extra IAM request after preflight.
         """
         if self._cached is None:
             self._cached = _Token(self._injected or vertex_fetch(self._impersonate))
@@ -150,12 +129,8 @@ class VertexBackend(Backend):
     def client_env(self) -> dict[str, str]:
         return {
             "AISAN_VERTEX_PROXY_ENDPOINT": f"http://127.0.0.1:{self.port}",
-            # The Anthropic SDK finds the same proxy through its own variable.
-            # The `/v1` is required: the SDK builds `/projects/...` paths with
-            # no version segment and takes it from the base URL. Set whether or
-            # not a Claude model is configured, so the allowlist alone decides
-            # reachability: a box gets a legible 403 rather than a hang against
-            # the real host.
+            # The Anthropic SDK takes ``/v1`` from its base URL. Always point it
+            # at the proxy so unsupported routes receive a clear refusal.
             "ANTHROPIC_VERTEX_BASE_URL": f"http://127.0.0.1:{self.port}/v1",
         }
 
@@ -173,9 +148,7 @@ class VertexBackend(Backend):
     @asynccontextmanager
     async def serve(self, runtime_dir: Path) -> AsyncIterator[None]:
         sock = self.socket_path(runtime_dir)
-        # A leftover socket from a killed box makes bind() fail EADDRINUSE
-        # forever; the dir name is derived from this box, so nothing else owns
-        # this path.
+        # Remove a socket left by an earlier crashed run of this box.
         sock.unlink(missing_ok=True)
         app = make_app(
             allowlist=Allowlist(

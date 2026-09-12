@@ -1,19 +1,15 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Host-side credential minting for the egress proxies.
+"""Mint short-lived credentials for host-side egress proxies.
 
-One provider per upstream identity. Each mints a short-lived credential in the
-host process -- where the durable credential lives -- and RETURNS it, so
-the proxy can attach it to a request the box never sees. That "returns rather
-than writes" is the whole distinction from the token brokers this replaced: they
-wrote a bearer into a directory bound into the box, which put the credential
-back where it was not supposed to be.
+Providers return credentials in memory so proxies can attach them after requests
+leave the box. Earlier brokers wrote bearers into directories mounted inside the
+box.
 
-Which principal to mint as is supplied by the deployment. The implementation
-uses Application Default Credentials to impersonate a keyless service account;
-the durable source credential remains host-side and only the short-lived access
-token is returned to the proxy.
+The deployment selects the principal. Vertex uses Application Default
+Credentials to impersonate a keyless service account while keeping the durable
+source credential on the host.
 """
 
 from __future__ import annotations
@@ -24,27 +20,22 @@ from datetime import UTC, datetime, timedelta
 
 from .hostproc import HostChild, neutral_child
 
-# Returns (access_token, aware-UTC expiry). Tests plug in here rather than
-# reaching for a real cloud credential, which is exactly the dependency the
-# proxies exist to keep out of the loop.
+# Return an access token and timezone-aware UTC expiry. Tests provide fakes.
 Fetch = Callable[[], Awaitable[tuple[str, datetime]]]
 
 _CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
 
-# A mint is on the request's critical path, so a stuck luci-auth is a hung
-# request. luci-auth returns in well under a second when it has a live login;
-# anything past this is it wanting something a headless refresh cannot give.
+# Bound luci-auth on the request path. A valid login normally returns within a
+# second; a longer run may be waiting for interaction.
 _TOKEN_TIMEOUT_S = 30
 
-# How long a credential that reports no expiry is treated as valid, so a
-# missing expiry is a short refresh interval rather than a re-mint per
-# request.
+# Give credentials without an expiry a short cache lifetime.
 _NO_EXPIRY_TTL = timedelta(minutes=5)
 
 
 def _read_adc_impersonate_token(target: str) -> tuple[str, datetime]:
-    # Blocking; run via to_thread below. The source principal needs Token
-    # Creator on the target.
+    # This blocking call runs through ``to_thread`` below. The source principal
+    # needs Token Creator on the target.
     import google.auth
     from google.auth import impersonated_credentials
     from google.auth.transport.requests import Request
@@ -56,19 +47,17 @@ def _read_adc_impersonate_token(target: str) -> tuple[str, datetime]:
         target_scopes=[_CLOUD_PLATFORM],
     )
     creds.refresh(Request())
-    # google.auth expiry is naive UTC by convention. A falsy expiry is treated as
-    # a short valid window, not `now`: `now` reads as already expired, so the
-    # refresher re-mints on EVERY request -- a blocking IAM round trip per call.
+    # google-auth uses naive UTC. Give a missing expiry a short future value to
+    # avoid a blocking IAM request on every call.
     expiry = creds.expiry or (datetime.now(UTC).replace(tzinfo=None) + _NO_EXPIRY_TTL)
     return creds.token, expiry.replace(tzinfo=UTC)
 
 
 def vertex_fetch(impersonate: str) -> Fetch:
-    """The Vertex mint provider: a cloud-platform token AS `impersonate`.
+    """Create a provider for cloud-platform tokens as ``impersonate``.
 
-    An empty target is a config error raised here rather than surfacing later as
-    an opaque IAM failure on the proxy's first mint. Config validates the same
-    thing at load; this is the guard for a caller that did not come through it.
+    Reject an empty target before the first IAM request. This also covers callers
+    that bypass configuration loading.
     """
     if not impersonate:
         raise ValueError(
@@ -82,16 +71,13 @@ def vertex_fetch(impersonate: str) -> Fetch:
 
 
 async def rbe_token(lifetime_s: int = 1800) -> str:
-    """A cloud-scoped luci token, returned rather than written.
+    """Return a cloud-scoped LUCI token without writing it to disk.
 
-    Cloud scope, not gerrit: the RBE proxy needs nothing else. Note the bound is
-    on LIFETIME and not on REACH -- chromium-review accepts a cloud-platform
-    bearer and resolves it to the full user account (verified), so this token is
-    Gerrit-capable while it lives. That is why it stays in this process.
+    The RBE proxy only requests cloud scope. Chromium Review also accepts this
+    bearer and resolves it to the full user account, so keep it in the host
+    process despite its short lifetime.
     """
-    # An empty cwd, like the credential-refresh children get: this runs as the
-    # operator with the durable login in reach, so it should not start in the
-    # repository a box has been writing to.
+    # Keep this operator process out of the repository edited by the box.
     with neutral_child() as child:
         return await _luci_token(lifetime_s, child)
 
@@ -102,12 +88,8 @@ async def _luci_token(lifetime_s: int, child: HostChild) -> str:
         "token",
         "-scopes-cloud",
         f"-lifetime={lifetime_s}s",
-        # No stdin: when the login has lapsed luci-auth wants an interactive
-        # reauth, and an inherited descriptor is the box's own TTY -- it would
-        # block the request forever, on every refresh after the first, defeating
-        # the point of minting host-side before the box exists. DEVNULL gives it
-        # an immediate EOF so it fails instead of prompting; the timeout below
-        # bounds the case where it hangs for some other reason.
+        # Prevent interactive reauthentication on the box's terminal. EOF makes
+        # an expired login fail promptly, and the timeout covers other hangs.
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

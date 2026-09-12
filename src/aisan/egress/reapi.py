@@ -1,28 +1,17 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""The RBE backend: a remote build service the box reaches without a luci token.
+"""Configure remote builds through the host-side RBE proxy.
 
-`aisan.proxy.rbe` owns the mechanism (method allowlist, credential
-injection, frame forwarding); this owns the backend -- the upstream, the
-credential source, and the two files the box needs in order to dial it.
+``aisan.proxy.rbe`` checks methods, adds credentials, and forwards HTTP/2 frames.
+This backend mints the credential and creates two files needed by Siso.
 
-Two files rather than none, because siso is configured differently from a model
-client and neither knob is the obvious one:
+An in-box hosts entry resolves Google's real service name to loopback, preserving
+the ``:authority`` used for routing. A per-box ``.sisoenv`` supplies the fully
+qualified instance because tests showed that the checkout file overrides
+``SISO_REAPI_INSTANCE``.
 
-- an `/etc/hosts` line, so the box dials the REAL hostname and it resolves to
-  loopback. `:authority` reaches the Google frontend as sent and it routes on
-  that name, so dialing `127.0.0.1` earns a 404 with an HTML body -- which
-  surfaces as a content-type error and reads like anything but a routing bug.
-- a `.sisoenv`, so the instance is fully qualified. The checkout ships one at a
-  fixed path and it WINS over the environment (measured: `SISO_REAPI_INSTANCE`
-  has no effect, even fully qualified), so the box binds over it. That also
-  keeps the agent's build command untouched -- it types `autoninja` itself, so
-  there is no call site to pass a flag through.
-
-The credential is minted here, host-side (`mint.rbe_token`), and attached to a
-request the box never sees: it never leaves this process. That IS the feature --
-the build reaches RBE without ever holding a luci token of its own.
+The host mints and attaches each LUCI token. The box never receives one.
 """
 
 from __future__ import annotations
@@ -46,55 +35,38 @@ log = logging.getLogger(__name__)
 HOSTS_FILE = "hosts"
 SISOENV_FILE = "sisoenv"
 
-# luci-auth caps a token at 30 minutes, and a cold V8 build can outlast that, so
-# the margin is generous: re-mint once a third of the life is gone rather than
-# discovering the expiry mid-build.
+# LUCI tokens last at most 30 minutes. Refresh with 20 minutes remaining because
+# a cold V8 build can outlast one token.
 _REFRESH_MARGIN_S = 1200
 
 PORT = 8712
 
-# Where luci-auth keeps the durable credential `mint.rbe_token` mints from.
-# Never read here -- named so the Box refuses a spec that binds it: a box that
-# can read this store can mint its own token, and this backend's whole claim is
-# that it cannot.
+# The durable LUCI credential store. Mount checks keep it out of the box because
+# any reader could mint its own token.
 LUCI_STORE = Path.home() / ".config" / "chrome_infra"
 
-# What `luci-auth token` tells an operator to run when it has nothing to mint
-# from. Interactive, which is why preflight exists: once bwrap is up the box
-# owns the TTY and this has nowhere to prompt.
+# Preflight reports this interactive fix before the box takes over the terminal.
 _FIX = "luci-auth login -scopes-cloud"
 
 
 class RefreshingToken:
-    """Mints on demand, caches until nearly expired, and remembers failures.
+    """Mint on demand, cache until close to expiry, and record failures.
 
-    Read per request by the proxy rather than captured: a build runs far longer
-    than a luci token lives, so a value fetched once would strand it mid-build.
-    The prototype had no refresh at all, which is why this exists.
+    Builds can outlive LUCI tokens, so the proxy checks this provider for each
+    request.
 
-    `refused` is the structured answer to "did this build fail because we had no
-    credential". The alternative -- and what the offline fallback did first -- is
-    to match siso's stderr for phrases like "code = Unauthenticated". That works
-    until Google or depot_tools rewords a message, and then it fails SILENTLY in
-    the worst direction: an unrecognised credential failure becomes a dead job
-    instead of a local build. We own both ends here, so the question is answered
-    by the object that actually knows rather than inferred from prose.
+    ``refused`` lets callers select offline fallback without matching Siso error
+    text that may change across releases.
     """
 
     def __init__(self, mint) -> None:
         self._mint = mint
         self._token = ""
         self._expiry = datetime.fromtimestamp(0, UTC)
-        # One mint under contention: without it, the burst of first requests a
-        # build opens each sees an empty cache and mints in parallel (N luci-auth
-        # subprocesses for one token). The lock serialises the refresh; the
-        # double-check inside lets a waiter use what the winner just cached.
+        # Serialize the first request burst so one LUCI subprocess mints the token.
         self._lock = asyncio.Lock()
-        # The last mint failure, or None. Never cleared by a later success: what
-        # the caller asks is "did a credential problem happen during this build",
-        # and a build that started refused and recovered halfway still explains a
-        # partial local build. Cleared only by starting a new backend, which is
-        # per box.
+        # Keep the first outage visible even if the build later recovers. A new
+        # per-box backend starts with no recorded failure.
         self.refused: Exception | None = None
 
     async def __call__(self) -> str:
@@ -102,7 +74,7 @@ class RefreshingToken:
             return self._token
         async with self._lock:
             now = datetime.now(UTC)
-            if self._fresh(now):  # a waiter may have minted while we blocked
+            if self._fresh(now):  # Another waiter may have refreshed the token.
                 return self._token
             try:
                 self._token = await self._mint()
@@ -124,16 +96,11 @@ class ReapiBackend(Backend):
     name = "rbe"
     port = PORT
 
-    # False by transport rather than by omission: under --net the relay's
-    # loopback IS the host's, so the port would be an unauthenticated credential
-    # capability for anything on the machine, and the insecure mode this module's
-    # docstring describes leaves the box nothing to prove itself with.
-    #
-    # A shared-net box takes the other route instead: the `v8-rbe-with-net-unsafe`
-    # egress profile mounts LUCI_STORE and lets siso authenticate as the
-    # operator. Naming the store below is what keeps the two mutually exclusive
-    # -- asking for both refuses on the credential guard rather than serving a
-    # proxy to a box that already holds the credential.
+    # Plaintext RBE has no client authentication. Sharing host loopback would
+    # expose the proxy to every local process, so this backend only supports
+    # isolated mode.
+    # The unsafe shared-network profile mounts LUCI_STORE directly. Credential
+    # checks prevent combining that profile with this proxy.
     supports_shared_net = False
 
     def __init__(
@@ -146,29 +113,20 @@ class ReapiBackend(Backend):
     ) -> None:
         self._project = project
         self._instance = instance
-        # Where THIS box's checkouts keep the file we bind over. A constructor
-        # argument because where a checkout keeps it is a property of the
-        # checkout, not of RBE -- and taking it here rather than in box_binds
-        # keeps that method's signature the one every backend has.
+        # Checkout-specific destinations for the generated ``.sisoenv``.
         #
-        # Several, because a box is not always rooted at one checkout: a gclient
-        # root holds the main tree and its worktrees, and worktrees on different
-        # DEPS hashes resolve to DIFFERENT shared .sisoenv files. Binding one of
-        # them leaves the rest reading their own bare instance name.
+        # A gclient root and worktrees on different DEPS revisions may resolve to
+        # different shared files, so bind over every destination.
         #
-        # A str is one path, not an iterable of them: tuple() over it yields a
-        # destination per CHARACTER, and bwrap would be handed fifteen mounts
-        # nobody asked for rather than a refusal.
+        # Treat a string as one path instead of an iterable of characters.
         one = isinstance(sisoenv, str | Path)
         self._sisoenv_dsts = (Path(sisoenv),) if one else tuple(sisoenv)
         self.credentials = (LUCI_STORE,)
         self._token = RefreshingToken(mint or mint_rbe_token)
 
     def client_env(self) -> dict[str, str]:
-        # The address siso dials, and the flag that stops gRPC-Go from trying to
-        # attach a credential the box does not have. The instance is NOT here:
-        # it comes from the bound .sisoenv, because the checkout's copy of that
-        # file wins over the environment (measured).
+        # Use plaintext gRPC to the relay. The bound .sisoenv supplies the
+        # instance because the checkout file overrides the environment.
         return {
             "SISO_REAPI_ADDRESS": f"{UPSTREAM_HOST}:{self.port}",
             "RBE_service_no_security": "true",
@@ -182,28 +140,20 @@ class ReapiBackend(Backend):
 
     def prepare(self, runtime_dir: Path) -> None:
         """Write the two files `box_binds` names as bind-over sources."""
-        # One implementation of this security-relevant file: `hosts_file`
-        # prepends `127.0.0.1 UPSTREAM_HOST` to the host's /etc/hosts and writes
-        # it at runtime_dir/hosts, which is exactly `hosts_path(runtime_dir)`.
+        # Resolve the Google service name to the in-box loopback relay.
         hosts_file(runtime_dir)
-        # Fully qualified: with a bare instance name Google cannot attribute the
-        # request to a project and answers CONSUMER_INVALID.
+        # Google rejects a bare instance name with CONSUMER_INVALID.
         self.sisoenv_path(runtime_dir).write_text(
             f"SISO_PROJECT={self._project}\n"
             f"SISO_REAPI_INSTANCE=projects/{self._project}/instances/{self._instance}\n"
         )
 
     def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
-        """Bind-overs for the two files, neither of which can be written where
-        it is needed:
+        """Return bind-overs for the hosts file and each ``.sisoenv``.
 
-        - /etc/hosts, so the box dials the real hostname and it lands on
-          loopback. The Google frontend routes on :authority, so a literal
-          127.0.0.1 is answered with a 404 and an HTML body.
-        - the checkout's .sisoenv, once per destination. It lives in a SHARED
-          deps cache (checkouts on one DEPS hash resolve to the same file, and
-          some resolve to the main checkout), so editing it in place would
-          corrupt concurrent boxes. Overriding per box is the only safe form.
+        The hosts file preserves Google's routing authority while reaching
+        loopback. ``.sisoenv`` may live in a dependency cache shared by several
+        checkouts, so each box overlays it instead of editing it in place.
         """
         return [
             BindOver(self.hosts_path(runtime_dir), Path("/etc/hosts")),
@@ -227,14 +177,10 @@ class ReapiBackend(Backend):
 
     @asynccontextmanager
     async def serve(self, runtime_dir: Path) -> AsyncIterator[None]:
-        """Serve the host half.
+        """Serve RBE for the duration of the box.
 
-        Raises on a failed start rather than degrading -- but note the failure
-        mode differs from Vertex's. A dead model proxy means every turn is dead;
-        a dead RBE proxy means the build falls back to offline (`autoninja -o`),
-        which is slower but correct. It still raises, because starting a job
-        whose builds will silently take 10-30 min each is worth surfacing at the
-        start rather than discovering in the timings.
+        Fail startup rather than silently forcing offline builds that may take
+        10 to 30 minutes longer.
         """
         sock = self.socket_path(runtime_dir)
         sock.unlink(missing_ok=True)

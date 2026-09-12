@@ -1,42 +1,23 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Host-side RBE proxy: remote builds for a box that holds no luci token.
+"""Proxy Remote Build Execution without giving the box a LUCI token.
 
-The counterpart to `vertex.py`, and the reason the sandbox can keep remote
-builds under `--unshare-net`. Measured working before this existed: a real V8
-`d8` linked in 170s with 1268 remote executions through the prototype, while the
-build process held no credential.
+The network-isolated box speaks plaintext HTTP/2 to this proxy. The proxy checks
+gRPC authority and method, adds a cloud bearer, and forwards opaque protobuf
+bodies over TLS. A prototype linked V8's ``d8`` in 170 seconds through 1,268
+remote executions without putting a credential in the build process.
 
-REAPI is gRPC, so this is an HTTP/2 proxy rather than the HTTP relay Vertex
-uses. It parses HPACK but never the payload, which is why it stays small: the
-protobuf bodies are forwarded as opaque bytes.
+Siso requires ``-reapi_insecure`` for the local connection and then refuses to
+attach OAuth credentials. It must dial the real service name through an in-box
+hosts entry because Google routes on ``:authority``. The proxy verifies that
+authority as well as the method. The fully qualified instance must be passed via
+``-reapi_instance``; tests found that ``SISO_REAPI_INSTANCE`` was ignored.
 
-Four facts drive the design, none of them guessable from documentation:
-
-- siso with `-reapi_insecure` speaks PLAINTEXT h2 to a local address, so the box
-  side needs no TLS and no certificates.
-- In that mode gRPC-Go REFUSES to attach its OAuth token ("transport: cannot
-  send secure credentials on an insecure connection"). That is the property we
-  want -- the box cannot leak a credential it never holds -- but it means the
-  proxy must inject `authorization` itself.
-- `:authority` reaches the Google frontend as sent, and it routes on it. The box
-  must therefore dial a NAME that resolves to this proxy (an `/etc/hosts` entry
-  bound into the sandbox), not `127.0.0.1`, or Google answers 404. Because that
-  header is what selects the SERVICE, it is checked against UPSTREAM_HOST
-  alongside the `:path` allowlist -- gating the method alone would leave the
-  generic methods (ByteStream, longrunning Operations) usable against whatever
-  else the frontend fronts.
-- The instance must be fully qualified via siso's `-reapi_instance` FLAG. The
-  `SISO_REAPI_INSTANCE` env var was measured to be silently ignored, and a bare
-  instance name makes Google reject the request as CONSUMER_INVALID.
-
-The allowlist is the security boundary. CAS writes ARE permitted, deliberately:
-remote execution cannot work without them (the prototype build issued 1260
-BatchUpdateBlobs calls), so this surface is genuinely wider than Vertex's. What
-bounds it is that the same authority a legitimate build already exercises on the
-shared `rbe-chromium-untrusted` instance -- the residual is quota abuse and CAS
-as a covert channel, not credential theft.
+The method allowlist includes reads, execution, and CAS writes required by real
+builds. It excludes action-cache updates, which could poison results shared with
+other users. Remaining risks include quota abuse and using CAS as a covert
+channel within the authority already granted to the build.
 """
 
 from __future__ import annotations
@@ -64,11 +45,8 @@ log = logging.getLogger(__name__)
 UPSTREAM_HOST = "remotebuildexecution.googleapis.com"
 UPSTREAM_PORT = 443
 
-# The gRPC methods a real build actually calls, measured from a full proxied V8
-# build rather than read off the REAPI spec -- an allowlist built from the spec
-# would be wider than the need. ByteStream/Write is included although that build
-# did not reach it: blobs above the batch-size limit stream instead, so omitting
-# it would turn a large-artifact build into a confusing mid-build failure.
+# Methods observed in a complete proxied V8 build. Include ByteStream/Write for
+# blobs above the batch size even though that build didn't use it.
 ALLOWED_METHODS = frozenset(
     {
         "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities",
@@ -86,33 +64,19 @@ ALLOWED_METHODS = frozenset(
     }
 )
 
-# Deliberately NOT allowlisted, and worth naming so the omission reads as a
-# decision: ActionCache/UpdateActionResult. A build that can write the action
-# cache can poison it for every other consumer of the shared instance, and siso
-# does not need it (remote execution updates the cache server-side).
+# ActionCache/UpdateActionResult stays blocked because it can poison shared
+# results. Siso doesn't need it; remote execution updates the cache server-side.
 
-# Request headers forwarded upstream. Everything the box sends rides the
-# cloud-scoped, Gerrit-capable bearer this proxy injects, so a header the box
-# CHOSE that reaches Google under that bearer is a capability the allowlist
-# never vetted -- `x-goog-user-project` (billing/quota attribution),
-# `x-goog-request-params` (routing), whatever a prompt-injected build adds next.
-# Forwarding all-but-`authorization` made "whatever the box sent is data" false.
+# Forward only measured request headers. Box-controlled ``x-goog-*`` fields could
+# change routing, billing, or quota under the injected cloud bearer.
 #
-# Measured from a full proxied V8 build (siso over grpc-go 1.83.1,
-# GetCapabilities through Execute/ByteStream): siso sends exactly content-type,
-# te, user-agent, grpc-timeout, grpc-accept-encoding, and the REAPI
-# RequestMetadata below -- no `x-goog-*` among them. user-agent is `grpc-go/1.x`,
-# tool identity with no host fingerprint (unlike the model proxies' x-stainless
-# set), so it is kept rather than dropped.
+# A complete build with grpc-go 1.83.1 sent content-type, te, user-agent,
+# grpc-timeout, grpc-accept-encoding, and REAPI RequestMetadata. Its user agent
+# identifies grpc-go without a host fingerprint.
 #
-# The `grpc-` family is passed by PREFIX, not enumerated: the gRPC spec reserves
-# that prefix for transport metadata (grpc-timeout, grpc-encoding,
-# grpc-accept-encoding, grpc-previous-rpc-attempts, the grpc-*-bin tracing
-# pair), none of which carries authorization or reroutes a request -- and
-# hard-coding only the two a plain build happens to send would strip a
-# compressed build's `grpc-encoding` and leave the upstream unable to decode.
-# requestmetadata-bin is box-chosen data the upstream expects (tool and
-# invocation ids for build-event correlation), inert like the protobuf body.
+# The gRPC specification reserves the ``grpc-`` prefix for transport metadata.
+# Passing the family preserves compression and tracing fields. RequestMetadata
+# carries tool and invocation IDs for build-event correlation.
 _FORWARDED_HEADERS = frozenset(
     {
         b"content-type",
@@ -124,53 +88,42 @@ _FORWARDED_HEADERS = frozenset(
 
 
 def _forwarded_header(name: bytes) -> bool:
-    """Whether a lowercased box request header may reach the upstream.
+    """Return whether a lowercase request header may reach Google.
 
-    Pseudo-headers (`:method`, `:path`, `:scheme`, `:authority`) are the request
-    itself and handled by the caller, which also rewrites `:authority`/`host`;
-    `authorization` is dropped and replaced with the injected bearer there too.
+    The caller handles pseudo-headers, rewrites authority and host, and replaces
+    authorization with the host bearer.
     """
     return name in _FORWARDED_HEADERS or name.startswith(b"grpc-")
 
 
-# gRPC signals application errors in trailers with a 200 status, so a refusal
-# must be a trailer too -- an HTTP error status makes the client report a
-# transport failure and retry, hiding the reason.
+# Return application errors as gRPC trailers so clients don't retry them as
+# transport failures.
 _GRPC_PERMISSION_DENIED = "7"
 
-# UNAUTHENTICATED, for the case where the proxy is healthy but has no credential
-# to attach (luci-auth can require interactive reauthentication). A DISTINCT
-# code from the allowlist's
-# PERMISSION_DENIED because they mean opposite things to an operator reading a
-# log: one is the boundary doing its job, the other is a machine that needs a
-# human. Neither is retried by gRPC, which is the point -- see _refuse.
+# Distinguish a missing host credential from a policy denial. gRPC retries
+# neither status.
 _GRPC_UNAUTHENTICATED = "16"
 
-# How often a sustained credential outage is logged. One line per outage rather
-# than per request: a build issues thousands, and every one of them refuses.
+# Limit repeated logs during a credential outage.
 _MINT_FAILURE_LOG_S = 60.0
 
-# Returns the current bearer. Called per REQUEST, never captured: a build runs
-# far longer than the ~30 min a luci token lives, so a value read once would
-# strand it mid-build.
+# Resolve the bearer for every request because builds outlive 30-minute tokens.
 TokenSource = Callable[[], Awaitable[str]]
 
 
 @dataclass
 class _Stream:
-    """One client stream mapped onto its upstream twin."""
+    """Map a client stream to its upstream stream."""
 
     upstream_id: int
 
 
 class _Pending:
-    """Payload accepted from one side that the other side's window cannot take yet.
+    """Hold data until the destination's flow-control window opens.
 
-    Each chunk keeps the SOURCE's flow-control debt (`flow_controlled_length`)
-    alongside its bytes, and that debt is only repaid -- acknowledge_received_data
-    -- once the chunk has actually gone out the far side. That is what makes a
-    slow peer slow the fast one down instead of silently growing this buffer:
-    unacknowledged bytes hold the source's window shut.
+    Keep each chunk's source-side flow-control debt. Acknowledge the source only
+    after forwarding the bytes, so a slow destination applies backpressure
+    instead of growing this queue without limit.
     """
 
     def __init__(self) -> None:
@@ -180,10 +133,10 @@ class _Pending:
 
 
 class Session:
-    """One inbound connection, one upstream TLS connection, streams mapped 1:1.
+    """Map one inbound HTTP/2 connection to one upstream TLS connection.
 
-    Per connection rather than pooled: siso opens a handful and keeps them, so
-    pooling would add lifetime bookkeeping for no measured gain.
+    Siso keeps a small number of connections open, so pooling adds no measured
+    benefit.
     """
 
     def __init__(self, token: TokenSource, allow: frozenset[str]) -> None:
@@ -191,19 +144,13 @@ class Session:
         self._allow = allow
         self._c2u: dict[int, int] = {}
         self._u2c: dict[int, int] = {}
-        # Queued payload per direction, both keyed by CLIENT stream id (the
-        # upstream twin is one _c2u lookup away), so one key names a stream
-        # whichever way its data happens to be flowing.
+        # Key both directional queues by client stream ID.
         self._to_up: dict[int, _Pending] = {}
         self._to_down: dict[int, _Pending] = {}
         self._lock = asyncio.Lock()
-        # When this session last failed to mint, for rate-limiting the log. Per
-        # session rather than global: siso keeps a handful of connections, so
-        # this is a handful of lines per outage rather than thousands, without
-        # module state that a test would have to reset between cases.
+        # Track mint failures per session to avoid global test state.
         self._mint_failed_at = float("-inf")
-        # Same reasoning for refusal warnings, which a box loop on a denied
-        # method would otherwise emit once per request, unbounded.
+        # Bound warnings from loops on denied methods.
         self._warn = LogGate()
 
     async def run(
@@ -221,11 +168,8 @@ class Session:
         down.initiate_connection()
         writer.write(down.data_to_send())
         await writer.drain()
-        # FIRST_COMPLETED, not gather: the two directions end independently, and
-        # a session is over as soon as either does. gather() waits for both, so a
-        # box that disconnects mid-build would leave the upstream pump blocked on
-        # a read that may never return -- pinning a TLS socket and a task for the
-        # life of the daemon. Whichever finishes first, the other is cancelled.
+        # End the session when either direction closes. Waiting for both could
+        # leave the other pump blocked forever on a read.
         pumps = [
             asyncio.create_task(self._pump_down(reader, writer, down, up_w, up_conn)),
             asyncio.create_task(self._pump_up(up_r, writer, down, up_w, up_conn)),
@@ -263,27 +207,19 @@ class Session:
     def _queue(
         self, pending: dict[int, _Pending], key: int, data: bytes, flow_len: int
     ) -> None:
-        """Accept payload for a stream without sending it yet."""
+        """Queue stream data until the destination can accept it."""
         pending.setdefault(key, _Pending()).chunks.append((data, flow_len))
 
     def _drain(self, pending, key: int, conn, sid: int, src_conn, src_sid: int):
-        """Send as much of one stream's queue as the peer's window allows.
+        """Send queued data within the peer's flow-control limits.
 
-        The bug this exists for: DATA was forwarded with a bare `send_data`, as
-        if h2 buffered. It does not -- it raises FlowControlError when the frame
-        exceeds the peer's window or the max frame size, and that exception left
-        the pump, ending the session. Every byte of the response was dropped and
-        the connection died. A 256KiB CAS blob against the default 64KiB window
-        reproduced it exactly, which is what the failure log showed: a build streaming
-        blobs bigger than one window.
+        h2 doesn't buffer or split oversized DATA frames. A 256 KiB CAS blob
+        exceeded the default 64 KiB window and previously ended the session with
+        ``FlowControlError``. Limit writes by both the current window and
+        ``max_outbound_frame_size``.
 
-        Two separate limits, so both are respected here rather than assumed
-        away: the peer's remaining flow-control window, and max_outbound_frame_size
-        (16KiB by default -- h2 does NOT split for us).
-
-        The source's flow-control debt is repaid only as bytes leave, which is
-        what turns this from a buffer into backpressure: a stalled peer stops
-        the sender rather than accumulating in memory here.
+        Acknowledge source bytes only after forwarding them so a stalled peer
+        stops the sender instead of increasing memory use.
         """
         p = pending.get(key)
         if p is None:
@@ -293,11 +229,8 @@ class Session:
                 data, flow_len = p.chunks[0]
                 remaining = len(data) - p.offset
                 if remaining <= 0:
-                    # A zero-length DATA frame, which gRPC does send. It costs no
-                    # window, so it must be retired here rather than measured against
-                    # one: treating it as "no room" deadlocked the stream -- the
-                    # queue never emptied, so end_stream was never forwarded and the
-                    # response hung with its last bytes undelivered.
+                    # Retire zero-length DATA frames immediately. They consume no
+                    # window but can otherwise keep end_stream queued forever.
                     p.chunks.popleft()
                     p.offset = 0
                     if src_conn is not None and flow_len:
@@ -313,7 +246,7 @@ class Session:
                 if p.offset >= len(data):
                     p.chunks.popleft()
                     p.offset = 0
-                    # Repay the source now that this chunk is fully forwarded.
+                    # Acknowledge the source after forwarding the complete chunk.
                     if src_conn is not None and flow_len:
                         with contextlib.suppress(Exception):
                             src_conn.acknowledge_received_data(flow_len, src_sid)
@@ -322,18 +255,14 @@ class Session:
                     conn.end_stream(sid)
                 pending.pop(key, None)
         except (h2.exceptions.StreamClosedError, h2.exceptions.NoSuchStreamError):
-            # The destination stream is gone; the queue will never forward, so
-            # repay its debt to the source rather than dropping it silently.
+            # Release source flow-control credit for an abandoned queue.
             self._discard(pending, key, src_conn, src_sid)
 
     def _drain_all(self, pending, conn, to_upstream: bool, src_conn) -> None:
-        """Retry every stalled stream in one direction after a WindowUpdated.
+        """Retry stalled streams after a flow-control window update.
 
-        A connection-level window update carries stream_id 0 and lifts the whole
-        connection, so keying off the event's stream id would leave every other
-        stream stalled forever. Cheap to just retry them all: siso keeps a
-        handful of streams, and a stream whose window is still shut returns from
-        _drain immediately.
+        A connection-level update uses stream ID zero and may unblock any stream,
+        so retry each small queue.
         """
         for key in list(pending):
             sid = self._c2u.get(key) if to_upstream else key
@@ -343,21 +272,11 @@ class Session:
             self._drain(pending, key, conn, sid, src_conn, src_sid)
 
     def _discard(self, pending, key: int, src_conn, src_sid) -> None:
-        """Drop a stream's queue, repaying the source's flow-control debt.
+        """Drop a queue and repay its source-side flow-control debt.
 
-        A queued chunk holds the SOURCE's window shut until it is forwarded (see
-        `_drain`, which repays only as bytes leave). If the stream dies first --
-        a reset, a closed twin -- those bytes never leave, so the ack never
-        happens and the source's CONNECTION-level window shrinks by that much
-        for good. A few resets mid-build silently strand the peer: once ~64KiB
-        of unrepaid debt accumulates it can send nothing more, and `refused`
-        stays None so the offline fallback never fires. Repaying here makes a
-        dropped chunk cost no window.
-
-        `acknowledge_received_data` restores the connection window even for an
-        already-closed stream (it processes the connection manager before
-        looking the stream up), which is the window that leaks; the suppress is
-        for a `src_sid` whose twin is gone.
+        Without the acknowledgements, reset streams permanently consume the
+        connection window. About 64 KiB of accumulated debt can stall the peer.
+        h2 restores the connection window even when the stream has closed.
         """
         p = pending.pop(key, None)
         if p is None or src_conn is None or src_sid is None:
@@ -374,19 +293,11 @@ class Session:
         message: str,
         status: str = _GRPC_PERMISSION_DENIED,
     ) -> None:
-        """Refuse in gRPC's own terms: 200 + a status trailer.
+        """Return a gRPC status trailer instead of an HTTP error.
 
-        An HTTP 403 would surface to siso as a transport error and be retried;
-        a gRPC status is reported as what it is and stops. That "and stops" is
-        what makes this the right answer for a missing credential too, so
-        `status` selects which refusal this is (see _GRPC_UNAUTHENTICATED).
-
-        `message` is a MODEL-FACING surface, not an internal note: it reaches the
-        box, which means it reaches a build log an agent reads and summarises. So
-        it names the policy and what was refused ("method not permitted: <path>"),
-        never the hook that decided -- a reason that says "denied by _on_down_event"
-        tells the one reader who can do something about it nothing they can act on.
-        sandbox-runtime uses the same user-facing refusal rule.
+        Siso treats an HTTP error as a retryable transport failure. A gRPC status
+        reports the policy or authentication failure and stops retries. The
+        message is written for the build log rather than naming internal code.
         """
         down.send_headers(
             stream_id,
@@ -400,17 +311,12 @@ class Session:
         )
 
     def _note_mint_failure(self, exc: Exception) -> None:
-        """Log a credential failure once per outage, not once per request.
+        """Log a sustained credential outage at a bounded rate.
 
-        A build issues thousands of requests and every one of them refuses, so
-        the unconditional line would bury the log in copies of a single fact.
-        What an operator needs is one legible "no RBE credential, builds are
-        local"; the rest is noise that hides the next real failure.
+        One build may issue thousands of requests, all with the same failure.
         """
-        # The reset is INSIDE the window check: updating it on every failure
-        # (a build issues them every few ms) kept `now - _mint_failed_at` under
-        # the window forever, so a sustained outage logged once ever instead of
-        # once per window. Measuring from the last LOG restores "once per window".
+        # Measure from the last logged failure. Updating on every request would
+        # suppress a sustained outage forever.
         now = time.monotonic()
         if now - self._mint_failed_at > _MINT_FAILURE_LOG_S:
             log.warning(
@@ -419,19 +325,12 @@ class Session:
             self._mint_failed_at = now
 
     async def _pump_down(self, reader, writer, down, up_w, up_conn) -> None:
-        """Box -> Google. Enforces the allowlist and injects the credential.
+        """Forward box traffic after enforcing policy and adding credentials.
 
-        Forwarding comes BEFORE writing anything back to the box, and that order
-        is load-bearing. What h2 wants written downstream after a read is
-        housekeeping -- the SETTINGS ACK, window updates -- while the events from
-        the same read may carry the request itself. Flushing downstream first
-        meant a box that had gone away took a fully received, fully parsed
-        request with it: the write raised, the loop unwound, and _on_down_event
-        never ran, so the request was dropped after the point where it was
-        entirely in our hands. Measured at ~5% of connections under load, with a
-        trace showing RequestReceived parsed and then discarded. HTTP/2 permits
-        the ACK to trail by the microseconds this costs; losing a request it had
-        already accepted is not something a proxy may do.
+        Process request events before flushing HTTP/2 housekeeping. Flushing the
+        downstream SETTINGS acknowledgement first could fail after parsing a
+        complete request but before forwarding it. Traces reproduced this on
+        about five percent of connections under load.
         """
         try:
             while data := await reader.read(65536):
@@ -441,55 +340,31 @@ class Session:
                     await self._flush(up_w, up_conn)
                     await self._flush(writer, down)
         except (ConnectionResetError, BrokenPipeError) as e:
-            # The ordinary end of a session -- the box exited, or siso closed a
-            # pooled connection -- so it is not a warning. But it is not nothing
-            # either: silence here is what hid the ordering bug above, since the
-            # symptom was a request that simply never arrived upstream.
+            # Session closure is expected, but keep a debug record for diagnosing
+            # requests that never reach the upstream.
             log.debug("rbe proxy: downstream closed: %s", type(e).__name__)
-        # Broad on purpose: one bad connection must not kill the proxy.
+        # Keep one bad connection from stopping the proxy.
         except Exception as e:
             log.warning("rbe proxy: downstream: %s: %s", type(e).__name__, e)
 
     async def _on_down_event(self, ev, down, up_conn) -> None:
         if isinstance(ev, h2.events.RequestReceived):
             headers = dict(ev.headers)
-            # errors="replace": a non-UTF-8 :path (0x80-0xff is legal in an h2
-            # header value) used to raise out of here, through _pump_down's broad
-            # except, tearing the connection down with no gRPC status. A replaced
-            # path cannot equal an ASCII REAPI method, so it is refused cleanly --
-            # the decision is safe on the replaced string.
+            # Replace invalid UTF-8 so a legal binary header value becomes a clean
+            # policy refusal instead of terminating the connection.
             path = headers.get(b":path", b"").decode(errors="replace")
-            # Through `policy_permits`, so an `allow` that is not the plain
-            # frozenset this ships with -- a consumer's own matcher, a set-like
-            # object with a __contains__ that raises -- denies rather than
-            # unwinding the session, which siso reads as a flaky transport and
-            # retries. Same reason the mint failure below is a refusal.
+            # Convert exceptions from custom allowlist implementations to denials.
             if not policy_permits(lambda: path in self._allow, subject=path):
                 self._warn.warning(log, "rbe proxy: refused %s", path)
                 self._refuse(down, ev.stream_id, f"method not permitted: {path}")
                 return
-            # The allowlist gates :path, but the frontend routes on :authority,
-            # and three allowlisted methods (ByteStream/Read, /Write, the
-            # longrunning Operations) are GENERIC across Google services rather
-            # than REAPI-specific. A permitted :path with someone else's
-            # :authority would therefore carry our bearer to a service the
-            # allowlist never vetted -- and that bearer is cloud-scoped and
-            # Gerrit-capable while it lives (see mint.py).
+            # Google routes generic ByteStream and Operations methods by
+            # ``:authority``. Verify it before attaching the cloud bearer.
             #
-            # Refused, not silently rewritten: the only legitimate sender is
-            # siso dialing the name from the bound /etc/hosts, so a mismatch is
-            # either a bug in that bind or the box trying something. Rewriting
-            # would hide both; this way it lands in the log.
-            # A port is allowed here because siso dials one: the in-box relay
-            # offers this host name on a loopback port, and both HTTP/2 and gRPC
-            # carry it in :authority, so an exact match against the bare host
-            # refused every request.
+            # Refuse a different host instead of hiding it through rewriting.
+            # Permit the relay's numeric loopback port in the authority value.
             #
-            # isascii() guards isdigit(), which alone is true for superscripts and
-            # for Arabic-Indic and fullwidth digits -- isdecimal() is no better,
-            # still accepting the latter two. Harmless either way (the value only
-            # gates this decision; the upstream target is the constant below), but
-            # a check whose comment says "digits" should mean ASCII digits.
+            # ``isdigit`` accepts non-ASCII numerals, so check both properties.
             authority = headers.get(b":authority", b"").decode(errors="replace")
             host, sep, port = authority.partition(":")
             if host != UPSTREAM_HOST or (
@@ -500,19 +375,12 @@ class Session:
                     down, ev.stream_id, f"authority not permitted: {authority}"
                 )
                 return
-            # No credential is a REFUSAL, not a dropped connection. Letting the
-            # mint error escape tore the session down with no headers ever sent,
-            # and siso reads a silent drop as a flaky transport: it retried ten
-            # times (~40s) per build before falling back to a local one. Since
-            # luci-auth here needs an interactive reauth -- the steady state, not
-            # an incident -- that cost was paid by every build.
-            #
-            # Answered per stream so the proxy stays up and stays serving: the
-            # token is re-minted on demand, so a reauth landing mid-run is picked
-            # up by the very next request with no restart and no cached verdict.
+            # Return missing credentials as a per-stream refusal. A disconnected
+            # session made Siso retry ten times for about 40 seconds before local
+            # fallback. The next request can use a newly refreshed login.
             try:
                 bearer = await self._token()
-            # Broad on purpose: any mint failure reads the same to the client.
+            # All mint failures have the same client-facing meaning.
             except Exception as e:
                 self._note_mint_failure(e)
                 self._refuse(
@@ -522,28 +390,12 @@ class Session:
                     status=_GRPC_UNAUTHENTICATED,
                 )
                 return
-            # Our own headers: whatever the box sent is data, not instruction.
-            #
-            # :authority is normalized to the bare host, because the port the box
-            # dialled is the RELAY's loopback port -- an artifact of this hop that
-            # means nothing upstream. The connection this rides on is https to
-            # :443, whose normal-form authority omits the port (RFC 9110 4.2.2,
-            # 4.2.3), and that is exactly what a direct siso would have sent. Not
-            # in tension with refusing a foreign host above: the host is the
-            # authorization decision and is never rewritten, while the port is
-            # transport hygiene on a request already accepted.
-            #
-            # Replaced IN PLACE, not filtered and re-appended: pseudo-headers must
-            # precede regular fields, and appending one after them is a protocol
-            # error h2 rejects outright.
-            #
-            # `host` is rewritten to the same value, not left alone: h2 refuses to
-            # send a block whose `host` and `:authority` disagree, and the box may
-            # send a `host` header of its choosing. Rewriting only :authority left
-            # the box-supplied host in place, so a single crafted request tripped
-            # that check; the ProtocolError escaped into `_pump_down`'s broad
-            # except and tore the whole connection down with no gRPC status -- the
-            # retry-storm-then-local-fallback this module exists to avoid, at will.
+            # Normalize the accepted authority to the upstream host. The
+            # loopback relay port has no meaning on the HTTPS connection to 443.
+            # Replace pseudo-headers in place because HTTP/2 requires them before
+            # regular fields.
+            # Rewrite ``host`` too because h2 rejects disagreement with
+            # ``:authority``.
             out: list[tuple[bytes, bytes]] = []
             dropped: list[str] = []
             for k, v in ev.headers:
@@ -558,10 +410,7 @@ class Session:
                     dropped.append(lk.decode("latin1"))
             out.append((b"authorization", f"Bearer {bearer}".encode()))
             if dropped:
-                # Not a refusal -- the request still goes -- but the breadcrumb
-                # for the one case this can break: a future siso sending a header
-                # a real build needs that is not yet measured here. Debug, so it
-                # is there when a build misbehaves without flooding a healthy one.
+                # Record dropped headers at debug level for client upgrades.
                 log.debug("rbe proxy: dropped box header(s): %s", ", ".join(dropped))
             uid = up_conn.get_next_available_stream_id()
             self._c2u[ev.stream_id] = uid
@@ -569,48 +418,38 @@ class Session:
             up_conn.send_headers(uid, out, end_stream=False)
         elif isinstance(ev, h2.events.DataReceived):
             if (uid := self._c2u.get(ev.stream_id)) is not None:
-                # Queued, not sent: upstream's window may be smaller than this
-                # frame, and the ack is deferred until it actually goes out so
-                # a slow upstream throttles the box instead of piling up here.
+                # Queue against the upstream window and acknowledge after sending.
                 self._queue(
                     self._to_up, ev.stream_id, ev.data, ev.flow_controlled_length
                 )
                 self._drain(self._to_up, ev.stream_id, up_conn, uid, down, ev.stream_id)
             else:
-                # No upstream twin (a refused method): nothing will ever forward
-                # this, so repay the window now or the box stalls on its own quota.
+                # Release credit immediately for data on a refused stream.
                 down.acknowledge_received_data(ev.flow_controlled_length, ev.stream_id)
         elif isinstance(ev, h2.events.WindowUpdated):
-            # The BOX opened its window, so what unblocks is the data waiting to
-            # go TO the box. (Getting this backwards deadlocks: the response
-            # fills the initial 64KiB, the box acks, and nothing ever drains.)
+            # A box window update unblocks response data queued for the box.
             self._drain_all(self._to_down, down, False, up_conn)
         elif isinstance(ev, h2.events.StreamEnded):
             if (uid := self._c2u.get(ev.stream_id)) is not None:
-                # end_stream must not overtake queued payload, or the request
-                # body is truncated. _drain closes it once the queue empties.
+                # End the stream only after queued request data has been sent.
                 p = self._to_up.setdefault(ev.stream_id, _Pending())
                 p.end = True
                 self._drain(self._to_up, ev.stream_id, up_conn, uid, down, ev.stream_id)
         elif isinstance(ev, h2.events.StreamReset):
             if (uid := self._c2u.pop(ev.stream_id, None)) is not None:
                 self._u2c.pop(uid, None)
-                # Repay both queues before dropping them: the box-bound queue
-                # owes the box, the upstream-bound queue owes the upstream.
+                # Release flow-control credit on both sides before dropping queues.
                 self._discard(self._to_up, ev.stream_id, down, ev.stream_id)
                 self._discard(self._to_down, ev.stream_id, up_conn, uid)
                 with contextlib.suppress(Exception):
                     up_conn.reset_stream(uid)
 
     async def _pump_up(self, up_r, writer, down, up_w, up_conn) -> None:
-        """Google -> box. Forwarded verbatim, per frame.
+        """Forward Google responses to the box frame by frame.
 
-        Same ordering rule as _pump_down and for the same reason: translate the
-        events first, then flush. Flushing the upstream housekeeping ahead of the
-        forward put a write to GOOGLE between a received response and its
-        delivery to the box, so a dropped upstream connection discarded a
-        response that had already arrived -- the mirror of the request-dropping
-        bug, and the one that would strand a build waiting on an action result.
+        Process response events before flushing upstream housekeeping, mirroring
+        the request-side ordering. Otherwise a failed upstream write can discard
+        a response already received from Google.
         """
         try:
             while data := await up_r.read(65536):
@@ -621,7 +460,7 @@ class Session:
                     await self._flush(up_w, up_conn)
         except (ConnectionResetError, BrokenPipeError) as e:
             log.debug("rbe proxy: upstream closed: %s", type(e).__name__)
-        # Broad on purpose: see _pump_down.
+        # Keep one bad connection from stopping the proxy.
         except Exception as e:
             log.warning("rbe proxy: upstream: %s: %s", type(e).__name__, e)
 
@@ -641,8 +480,7 @@ class Session:
                     down.send_headers(cid, ev.headers, end_stream=True)
         elif isinstance(ev, h2.events.DataReceived):
             if cid is not None:
-                # The direction the failure log showed: a CAS blob is routinely
-                # larger than the box's 64KiB window, so this must queue.
+                # CAS blobs routinely exceed the box's 64 KiB window.
                 self._queue(self._to_down, cid, ev.data, ev.flow_controlled_length)
                 self._drain(self._to_down, cid, down, cid, up_conn, ev.stream_id)
             else:
@@ -650,8 +488,7 @@ class Session:
                     ev.flow_controlled_length, ev.stream_id
                 )
         elif isinstance(ev, h2.events.WindowUpdated):
-            # Mirror image: upstream opened its window, so the queued REQUEST
-            # body is what moves.
+            # An upstream window update unblocks queued request data.
             self._drain_all(self._to_up, up_conn, True, down)
         elif isinstance(ev, h2.events.StreamEnded):
             if cid is not None:
@@ -669,7 +506,7 @@ class Session:
 
 
 def _handler(token: TokenSource, allow: frozenset[str]):
-    """One REAPI session per accepted connection."""
+    """Create one REAPI session for each accepted connection."""
 
     async def handle(reader, writer) -> None:
         await Session(token, allow).run(reader, writer)
@@ -683,20 +520,11 @@ async def serve_unix(
     *,
     allow: frozenset[str] = ALLOWED_METHODS,
 ) -> asyncio.Server:
-    """Listen on a UNIX socket, forwarding authenticated REAPI to Google.
+    """Serve authenticated REAPI through a private UNIX socket.
 
-    The only transport, and the same seam the Vertex proxy uses: a socket is a
-    filesystem object, so a bind mount carries it into a box that has no route
-    anywhere. siso cannot dial a socket -- it takes a host:port -- so an in-box
-    relay offers the port and splices it here. That relay holds no credential
-    and makes no decisions; the allowlist and the bearer stay on this side,
-    which is the whole point.
-
-    Mode 0600, mirroring the Vertex proxy: the box runs as the same uid, and the
-    socket is the only thing standing between any other local user and RBE calls
-    on our credential. A stale socket from a killed job would make bind fail
-    forever, so it is removed first -- the path is per-job (a digest of the job's
-    control dir), so this cannot unlink a live peer's socket.
+    An in-box TCP relay connects Siso to this socket. Policy and credentials stay
+    in the host process. Remove stale per-box sockets before binding and restrict
+    the new socket to its owner.
     """
     socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     socket_path.unlink(missing_ok=True)
@@ -706,12 +534,11 @@ async def serve_unix(
 
 
 def hosts_file(tmp_dir: Path, port_host: str = UPSTREAM_HOST) -> Path:
-    """Write an /etc/hosts to bind into the box so the real name resolves local.
+    """Create an in-box hosts file that resolves the RBE service locally.
 
-    This is what makes :authority carry the name Google routes on while the
-    connection lands on the proxy. Without it siso dials 127.0.0.1 literally,
-    the frontend sees that as the authority, and answers 404 with an HTML body
-    that surfaces as an unrelated-looking content-type error.
+    Siso then sends Google's service name as ``:authority`` while its connection
+    reaches the loopback relay. Dialing 127.0.0.1 directly makes Google return a
+    misleading HTML 404.
     """
     path = tmp_dir / "hosts"
     existing = Path("/etc/hosts").read_text() if Path("/etc/hosts").exists() else ""
