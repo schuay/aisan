@@ -579,7 +579,7 @@ def test_the_notice_reports_withheld_servers_and_unnamed_entries():
     notice = mcp_notice(config)
 
     assert "1 host MCP server(s) withheld" in notice
-    assert "nvim (/home/u/src/nvim-mcp/.venv/bin/nv)" in notice
+    assert "nvim (/opt/nvim-mcp/bin/nv)" in notice
     assert "typo" in notice
     assert "start inside the box" not in notice
 
