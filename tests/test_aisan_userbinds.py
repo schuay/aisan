@@ -420,3 +420,44 @@ def test_a_path_entry_no_file_in_the_tree_mounts_is_uncovered(tmp_path):
     f = _spec_file(tmp_path, 'ro = ["/tools"]\npath = ["/elsewhere/bin"]\n')
     with pytest.raises(ValueError, match="not covered"):
         load(f, egress=())
+
+
+def test_mcp_entries_union_across_the_include_tree_in_file_order(tmp_path):
+    inner = tmp_path / "nvim.toml"
+    inner.write_text('mcp = ["nvim", "v8-mcp"]\n')
+    f = _spec_file(tmp_path, 'include = ["./nvim.toml"]\nmcp = ["bnz", "v8-mcp"]\n')
+
+    # Includes first, like mounts, and each entry once.
+    assert load(f, egress=()).mcp == ("nvim", "v8-mcp", "bnz")
+
+
+def test_an_mcp_entry_may_be_a_name_an_absolute_path_or_the_wildcard(tmp_path):
+    f = _spec_file(tmp_path, 'mcp = ["v8-mcp", "~/tools/nvim-mcp/bin/nv", "*"]\n')
+
+    # Entries stay as written; session_mcp resolves them against the host.
+    assert load(f, egress=()).mcp == ("v8-mcp", "~/tools/nvim-mcp/bin/nv", "*")
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        ('mcp = "v8-mcp"', "array of non-empty strings"),
+        ("mcp = [1]", "array of non-empty strings"),
+        ('mcp = [""]', "array of non-empty strings"),
+        ('mcp = ["./bin/nv"]', "relative path"),
+        ('mcp = ["../bin/nv"]', "relative path"),
+        ('mcp = ["nv*"]', "the only glob"),
+        ('mcp = ["/bin/nv:/bin/other"]', "contains ':'"),
+    ],
+)
+def test_a_malformed_mcp_entry_is_a_named_error(tmp_path, value, match):
+    with pytest.raises(ValueError, match=match):
+        load(_spec_file(tmp_path, value + "\n"), egress=())
+
+
+def test_every_shipped_example_spec_loads():
+    """The examples are what a reader copies; keep them loadable."""
+    examples = sorted((Path(__file__).parents[1] / "examples").glob("*.toml"))
+    assert examples
+    for path in examples:
+        load(path, egress=())

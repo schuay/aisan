@@ -1,0 +1,30 @@
+# Copyright 2026 The aisan developers
+# SPDX-License-Identifier: MIT
+
+# Example: give an attended session an editor channel that an unattended one
+# must not have. Pass this file with `aisan claude --binds`, and pass only the
+# shared file to a scheduled run.
+#
+# A host client config lists every MCP server on the machine. Each box starts
+# only what its specs name here, so the split lives in which file a launch gets
+# rather than in the host config.
+
+include = [
+    "./depot_tools.toml",
+]
+
+# nvim-mcp reaches a broker socket on the host, which is the point when a human
+# is at the editor and a hole when nobody is. The box connects but cannot
+# unlink or replace the socket, so the directory is ro.
+ro = [
+    "~/misc/nvim-mcp",
+]
+
+mcp = [
+    # By server name, as the client config spells it.
+    "nvim",
+    # Or by the command, when the config name and the binary differ. A full
+    # path pins which binary a bare name would find on the box PATH.
+    "v8-mcp",
+    "~/.local/bin/bnz-mcp",
+]

@@ -31,10 +31,12 @@ from aisan.egress.openai_compat import OpenAICompatBackend
 from aisan.presets.opencode import opencode, opencode_binary
 from aisan.sandbox import BindOver, BindSpec
 from aisan.session import (
+    LaunchRefused,
     git_config_binds,
     interactive_parser,
     mcp_launcher_binds,
     parse_interactive_args,
+    resolve_launcher_flags,
     run_interactive,
     state_dir,
     terminal_env,
@@ -91,12 +93,25 @@ async def _main(argv: list[str]) -> int:
 
     # Keep session history outside the worktree.
     state = state_dir("opencode", repo)
-    mcp = opencode_host_mcp()
     mcp_config = state / "aisan-host-mcp.json"
 
     backend = OpenAICompatBackend(
         provider=args.provider, model=args.model, upstream=args.upstream
     )
+    try:
+        flags = resolve_launcher_flags(
+            repo,
+            base_egress=(backend,),
+            unshare_net=not args.net,
+            egress_profiles=args.egress,
+            grants=args.grant,
+            binds=args.binds,
+        )
+    except LaunchRefused as e:
+        print(e, file=sys.stderr)
+        return e.code
+    # The bind specs decide which host declarations this box may start.
+    mcp = opencode_host_mcp(allow=flags.mcp)
     spec = opencode(
         repo,
         state=state,
@@ -124,9 +139,7 @@ async def _main(argv: list[str]) -> int:
         # The outer sandbox provides the tool permission boundary.
         command=lambda _box: ["opencode", "--auto", *payload],
         binary=opencode_binary,
-        binds=args.binds,
-        egress_profiles=args.egress,
-        grants=args.grant,
+        flags=flags,
         explain_only=args.explain,
         prepare=(lambda: mcp.write(mcp_config)) if mcp.enabled else None,
         mcp=mcp,

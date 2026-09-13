@@ -26,11 +26,13 @@ from aisan.egress.openai_responses import (
 )
 from aisan.presets.codex import codex, codex_argv, codex_binary
 from aisan.session import (
+    LaunchRefused,
     git_config_binds,
     interactive_parser,
     mcp_launcher_binds,
     mirror_user_memory,
     parse_interactive_args,
+    resolve_launcher_flags,
     run_interactive,
     state_dir,
     terminal_env,
@@ -99,9 +101,22 @@ async def _main(argv: list[str]) -> int:
     args, payload = parse_args(argv)
     repo = Path(args.repo).resolve()
     state = state_dir("codex", repo)
-    mcp = codex_host_mcp()
     mcp_config = state / "aisan-host-mcp.config.toml"
     backend = CodexBackend(model=args.model, upstream=args.upstream)
+    try:
+        flags = resolve_launcher_flags(
+            repo,
+            base_egress=(backend,),
+            unshare_net=not args.net,
+            egress_profiles=args.egress,
+            grants=args.grant,
+            binds=args.binds,
+        )
+    except LaunchRefused as e:
+        print(e, file=sys.stderr)
+        return e.code
+    # The bind specs decide which host declarations this box may start.
+    mcp = codex_host_mcp(allow=flags.mcp)
     spec = codex(
         repo,
         state=state,
@@ -133,9 +148,7 @@ async def _main(argv: list[str]) -> int:
             overrides=backend.config_overrides(port=box.activation(backend).port),
         ),
         binary=codex_binary,
-        binds=args.binds,
-        egress_profiles=args.egress,
-        grants=args.grant,
+        flags=flags,
         explain_only=args.explain,
         prepare=prepare,
         mcp=mcp,

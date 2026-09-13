@@ -1,7 +1,7 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Load user-written bind specs from a five-key TOML format.
+"""Load user-written bind specs from a six-key TOML format.
 
 The format adds mounts without requiring users to copy and modify a launcher.
 Callers append the result to a preset, so these mounts follow the standard rule
@@ -19,6 +19,10 @@ that later entries shadow earlier ones::
     ]
     path = [                     # prepended to the box PATH
         "~/tooling",             # must be covered by a mount named above
+    ]
+    mcp = [                      # host MCP servers this box may start
+        "v8-mcp",                # the launcher binary by name ...
+        "~/tools/nvim-mcp/bin/nv",  # ... or by full path
     ]
     include = [                  # other spec files, expanded in place
         "./base-userbinds.toml", # BEFORE this file's own keys, so this
@@ -42,6 +46,25 @@ would lack a requested output location. Overlays are also mandatory because an
 absent shared tool cache can cause an offline rebuild to hang. Cases requiring
 different behavior use the Python API; the TOML format has no per-path
 `optional` setting.
+
+`mcp` names the host-declared MCP servers the box may start. Without it the
+box starts none. A host client config is one shared list that grows as tools
+are added for interactive work, and an unattended box should not gain a
+channel because of an entry written for an attended one.
+
+An entry matches a declaration by its config name, by the basename of its
+command, or by the command's full path. `~` expands; a relative path is
+rejected because the spec file's directory is not where a command resolves.
+A command admits every declaration that runs it, so a multiplexer such as
+`npx` admits each server it launches; name those by config name.
+The single entry `*` admits every local stdio declaration, which is the
+behavior from before this key existed. Entries union across the include tree,
+so a `*` anywhere in it admits everything.
+
+A full path selects, it does not mount. The launcher binds still come from
+`session_mcp`, under its tool-root and credential rules, and a spec can only
+narrow what the host already declares. A name here therefore carries no
+capability that an unfiltered import would not have given.
 
 `path` accepts only directories. Every entry must be covered by a mount from the
 merged include tree, so it adds no filesystem
@@ -97,20 +120,26 @@ def _refused_key_stores() -> tuple[Path, ...]:
 # paths. `path` adds no mount and must be covered by one of these entries.
 _MOUNT_KEYS = ("overlay", "ro", "rw")
 
-# Complete set of accepted keys. `include` names other spec files.
-_KEYS = (*_MOUNT_KEYS, "path", "include")
+# Complete set of accepted keys. `include` names other spec files, and `mcp`
+# names host MCP servers rather than paths.
+_KEYS = (*_MOUNT_KEYS, "path", "include", "mcp")
+
+# Admits every local stdio declaration. The format has no other glob.
+WILDCARD = "*"
 
 
 @dataclass(frozen=True)
 class UserSpec:
-    """The mounts and covered PATH entries loaded from one include tree.
+    """The mounts, covered PATH entries and MCP selectors of one include tree.
 
-    Callers apply the fields through `with_binds` and `with_path_prefix` after
-    parsing the file once.
+    Callers apply the mount fields through `with_binds` and `with_path_prefix`
+    after parsing the file once. `mcp` goes to `session_mcp`, which matches it
+    against the host declarations.
     """
 
     binds: list[BindSpec]
     path: tuple[Path, ...]
+    mcp: tuple[str, ...] = ()
 
 
 def load(path: Path, *, egress: tuple[Backend, ...]) -> UserSpec:
@@ -177,6 +206,7 @@ def _load(
 
     inner_binds: list[BindSpec] = []
     inner_dirs: list[Path] = []
+    inner_mcp: list[str] = []
     for spec_file in _entries(path, doc.get("include", []), "include"):
         # A file expanded through another branch is a duplicate. A file in the
         # active chain must reach `_load` so the cycle is reported.
@@ -189,6 +219,7 @@ def _load(
         inner = _load(spec_file, egress, [*chain, here], expanded)
         inner_binds += inner.binds
         inner_dirs += inner.path
+        inner_mcp += inner.mcp
 
     # Omitted keys represent empty lists.
     mounts = {key: _entries(path, doc.get(key, []), key) for key in _MOUNT_KEYS}
@@ -225,6 +256,10 @@ def _load(
     binds += [Bind(p, RW) for p in _dedup(mounts["rw"])]
 
     dirs = _dedup([*inner_dirs, *_entries(path, doc.get("path", []), "path")])
+    # Includes first, like mounts, so one spec can add to what it includes.
+    servers = tuple(
+        dict.fromkeys([*inner_mcp, *_mcp_entries(path, doc.get("mcp", []))])
+    )
     # Check PATH coverage once after merging. Per-file checks would make diamond
     # includes depend on which branch expanded the shared file first.
 
@@ -259,7 +294,7 @@ def _load(
             " a user bind may not name it, nor anything containing it or"
             " inside it"
         )
-    return UserSpec(binds, tuple(dirs))
+    return UserSpec(binds, tuple(dirs), servers)
 
 
 def _entries(path: Path, raw: object, key: str) -> list[Path]:
@@ -289,6 +324,37 @@ def _entries(path: Path, raw: object, key: str) -> list[Path]:
             p = path.parent / p
         out.append(p)
     return out
+
+
+def _mcp_entries(path: Path, raw: object) -> list[str]:
+    """Return validated MCP selectors, or raise a named `ValueError`.
+
+    Entries stay as written because `session_mcp` resolves them against the
+    host declarations and the box PATH. Only the spelling is checked here: a
+    relative path would otherwise look like it resolves from the spec file's
+    directory, which is not where a command is found.
+    """
+    if not isinstance(raw, list) or not all(
+        isinstance(e, str) and e.strip() for e in raw
+    ):
+        raise ValueError(f"{path}: mcp must be an array of non-empty strings")
+    for entry in raw:
+        if entry == WILDCARD:
+            continue
+        if WILDCARD in entry:
+            raise ValueError(
+                f"{path}: mcp entry {entry!r} contains {WILDCARD!r}; the only"
+                f" glob is the single entry {WILDCARD!r}, which admits every"
+                " local stdio server the host declares"
+            )
+        if os.pathsep in entry:
+            raise ValueError(f"{path}: mcp entry {entry!r} contains {os.pathsep!r}")
+        if "/" in entry and not Path(entry).expanduser().is_absolute():
+            raise ValueError(
+                f"{path}: mcp entry {entry!r} is a relative path -- name the"
+                " server, its command, or the command's absolute path"
+            )
+    return list(raw)
 
 
 def _dedup(paths: list[Path]) -> list[Path]:

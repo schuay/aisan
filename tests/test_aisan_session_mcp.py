@@ -17,12 +17,16 @@ from aisan import Box
 from aisan.presets.codex import codex, codex_argv, codex_binary
 from aisan.session import LaunchRefused, mcp_launcher_binds, mcp_notice
 from aisan.session_mcp import (
+    MCPAllowlist,
     SessionMCP,
     claude_host_mcp,
     codex_host_mcp,
     mcp_ro_binds,
     opencode_host_mcp,
 )
+
+# Admits every local stdio declaration, as a spec's `mcp = ["*"]` does.
+ANY = MCPAllowlist(("*",))
 
 
 def test_codex_import_keeps_local_servers_and_tool_policy(tmp_path):
@@ -34,7 +38,7 @@ def test_codex_import_keeps_local_servers_and_tool_policy(tmp_path):
         '[mcp_servers.disabled]\ncommand = "off-mcp"\nenabled = false\n'
     )
 
-    imported = codex_host_mcp(source)
+    imported = codex_host_mcp(source, allow=ANY)
     output = tmp_path / "state" / "aisan-host-mcp.config.toml"
     imported.write(output)
 
@@ -67,7 +71,7 @@ def test_claude_import_keeps_only_enabled_stdio_servers(tmp_path):
         )
     )
 
-    imported = claude_host_mcp(source)
+    imported = claude_host_mcp(source, allow=ANY)
 
     assert imported.commands == ("local-mcp",)
     assert imported.document == {
@@ -105,7 +109,7 @@ def test_opencode_import_parses_jsonc_and_keeps_only_local_servers(
     )
     monkeypatch.setenv("OPENCODE_CONFIG", str(source))
 
-    imported = opencode_host_mcp()
+    imported = opencode_host_mcp(allow=ANY)
 
     assert imported.commands == ("local-mcp",)
     assert imported.document == {
@@ -271,7 +275,7 @@ def test_missing_mcp_command_fails_before_the_box_owns_the_terminal(
 def test_real_codex_loads_the_generated_mcp_profile(tmp_path):
     source = tmp_path / "host-config.toml"
     source.write_text('[mcp_servers.local]\ncommand = "local-mcp"\n')
-    imported = codex_host_mcp(source)
+    imported = codex_host_mcp(source, allow=ANY)
     state = tmp_path / "state"
     imported.write(state / "aisan-host-mcp.config.toml")
 
@@ -346,7 +350,7 @@ async def test_real_codex_starts_an_imported_mcp_server_inside_the_box(
         '[mcp_servers.local]\ncommand = "local-mcp"\n'
         f"args = [{json.dumps(str(marker))}]\n"
     )
-    imported = codex_host_mcp(source)
+    imported = codex_host_mcp(source, allow=ANY)
     state = tmp_path / "state"
     imported.write(state / "config.toml")
     base = codex(
@@ -416,6 +420,174 @@ async def test_real_codex_starts_an_imported_mcp_server_inside_the_box(
     assert json.loads(marker.read_text()) == {"host_only_visible": False}
 
 
+def _claude_config(path, servers):
+    path.write_text(json.dumps({"mcpServers": servers}))
+    return path
+
+
+def test_a_box_that_names_no_server_starts_none(tmp_path):
+    source = _claude_config(
+        tmp_path / ".claude.json",
+        {"v8-utils": {"command": "v8-mcp"}, "nvim": {"command": "nv"}},
+    )
+
+    imported = claude_host_mcp(source)
+
+    assert not imported.enabled
+    assert imported.names == ()
+    assert imported.document == {"mcpServers": {}}
+    # The notice needs the command: it is one of the tokens that selects it.
+    assert imported.withheld == (("v8-utils", "v8-mcp"), ("nvim", "nv"))
+
+
+def test_an_entry_selects_by_config_name_or_by_command_basename(tmp_path):
+    source = _claude_config(
+        tmp_path / ".claude.json",
+        {
+            "v8-utils": {"command": "v8-mcp"},
+            "bnz": {"command": "bnz-mcp"},
+            "nvim": {"command": "nv"},
+        },
+    )
+
+    # The name the operator reads in the client and the binary that runs in the
+    # box usually differ, so both select.
+    assert claude_host_mcp(source, allow=MCPAllowlist(("v8-utils",))).names == (
+        "v8-utils",
+    )
+    by_command = claude_host_mcp(source, allow=MCPAllowlist(("bnz-mcp",)))
+    assert by_command.names == ("bnz",)
+    assert by_command.withheld == (("v8-utils", "v8-mcp"), ("nvim", "nv"))
+
+
+def test_entries_that_name_no_declaration_are_reported(tmp_path):
+    source = _claude_config(tmp_path / ".claude.json", {"nvim": {"command": "nv"}})
+
+    imported = claude_host_mcp(source, allow=MCPAllowlist(("nvim", "gone", "typo")))
+
+    assert imported.names == ("nvim",)
+    assert imported.unmatched == ("gone", "typo")
+
+
+def test_a_command_entry_admits_every_declaration_that_runs_it(tmp_path):
+    """A multiplexer command is not a selector; the config name is."""
+    source = _claude_config(
+        tmp_path / ".claude.json",
+        {
+            "mine": {"command": "npx", "args": ["-y", "@me/a"]},
+            "theirs": {"command": "npx", "args": ["-y", "@them/b"]},
+        },
+    )
+
+    assert claude_host_mcp(source, allow=MCPAllowlist(("npx",))).names == (
+        "mine",
+        "theirs",
+    )
+    assert claude_host_mcp(source, allow=MCPAllowlist(("mine",))).names == ("mine",)
+
+
+def test_a_remote_or_disabled_declaration_reads_as_unimportable_not_unknown(tmp_path):
+    source = _claude_config(
+        tmp_path / ".claude.json",
+        {
+            "linear": {"type": "sse", "url": "https://example.test"},
+            "off": {"command": "off-mcp", "enabled": False},
+        },
+    )
+
+    imported = claude_host_mcp(source, allow=MCPAllowlist(("linear", "off")))
+
+    assert imported.unmatched == ("linear", "off")
+    # Naming one of these is not a typo, and the notice must not imply it is.
+    notice = mcp_notice(imported)
+    assert "no local stdio server" in notice
+    assert "remote or disabled declaration is never imported" in notice
+
+
+def test_the_wildcard_is_never_reported_as_naming_nothing(tmp_path):
+    source = _claude_config(tmp_path / ".claude.json", {})
+
+    # A host that declares no server is not a mistake in the spec.
+    assert claude_host_mcp(source, allow=ANY).unmatched == ()
+    assert mcp_notice(claude_host_mcp(source, allow=ANY)) is None
+
+
+def test_a_full_path_entry_selects_one_binary_and_not_its_namesake(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    shim_dir = home / ".local" / "bin"
+    tool = home / "venvs" / "nvim-mcp"
+    shim_dir.mkdir(parents=True)
+    (tool / "bin").mkdir(parents=True)
+    exe = tool / "bin" / "nv"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    (shim_dir / "nv").symlink_to(exe)
+    decoy_dir = tmp_path / "elsewhere"
+    decoy_dir.mkdir()
+    decoy = decoy_dir / "nv"
+    decoy.write_text("#!/bin/sh\n")
+    decoy.chmod(0o755)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    monkeypatch.setenv("HOME", str(home))  # for `~` in an entry
+    source = _claude_config(tmp_path / ".claude.json", {"nvim": {"command": "nv"}})
+
+    # The shim on the search path, its target, and the `~` spelling are one
+    # binary; a different binary of the same name is not.
+    for entry in (str(shim_dir / "nv"), str(exe), "~/venvs/nvim-mcp/bin/nv"):
+        assert claude_host_mcp(source, allow=MCPAllowlist((entry,))).names == ("nvim",)
+    assert claude_host_mcp(source, allow=MCPAllowlist((str(decoy),))).names == ()
+
+
+def test_the_wildcard_admits_every_local_declaration_in_each_client(
+    tmp_path, monkeypatch
+):
+    claude = _claude_config(tmp_path / ".claude.json", {"a": {"command": "a-mcp"}})
+    codex = tmp_path / "config.toml"
+    codex.write_text('[mcp_servers.a]\ncommand = "a-mcp"\n')
+    opencode = tmp_path / "opencode.json"
+    opencode.write_text(
+        json.dumps({"mcp": {"a": {"type": "local", "command": ["a-mcp"]}}})
+    )
+
+    for imported in (
+        claude_host_mcp(claude, allow=ANY),
+        codex_host_mcp(codex, allow=ANY),
+        opencode_host_mcp(opencode, allow=ANY),
+    ):
+        assert imported.names == ("a",)
+        assert imported.withheld == ()
+    for denied in (
+        claude_host_mcp(claude),
+        codex_host_mcp(codex),
+        opencode_host_mcp(opencode),
+    ):
+        assert denied.names == ()
+        assert denied.withheld == (("a", "a-mcp"),)
+
+
+def test_the_notice_reports_withheld_servers_and_unnamed_entries():
+    config = SessionMCP(
+        document={},
+        commands=(),
+        kind="json",
+        withheld=(("nvim", "/opt/nvim-mcp/bin/nv"),),
+        unmatched=("typo",),
+    )
+
+    notice = mcp_notice(config)
+
+    assert "1 host MCP server(s) withheld" in notice
+    assert "nvim (/home/u/src/nvim-mcp/.venv/bin/nv)" in notice
+    assert "typo" in notice
+    assert "start inside the box" not in notice
+
+
+def test_the_notice_is_absent_when_the_host_declares_nothing():
+    assert mcp_notice(SessionMCP(document={}, commands=(), kind="json")) is None
+
+
 def test_the_import_notice_names_the_servers_and_the_env_carriers():
     config = SessionMCP(
         document={},
@@ -456,7 +628,7 @@ def test_imported_servers_report_their_env_carriers_per_client_key(tmp_path):
             }
         )
     )
-    claude = claude_host_mcp(claude_source)
+    claude = claude_host_mcp(claude_source, allow=ANY)
     assert claude.names == ("plain", "tokened", "empty-env")
     assert claude.env_names == ("tokened",)
 
@@ -475,6 +647,6 @@ def test_imported_servers_report_their_env_carriers_per_client_key(tmp_path):
             }
         )
     )
-    opencode = opencode_host_mcp(opencode_source)
+    opencode = opencode_host_mcp(opencode_source, allow=ANY)
     assert opencode.names == ("plain", "tokened")
     assert opencode.env_names == ("tokened",)

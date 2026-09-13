@@ -3,10 +3,16 @@
 
 """Import host MCP declarations into an isolated interactive session.
 
-Only local process transports are imported. Clients start them inside the box
-with its filesystem, environment, and network namespace. Arguments and
-environment values from each imported declaration are readable inside the box.
-Remote MCP declarations remain on the host.
+Only local process transports are imported, and only those a bind spec names
+through `MCPAllowlist`. A host client config is one list shared by every box,
+so importing it whole gives an unattended box whatever was added for an
+attended one. Clients start the selected servers inside the box with its
+filesystem, environment, and network namespace. Arguments and environment
+values from each imported declaration are readable inside the box. Remote MCP
+declarations remain on the host.
+
+Selection happens before `mcp_ro_binds` resolves anything, so a declaration
+this box does not want cannot refuse the launch by being unresolvable.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ import json
 import os
 import shutil
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -24,6 +31,92 @@ from .egress.anthropic import claude_config_dir
 from .egress.base import credential_overlap
 from .launch import interpreter_roots
 from .statedir import write_sealed
+from .userbinds import WILDCARD
+
+
+@dataclass(frozen=True)
+class MCPAllowlist:
+    """The host MCP servers a box may start, as written in its bind specs.
+
+    An entry matches a declaration by config name, by the basename of its
+    command, or by the command's full path. The name is what the operator
+    reads in the client; the command is what actually runs in the box, and the
+    two often differ.
+
+    A command entry admits every declaration that runs that binary. For a
+    multiplexer such as `npx` or `uvx` that is every server it launches,
+    including ones the host config gains later, because the arguments that
+    distinguish them are not matched. Only the config name selects exactly one
+    declaration.
+
+    A full path decides which binary the match and the launcher binds resolve
+    to. It does not decide what the client execs: a user spec's `path` entries
+    come earlier on the box PATH, so a directory mounted there can still
+    shadow a launcher of the same name.
+
+    The empty allowlist admits nothing.
+    """
+
+    entries: tuple[str, ...] = ()
+
+
+def _matches(entry: str, name: str, command: str, search_path: str) -> bool:
+    """Report whether one spec entry names this declaration."""
+    if entry in (WILDCARD, name):
+        return True
+    if "/" in entry or entry.startswith("~"):
+        return _same_binary(entry, command, search_path)
+    return Path(command).name == entry
+
+
+def _same_binary(entry: str, command: str, search_path: str) -> bool:
+    """Compare a full-path entry with the binary a declaration would run.
+
+    A launcher is usually a symlink into a tool root, so compare both the
+    spelling found on the search path and its target, and accept either
+    spelling from the spec. An unresolvable command matches nothing; only a
+    selected server's command has to resolve.
+    """
+    found = shutil.which(command, path=search_path)
+    if found is None:
+        return False
+    target = Path(entry).expanduser()
+    declared = Path(found)
+    return {target, target.resolve()} & {declared, declared.resolve()} != set()
+
+
+def _select(
+    servers: dict[str, dict[str, object]],
+    commands: Mapping[str, str],
+    allow: MCPAllowlist,
+    search_path: str | None = None,
+) -> tuple[dict[str, dict[str, object]], tuple[tuple[str, str], ...], tuple[str, ...]]:
+    """Split host declarations into the selected ones and the rest.
+
+    Also report entries that named no local stdio declaration, which covers a
+    typo as well as an entry naming a remote or disabled server. A per-tool
+    spec included on a host without that tool is normal, so this is a note
+    rather than a refusal. The wildcard is not a name and is never reported,
+    since a host that declares nothing is not a mistake in the spec.
+    """
+    path = search_path or mcp_search_path()
+    kept: dict[str, dict[str, object]] = {}
+    withheld: list[tuple[str, str]] = []
+    used: set[str] = set()
+    for name, server in servers.items():
+        command = commands[name]
+        hits = [e for e in allow.entries if _matches(e, name, command, path)]
+        used.update(hits)
+        if hits:
+            kept[name] = server
+        else:
+            withheld.append((name, command))
+    unmatched = tuple(e for e in allow.entries if e not in used and e != WILDCARD)
+    return kept, tuple(withheld), unmatched
+
+
+#: The default: a box that names no server starts none.
+DENY_ALL = MCPAllowlist()
 
 
 @dataclass(frozen=True)
@@ -37,6 +130,10 @@ class SessionMCP:
     names: tuple[str, ...] = ()
     #: Servers with environment values that may contain host credentials.
     env_names: tuple[str, ...] = ()
+    #: Declared but unselected servers, as (name, command), for the notice.
+    withheld: tuple[tuple[str, str], ...] = ()
+    #: Spec entries that named no declaration on this host.
+    unmatched: tuple[str, ...] = ()
 
     @property
     def enabled(self) -> bool:
@@ -53,51 +150,65 @@ class SessionMCP:
         write_sealed(path, text)
 
 
-def codex_host_mcp(path: Path | None = None) -> SessionMCP:
+def codex_host_mcp(
+    path: Path | None = None, *, allow: MCPAllowlist = DENY_ALL
+) -> SessionMCP:
     source = path or _codex_home() / "config.toml"
     data = _read_toml(source)
     servers = _table(data.get("mcp_servers"), source, "mcp_servers")
-    kept = {
+    local = {
         name: server
         for name, server in servers.items()
         if isinstance(server.get("command"), str)
         and server.get("enabled", True) is not False
     }
+    commands = {name: str(server["command"]) for name, server in local.items()}
+    kept, withheld, unmatched = _select(local, commands, allow)
     return SessionMCP(
         document={"mcp_servers": kept},
-        commands=tuple(str(server["command"]) for server in kept.values()),
+        commands=tuple(commands[name] for name in kept),
         kind="toml",
         names=tuple(kept),
         env_names=_env_names(kept, "env"),
+        withheld=withheld,
+        unmatched=unmatched,
     )
 
 
-def claude_host_mcp(path: Path | None = None) -> SessionMCP:
+def claude_host_mcp(
+    path: Path | None = None, *, allow: MCPAllowlist = DENY_ALL
+) -> SessionMCP:
     source = path or claude_config_file()
     data = _read_json(source)
     servers = _table(data.get("mcpServers"), source, "mcpServers")
-    kept = {
+    local = {
         name: server
         for name, server in servers.items()
         if server.get("type", "stdio") == "stdio"
         and isinstance(server.get("command"), str)
         and server.get("enabled", True) is not False
     }
+    commands = {name: str(server["command"]) for name, server in local.items()}
+    kept, withheld, unmatched = _select(local, commands, allow)
     return SessionMCP(
         document={"mcpServers": kept},
-        commands=tuple(str(server["command"]) for server in kept.values()),
+        commands=tuple(commands[name] for name in kept),
         kind="json",
         names=tuple(kept),
         env_names=_env_names(kept, "env"),
+        withheld=withheld,
+        unmatched=unmatched,
     )
 
 
-def opencode_host_mcp(path: Path | None = None) -> SessionMCP:
+def opencode_host_mcp(
+    path: Path | None = None, *, allow: MCPAllowlist = DENY_ALL
+) -> SessionMCP:
     source = path or _opencode_config_file()
     data = _read_jsonc(source)
     servers = _table(data.get("mcp"), source, "mcp")
-    kept: dict[str, dict[str, object]] = {}
-    commands: list[str] = []
+    local: dict[str, dict[str, object]] = {}
+    commands: dict[str, str] = {}
     for name, server in servers.items():
         command = server.get("command")
         if (
@@ -108,15 +219,18 @@ def opencode_host_mcp(path: Path | None = None) -> SessionMCP:
             or not isinstance(command[0], str)
         ):
             continue
-        kept[name] = server
-        commands.append(command[0])
+        local[name] = server
+        commands[name] = command[0]
+    kept, withheld, unmatched = _select(local, commands, allow)
     return SessionMCP(
         document={"mcp": kept},
-        commands=tuple(commands),
+        commands=tuple(commands[name] for name in kept),
         kind="json",
         names=tuple(kept),
         # OpenCode calls this field ``environment``; the other clients use ``env``.
         env_names=_env_names(kept, "environment"),
+        withheld=withheld,
+        unmatched=unmatched,
     )
 
 

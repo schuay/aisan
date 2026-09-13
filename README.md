@@ -27,7 +27,7 @@ The command starts an interactive Claude Code session. `aisan codex` and
   it. Local stdio MCP servers declared on the host are started inside the
   box, where they inherit its filesystem, cleared environment, and network
   namespace; remote MCP declarations and their authentication state stay on
-  the host.
+  the host. Only servers a bind spec names are started at all.
 
 The same three commands, run on the host and then from inside the box:
 
@@ -85,19 +85,29 @@ $ aisan claude /path/to/repo --explain
 ## User bind specs
 
 Presets cover the harness; `--binds FILE` (repeatable, TOML) covers your
-project. The keys are `ro`, `rw`, `overlay`, and `path` entries prepended to
-the box PATH:
+project. The keys are `ro`, `rw`, `overlay`, `path` entries prepended to the
+box PATH, and `mcp`:
 
 ```toml
 ro      = ["~/depot_tools"]
 overlay = ["~/.cache/vpython-root.1000"]
 path    = ["~/depot_tools"]
+mcp     = ["v8-mcp"]
 ```
 
 The `path` key grants no filesystem access. Each entry must be covered by a
 mount in the same file. `include` expands other spec files in place before the
 including file's keys, which makes precedence explicit.
 [`examples/depot_tools.toml`](examples/depot_tools.toml) shows a complete file.
+
+`mcp` names the host MCP servers this box may start, by server name, by the
+command, or by the command's full path; `["*"]` admits every local stdio
+declaration. A command admits every declaration that runs it, so name a
+server launched through `npx` or `uvx` by its server name. A box whose specs name none starts none, and the launcher says
+which it withheld. A host client config is one list shared by every box: an
+unattended box should not gain a channel to the outside because a server was
+added for interactive work.
+[`examples/mcp.toml`](examples/mcp.toml) shows the interactive-only split.
 
 ## As a library: unattended API jobs
 

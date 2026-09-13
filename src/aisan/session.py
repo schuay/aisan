@@ -15,17 +15,18 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import userbinds
 from .box import Box
-from .egress.base import PreflightError
+from .egress.base import Backend, EgressProfile, PreflightError
 from .explain import assembly_refusal, explain
 from .launch import exit_status
 from .presets import EGRESS_PROFILES, GRANTS
 from .sandbox import RO, Bind, BindOver, BindSpec
-from .session_mcp import SessionMCP, mcp_ro_binds
-from .spec import BoxSpec
+from .session_mcp import MCPAllowlist, SessionMCP, mcp_ro_binds
+from .spec import BoxSpec, Grant
 from .statedir import planted_credentials, prepare_state_dir, write_sealed
 
 _TERM_PASSTHROUGH = ("TERM", "COLORTERM", "LANG", "LC_ALL")
@@ -116,9 +117,10 @@ def interactive_parser(prog: str, executable: str) -> argparse.ArgumentParser:
         type=Path,
         metavar="FILE",
         action="append",
-        help="user bind spec, TOML (keys: ro, rw, overlay, path, include); appended"
-        " after the preset's binds, so these shadow. Repeatable, applied in"
-        " the order given (see aisan.userbinds)",
+        help="user bind spec, TOML (keys: ro, rw, overlay, path, mcp, include);"
+        " appended after the preset's binds, so these shadow. `mcp` names the"
+        " host MCP servers this box may start; without it, none do. Repeatable,"
+        " applied in the order given (see aisan.userbinds)",
     )
     parser.add_argument(
         "--egress",
@@ -162,25 +164,44 @@ def parse_interactive_args(
     return parser.parse_args(argv[:split]), argv[split + 1 :]
 
 
-def mcp_notice(mcp: SessionMCP) -> str:
-    """Describe the host MCP declarations copied into the box.
+def mcp_notice(mcp: SessionMCP) -> str | None:
+    """Describe what the host MCP declarations did in this box, or return None.
 
     Name servers that carry environment values because those values may include
-    credentials readable by the box.
+    credentials readable by the box. Report withheld servers too: a box that
+    names none is the default, and the operator otherwise has no sign that the
+    host declared any. Name each withheld server's command, since that is one
+    of the tokens a spec can select it by.
     """
-    lines = [
-        (
+    lines: list[str] = []
+    if mcp.enabled:
+        lines.append(
             f"NOTE: {len(mcp.names)} host MCP server(s) start inside the box:"
             f" {', '.join(mcp.names)}."
         )
-    ]
-    if mcp.env_names:
+        if mcp.env_names:
+            lines.append(
+                "      Declared environment values travel with them"
+                f" ({', '.join(mcp.env_names)}); any credential there is readable"
+                " in the box."
+            )
+    if mcp.withheld:
+        withheld = ", ".join(f"{name} ({command})" for name, command in mcp.withheld)
         lines.append(
-            "      Declared environment values travel with them"
-            f" ({', '.join(mcp.env_names)}); any credential there is readable"
-            " in the box."
+            f"NOTE: {len(mcp.withheld)} host MCP server(s) withheld; no bind"
+            f" spec names them: {withheld}."
         )
-    return "\n".join(lines)
+        lines.append(
+            "      Name one in a --binds spec's `mcp` key to start it in the"
+            " box, by server name, command, or the command's full path."
+        )
+    if mcp.unmatched:
+        lines.append(
+            "NOTE: bind spec `mcp` entries name no local stdio server this host"
+            f" declares: {', '.join(mcp.unmatched)}. Nothing starts for them;"
+            " a remote or disabled declaration is never imported."
+        )
+    return "\n".join(lines) or None
 
 
 def terminal_env() -> tuple[tuple[str, str], ...]:
@@ -190,21 +211,70 @@ def terminal_env() -> tuple[tuple[str, str], ...]:
     )
 
 
-def apply_launcher_flags(
-    spec: BoxSpec,
+@dataclass(frozen=True)
+class LauncherFlags:
+    """One launch's resolved ``--egress``, ``--grant`` and ``--binds`` inputs.
+
+    Reading is separate from applying because the MCP allowlist lives in the
+    bind specs and a launcher needs it before it builds a spec: the selected
+    servers decide which launcher binds and PATH entries the preset gets.
+    """
+
+    profiles: tuple[tuple[str, EgressProfile], ...] = ()
+    grants: tuple[Grant, ...] = ()
+    users: tuple[userbinds.UserSpec, ...] = ()
+    #: The spec files as written, for the `--explain` report.
+    files: tuple[Path, ...] = ()
+
+    @property
+    def mcp(self) -> MCPAllowlist:
+        """Return the MCP servers the bind specs name, in file order."""
+        return MCPAllowlist(
+            tuple(dict.fromkeys(entry for user in self.users for entry in user.mcp))
+        )
+
+    def apply(self, spec: BoxSpec) -> BoxSpec:
+        """Add the profiles, grants and user binds to ``spec``.
+
+        Apply them in that order so user bind files can shadow preset and grant
+        paths. Each item applies on its own because `with_path_prefix` prepends
+        and `with_env` appends: composing a flattened list instead would
+        reverse PATH precedence between two grants.
+        """
+        for name, profile in self.profiles:
+            try:
+                spec = spec.with_egress(list(profile.backends))
+            except ValueError as e:
+                raise LaunchRefused(f"--egress {name}: {e}") from e
+            spec = spec.with_binds(list(profile.binds))
+        for grant in self.grants:
+            spec = (
+                spec.with_binds(list(grant.binds))
+                .with_path_prefix(grant.path)
+                .with_env(grant.env)
+            )
+        for user in self.users:
+            spec = spec.with_binds(user.binds).with_path_prefix(user.path)
+        return spec
+
+
+def resolve_launcher_flags(
     repo: Path,
     *,
+    base_egress: tuple[Backend, ...],
+    unshare_net: bool,
     egress_profiles: list[str] | None,
     grants: list[str] | None,
     binds: list[Path] | None,
-) -> BoxSpec:
-    """Apply egress profiles, grants, and user bind files to ``spec``.
+) -> LauncherFlags:
+    """Read the launcher's profile, grant and bind-spec flags.
 
-    Apply them in that order so user bind files can shadow preset and grant
-    paths. Report unavailable optional profiles and raise ``LaunchRefused`` for
-    invalid configuration.
+    Report unavailable optional profiles and grants, and raise `LaunchRefused`
+    for invalid configuration. Nothing is composed here; `LauncherFlags.apply`
+    does that once the launcher has a spec.
     """
     # Ignore duplicate names from repeatable flags.
+    profiles: list[tuple[str, EgressProfile]] = []
     for name in dict.fromkeys(egress_profiles or []):
         profile = EGRESS_PROFILES[name](repo)
         if not profile:
@@ -217,21 +287,18 @@ def apply_launcher_flags(
             continue
         # Each backend defines whether its transport is safe on host loopback.
         stranded = [b.name for b in profile.backends if not b.supports_shared_net]
-        if stranded and not spec.unshare_net:
+        if stranded and not unshare_net:
             raise LaunchRefused(
                 f"--egress {name} needs the box's own network: {', '.join(stranded)}"
                 " would otherwise answer on the host's loopback, unauthenticated."
                 " Drop --net."
             )
-        try:
-            spec = spec.with_egress(list(profile.backends))
-        except ValueError as e:
-            raise LaunchRefused(f"--egress {name}: {e}") from e
-        spec = spec.with_binds(list(profile.binds))
         if profile.notice:
             print(profile.notice, file=sys.stderr)
+        profiles.append((name, profile))
 
     # Apply each named grant once.
+    resolved: list[Grant] = []
     for name in dict.fromkeys(grants or []):
         grant = GRANTS[name]()
         if not grant:
@@ -242,23 +309,23 @@ def apply_launcher_flags(
                 file=sys.stderr,
             )
             continue
-        spec = (
-            spec.with_binds(list(grant.binds))
-            .with_path_prefix(grant.path)
-            .with_env(grant.env)
-        )
+        resolved.append(grant)
 
+    # The credential guard needs every backend the box will carry.
+    egress = (*base_egress, *(b for _, profile in profiles for b in profile.backends))
     # Later files take precedence, matching bind order within one file.
+    users: list[userbinds.UserSpec] = []
     for spec_file in binds or []:
         try:
-            user = userbinds.load(spec_file, egress=spec.egress)
+            users.append(userbinds.load(spec_file, egress=egress))
         except ValueError as e:
             raise LaunchRefused(f"binds: {e}") from e
         except OSError as e:
             # Report unreadable files through the same launcher refusal path.
             raise LaunchRefused(f"binds: cannot read {spec_file}: {e}") from e
-        spec = spec.with_binds(user.binds).with_path_prefix(user.path)
-    return spec
+    return LauncherFlags(
+        tuple(profiles), tuple(resolved), tuple(users), tuple(binds or [])
+    )
 
 
 async def run_interactive(
@@ -271,27 +338,24 @@ async def run_interactive(
     spec: BoxSpec,
     command: Callable[[Box], list[str]],
     binary: Callable[[], Path | None],
-    binds: list[Path] | None,
-    egress_profiles: list[str] | None,
-    grants: list[str] | None,
+    flags: LauncherFlags,
     explain_only: bool,
     prepare: Callable[[], None] | None = None,
     mcp: SessionMCP | None = None,
 ) -> int:
     """Apply launcher options, then explain or run the box."""
     try:
-        spec = apply_launcher_flags(
-            spec, repo, egress_profiles=egress_profiles, grants=grants, binds=binds
-        )
+        spec = flags.apply(spec)
     except LaunchRefused as e:
         print(e, file=sys.stderr)
         return e.code
 
+    notice = mcp_notice(mcp) if mcp is not None else None
     box = Box(spec, box_id=box_id(client, repo))
     if explain_only:
         # The report shows mounts; this notice attributes them to MCP imports.
-        if mcp is not None and mcp.enabled:
-            print(mcp_notice(mcp), file=sys.stderr)
+        if notice:
+            print(notice, file=sys.stderr)
         with staged_directory(state), box.staged():
             print(
                 explain(
@@ -299,7 +363,12 @@ async def run_interactive(
                     inputs=(
                         ("harness", harness),
                         ("repo", str(repo)),
-                        ("binds", ", ".join(map(str, binds)) if binds else "(none)"),
+                        (
+                            "binds",
+                            ", ".join(map(str, flags.files))
+                            if flags.files
+                            else "(none)",
+                        ),
                     ),
                     color=sys.stdout.isatty(),
                 ),
@@ -343,8 +412,8 @@ async def run_interactive(
                     " credential files are not mounted.",
                     file=sys.stderr,
                 )
-            if mcp is not None and mcp.enabled:
-                print(mcp_notice(mcp), file=sys.stderr)
+            if notice:
+                print(notice, file=sys.stderr)
             done = await asyncio.to_thread(
                 subprocess.run,
                 box.command(command(box)),

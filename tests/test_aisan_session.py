@@ -15,6 +15,7 @@ import pytest
 
 from aisan.sandbox import RO, Bind, BindOver
 from aisan.session import (
+    LauncherFlags,
     box_id,
     git_config_binds,
     run_interactive,
@@ -339,11 +340,43 @@ def test_an_uninstalled_mcp_server_is_refused_not_a_traceback(tmp_path, command)
     _write_host_mcp(tmp_path / "home", "aisan-definitely-absent-mcp")
     repo = tmp_path / "repo"
     repo.mkdir()
-    result = _cli(tmp_path, [command, "--explain", str(repo)])
+    binds = tmp_path / "mcp.toml"
+    binds.write_text('mcp = ["ghost"]\n')
+    result = _cli(tmp_path, [command, "--explain", "--binds", str(binds), str(repo)])
 
     assert result.returncode == 2, result.stdout + result.stderr
     assert "aisan-definitely-absent-mcp" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_an_unselected_server_cannot_refuse_the_launch(tmp_path, command):
+    """Only a server this box asked for has to resolve on the host."""
+    _write_host_mcp(tmp_path / "home", "aisan-definitely-absent-mcp")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = _cli(tmp_path, [command, "--explain", str(repo)])
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "withheld" in result.stderr
+    assert "ghost (aisan-definitely-absent-mcp)" in result.stderr
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_a_spec_entry_naming_no_declaration_is_a_note_not_a_refusal(tmp_path, command):
+
+    _write_host_mcp(tmp_path / "home", "aisan-definitely-absent-mcp")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    binds = tmp_path / "mcp.toml"
+    binds.write_text('mcp = ["typoed-name"]\n')
+
+    result = _cli(tmp_path, [command, "--explain", "--binds", str(binds), str(repo)])
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "typoed-name" in result.stderr
+    assert "name no local stdio server this host declares" in result.stderr
 
 
 def test_a_missing_client_binary_is_reported_on_stderr(tmp_path):
@@ -397,9 +430,7 @@ async def test_the_run_path_routes_an_assembly_refusal_to_return_2(
         spec=object(),
         command=lambda _box: ["claude"],
         binary=lambda: repo / "claude",
-        binds=None,
-        egress_profiles=None,
-        grants=None,
+        flags=LauncherFlags(),
         explain_only=False,
     )
     assert code == 2
@@ -444,9 +475,7 @@ async def test_the_run_path_normalizes_a_signal_death_to_shell_status(
         spec=_Spec(),
         command=lambda _box: ["claude"],
         binary=lambda: repo / "claude",
-        binds=None,
-        egress_profiles=None,
-        grants=None,
+        flags=LauncherFlags(),
         explain_only=False,
     )
     assert code == 143
@@ -505,9 +534,7 @@ async def test_a_credential_written_inside_a_box_refuses_the_next_launch(
         spec=_Spec(),
         command=lambda _box: [client],
         binary=lambda: repo / client,
-        binds=None,
-        egress_profiles=None,
-        grants=None,
+        flags=LauncherFlags(),
         explain_only=False,
     )
 

@@ -28,11 +28,13 @@ from pathlib import Path
 from aisan.egress.anthropic import DEFAULT_UPSTREAM, PLACEHOLDER_KEY, AnthropicBackend
 from aisan.presets.claude_code import claude_code, claude_code_binary
 from aisan.session import (
+    LaunchRefused,
     git_config_binds,
     interactive_parser,
     mcp_launcher_binds,
     mirror_user_memory,
     parse_interactive_args,
+    resolve_launcher_flags,
     run_interactive,
     state_dir,
     terminal_env,
@@ -167,7 +169,6 @@ async def _main(argv: list[str]) -> int:
 
     # Keep session history outside the worktree.
     state = state_dir("claude", repo)
-    mcp = claude_host_mcp()
     mcp_config = state / "aisan-host-mcp.json"
 
     # Require an explicit billing choice. Read the key from the environment so
@@ -182,6 +183,20 @@ async def _main(argv: list[str]) -> int:
             )
             return 2
     backend = AnthropicBackend(upstream=args.upstream, api_key=api_key)
+    try:
+        flags = resolve_launcher_flags(
+            repo,
+            base_egress=(backend,),
+            unshare_net=not args.net,
+            egress_profiles=args.egress,
+            grants=args.grant,
+            binds=args.binds,
+        )
+    except LaunchRefused as e:
+        print(e, file=sys.stderr)
+        return e.code
+    # The bind specs decide which host declarations this box may start.
+    mcp = claude_host_mcp(allow=flags.mcp)
     spec = claude_code(
         repo,
         state=state,
@@ -219,9 +234,7 @@ async def _main(argv: list[str]) -> int:
         spec=spec,
         command=lambda _box: command,
         binary=claude_code_binary,
-        binds=args.binds,
-        egress_profiles=args.egress,
-        grants=args.grant,
+        flags=flags,
         explain_only=args.explain,
         prepare=prepare,
         mcp=mcp,

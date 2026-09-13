@@ -392,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     import sys
 
     from .presets import EGRESS_PROFILES, GRANTS, PRESETS
-    from .session import LaunchRefused, apply_launcher_flags
+    from .session import LaunchRefused, resolve_launcher_flags
 
     p = argparse.ArgumentParser(prog="aisan explain")
     p.add_argument("preset", choices=sorted(PRESETS))
@@ -432,9 +432,16 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     spec = PRESETS[args.preset](root)
     try:
-        spec = apply_launcher_flags(
-            spec, root, egress_profiles=args.egress, grants=args.grant, binds=args.binds
-        )
+        # This command explains a preset, which imports no MCP declarations, so
+        # a spec file's `mcp` key has nothing to select here.
+        spec = resolve_launcher_flags(
+            root,
+            base_egress=spec.egress,
+            unshare_net=spec.unshare_net,
+            egress_profiles=args.egress,
+            grants=args.grant,
+            binds=args.binds,
+        ).apply(spec)
     except LaunchRefused as e:
         print(e, file=sys.stderr)
         return e.code
