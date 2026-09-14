@@ -71,6 +71,37 @@ def test_the_config_dir_is_optional(tmp_path):
     assert all(Path(b.path) != tmp_path / "config" for b in _spec(tmp_path).binds)
 
 
+def test_host_skills_mount_inside_the_redirected_config_dir(tmp_path):
+    """Claude Code reads `$CLAUDE_CONFIG_DIR/skills`, never `~/.claude/skills`."""
+    skills = tmp_path / "host-skills"
+    (skills / "demo").mkdir(parents=True)
+    (skills / "demo" / "SKILL.md").write_text("---\nname: demo\n---\n")
+    state = tmp_path / "state"
+
+    mounts = Box(_spec(tmp_path, skills=skills), box_id="t").mounts()
+    at_state = [m for m in mounts if m.dst == state]
+    at_skills = [m for m in mounts if m.dst == state / "skills"]
+
+    assert [(m.op, m.src) for m in at_skills] == [("ro", skills)]
+    # The state bind is writable, so the skills mount must come after it.
+    assert mounts.index(at_skills[0]) > mounts.index(at_state[-1])
+
+
+def test_the_skills_mount_point_is_created_on_the_host(tmp_path):
+    skills = tmp_path / "host-skills"
+    skills.mkdir()
+    ensured = {e.path: e.is_dir for e in _spec(tmp_path, skills=skills).ensure}
+    assert ensured[tmp_path / "state" / "skills"] is True
+
+
+def test_skills_are_optional(tmp_path):
+    spec = _spec(tmp_path)
+    assert all(
+        getattr(b, "dst", None) != tmp_path / "state" / "skills" for b in spec.binds
+    )
+    assert all(e.path != tmp_path / "state" / "skills" for e in spec.ensure)
+
+
 def test_the_box_is_told_the_state_dir_through_claude_config_dir(tmp_path):
     env = dict(_spec(tmp_path).env)
     assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "state")

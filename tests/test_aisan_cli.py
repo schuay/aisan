@@ -346,6 +346,20 @@ def test_the_seeded_sources_are_the_hosts_own_user_memory():
     assert Path.home() / ".codex" / "AGENTS.md" == codex.USER_MEMORY
 
 
+def test_claude_takes_its_skills_from_the_hosts_own_directory(tmp_path):
+    claude = importlib.import_module("aisan.cli.claude")
+    assert Path.home() / ".claude" / "skills" == claude.USER_SKILLS
+
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    assert claude.user_skills(skills) == skills
+    assert claude.user_skills(tmp_path / "absent") is None
+    # A file at the skills path would make the mandatory bind-over fail.
+    plain = tmp_path / "plain"
+    plain.write_text("")
+    assert claude.user_skills(plain) is None
+
+
 def test_opencode_mounts_user_memory_where_the_box_reads_it(tmp_path):
     opencode = importlib.import_module("aisan.cli.opencode")
     source = tmp_path / "AGENTS.md"

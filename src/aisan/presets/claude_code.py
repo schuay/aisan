@@ -9,9 +9,11 @@ Claude Code sends a per-box placeholder to the local relay, which replaces it
 with the host OAuth token or API key.
 
 ``CLAUDE_CONFIG_DIR`` points to writable session state and user instructions.
-Operator settings remain read-only through ``--settings``. Standard installs
-need no extra runtime bind because Claude Code and Node live beneath the
-read-only ``/usr`` mount; other installations must supply ``extra_ro`` paths.
+User skills are read-only inside it, because Claude Code resolves them under
+that variable rather than ``~/.claude``. Operator settings remain read-only
+through ``--settings``. Standard installs need no extra runtime bind because
+Claude Code and Node live beneath the read-only ``/usr`` mount; other
+installations must supply ``extra_ro`` paths.
 
 Interactive use with bubblewrap's ``--new-session`` remains untested. The
 measurements for this profile used headless ``-p`` turns.
@@ -24,7 +26,7 @@ from pathlib import Path
 
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
-from ..sandbox import RO, RW, Bind, BindSpec
+from ..sandbox import RO, RW, Bind, BindOver, BindSpec, EnsurePath
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
 
 # Return promptly when the relay is unavailable. Testing reached no answer after
@@ -73,6 +75,7 @@ def claude_code(
     state: Path,
     egress: tuple[Backend, ...] = (),
     config: Path | None = None,
+    skills: Path | None = None,
     extra_ro: tuple[Path, ...] = (),
     extra_env: tuple[tuple[str, str], ...] = (),
     unshare_net: bool = True,
@@ -99,6 +102,10 @@ def claude_code(
         # The writable root already exposes an embedded state directory and
         # allows Claude Code to create it after assembly.
         *([] if state.is_relative_to(worktree) else [Bind(state, RW)]),
+        # Claude Code 2.1.259 resolves user skills as `$CLAUDE_CONFIG_DIR/skills`,
+        # so host skills reach the box only inside the state directory. Keep them
+        # read-only there, above the writable state bind.
+        *([BindOver(skills, state / "skills")] if skills is not None else []),
     ]
     return BoxSpec(
         root=worktree,
@@ -120,7 +127,12 @@ def claude_code(
         ),
         egress=egress,
         unshare_net=unshare_net,
-        ensure=git_host_files(worktree, pin_packs=unshare_net),
+        ensure=(
+            *git_host_files(worktree, pin_packs=unshare_net),
+            # bwrap would otherwise create this mount point on the host through
+            # the writable state bind.
+            *([EnsurePath(state / "skills", is_dir=True)] if skills else []),
+        ),
         limits=Limits(
             memory_max=memory_max,
             cpu_quota=cpu_quota,

@@ -43,6 +43,17 @@ from aisan.session_mcp import claude_config_file, claude_host_mcp, mcp_search_pa
 from aisan.statedir import read_sealed_object, write_sealed
 
 USER_MEMORY = Path.home() / ".claude" / "CLAUDE.md"
+USER_SKILLS = Path.home() / ".claude" / "skills"
+
+
+def user_skills(source: Path = USER_SKILLS) -> Path | None:
+    """Return the host skills directory to mount, or ``None`` when absent.
+
+    Claude Code reads user skills from ``$CLAUDE_CONFIG_DIR/skills``, which the
+    box redirects to its state directory, so a bind at the host path is never
+    consulted. Skipping a missing source keeps hosts without skills launchable.
+    """
+    return source if source.is_dir() else None
 
 
 def host_config() -> Path:
@@ -201,6 +212,7 @@ async def _main(argv: list[str]) -> int:
         repo,
         state=state,
         egress=(backend,),
+        skills=user_skills(),
         extra_ro=mcp_launcher_binds(mcp),
         extra_env=(
             # Include mounted home launchers when MCP is enabled.
