@@ -8,6 +8,12 @@ worktrees remain hidden. Launcher flags are parsed without abbreviations.
 Arguments after ``--`` pass directly to Claude Code after the fixed permission
 mode. User bind files apply after preset binds.
 
+The host's ``~/.claude/settings.json`` mounts read-only and arrives as the
+``--settings`` flag layer, where its ``deny`` rules still bind a session the
+fixed ``bypassPermissions`` mode would otherwise auto-approve. Host skills
+mount inside the box's config directory. ``--no-user-settings`` drops the
+settings half.
+
 Usage: aisan claude [repo] [flags] -- [claude args...]
 
 ``--api-key`` uses ``ANTHROPIC_API_KEY`` instead of the host Claude Code login.
@@ -44,6 +50,19 @@ from aisan.statedir import read_sealed_object, write_sealed
 
 USER_MEMORY = Path.home() / ".claude" / "CLAUDE.md"
 USER_SKILLS = Path.home() / ".claude" / "skills"
+USER_SETTINGS = Path.home() / ".claude" / "settings.json"
+
+
+def user_settings(source: Path = USER_SETTINGS) -> Path | None:
+    """Return the host settings file to mount and pass, or ``None`` if absent.
+
+    The box seeds its own ``$CLAUDE_CONFIG_DIR/settings.json``, so the host file
+    reaches a session only as the flag layer. Under ``bypassPermissions`` that
+    layer's ``allow`` rules are inert and its ``deny`` rules still apply, which
+    is what keeps a networked box from reaching outward services the sandbox
+    cannot contain.
+    """
+    return source if source.is_file() else None
 
 
 def user_skills(source: Path = USER_SKILLS) -> Path | None:
@@ -154,6 +173,23 @@ def seed_user_memory(state: Path, source: Path) -> None:
     mirror_user_memory(source, state / "CLAUDE.md")
 
 
+def claude_command(
+    *, mcp_config: Path | None, settings: Path | None, payload: list[str]
+) -> list[str]:
+    """Build the interactive command, launcher flags first.
+
+    The payload goes last because Claude Code accepts a repeated ``--settings``
+    and takes the final one, so an explicit flag there shadows the launcher's.
+    """
+    command = ["claude"]
+    if mcp_config is not None:
+        command += ["--mcp-config", str(mcp_config)]
+    command += ["--permission-mode", "bypassPermissions"]
+    if settings is not None:
+        command += ["--settings", str(settings)]
+    return [*command, *payload]
+
+
 def parse_args(argv: list[str]):
     parser = interactive_parser("aisan claude", "claude")
     parser.add_argument(
@@ -164,6 +200,12 @@ def parse_args(argv: list[str]):
         ),
         help="Anthropic API base URL (default: $AISAN_CLAUDE_UPSTREAM, then the"
         f" legacy $AISAN_UPSTREAM, then {DEFAULT_UPSTREAM})",
+    )
+    parser.add_argument(
+        "--no-user-settings",
+        action="store_true",
+        help="omit the host's ~/.claude/settings.json, which the launcher"
+        " otherwise mounts read-only and passes as --settings",
     )
     parser.add_argument(
         "--api-key",
@@ -208,10 +250,12 @@ async def _main(argv: list[str]) -> int:
         return e.code
     # The bind specs decide which host declarations this box may start.
     mcp = claude_host_mcp(allow=flags.mcp)
+    settings = None if args.no_user_settings else user_settings()
     spec = claude_code(
         repo,
         state=state,
         egress=(backend,),
+        config=settings,
         skills=user_skills(),
         extra_ro=mcp_launcher_binds(mcp),
         extra_env=(
@@ -225,10 +269,11 @@ async def _main(argv: list[str]) -> int:
     )
     # Bind the XDG-aware Git config file without its credential directory.
     spec = spec.with_binds(git_config_binds())
-    command = ["claude"]
-    if mcp.enabled:
-        command += ["--mcp-config", str(mcp_config)]
-    command += ["--permission-mode", "bypassPermissions", *payload]
+    command = claude_command(
+        mcp_config=mcp_config if mcp.enabled else None,
+        settings=settings,
+        payload=payload,
+    )
 
     def prepare() -> None:
         seed_state(state)

@@ -346,6 +346,42 @@ def test_the_seeded_sources_are_the_hosts_own_user_memory():
     assert Path.home() / ".codex" / "AGENTS.md" == codex.USER_MEMORY
 
 
+def test_the_claude_payload_can_shadow_the_launchers_settings(tmp_path):
+    claude = importlib.import_module("aisan.cli.claude")
+    host = tmp_path / "host.json"
+    mine = tmp_path / "mine.json"
+
+    assert claude.claude_command(mcp_config=None, settings=host, payload=[]) == [
+        "claude",
+        "--permission-mode",
+        "bypassPermissions",
+        "--settings",
+        str(host),
+    ]
+    # Claude Code takes the last --settings, and the payload is always last.
+    shadowed = claude.claude_command(
+        mcp_config=None, settings=host, payload=["--settings", str(mine)]
+    )
+    assert shadowed[-4:] == ["--settings", str(host), "--settings", str(mine)]
+
+    bare = claude.claude_command(mcp_config=None, settings=None, payload=["-p", "hi"])
+    assert "--settings" not in bare
+    assert bare[-2:] == ["-p", "hi"]
+
+
+def test_claude_mounts_and_passes_the_hosts_own_settings(tmp_path):
+    claude = importlib.import_module("aisan.cli.claude")
+    assert Path.home() / ".claude" / "settings.json" == claude.USER_SETTINGS
+
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}")
+    assert claude.user_settings(settings) == settings
+    assert claude.user_settings(tmp_path / "absent.json") is None
+    # A directory would make the mandatory read-only bind fail.
+    (tmp_path / "dir.json").mkdir()
+    assert claude.user_settings(tmp_path / "dir.json") is None
+
+
 def test_codex_prefers_the_skill_root_its_own_installer_writes(tmp_path):
     codex = importlib.import_module("aisan.cli.codex")
     assert (
