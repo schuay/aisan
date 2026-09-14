@@ -346,6 +346,22 @@ def test_the_seeded_sources_are_the_hosts_own_user_memory():
     assert Path.home() / ".codex" / "AGENTS.md" == codex.USER_MEMORY
 
 
+def test_codex_prefers_the_skill_root_its_own_installer_writes(tmp_path):
+    codex = importlib.import_module("aisan.cli.codex")
+    assert (
+        Path.home() / ".codex" / "skills",
+        Path.home() / ".agents" / "skills",
+    ) == codex.USER_SKILLS
+
+    codex_skills = tmp_path / "codex-skills"
+    agents_skills = tmp_path / "agents-skills"
+    agents_skills.mkdir()
+    assert codex.user_skills((codex_skills, agents_skills)) == agents_skills
+    codex_skills.mkdir()
+    assert codex.user_skills((codex_skills, agents_skills)) == codex_skills
+    assert codex.user_skills((tmp_path / "absent",)) is None
+
+
 def test_claude_takes_its_skills_from_the_hosts_own_directory(tmp_path):
     claude = importlib.import_module("aisan.cli.claude")
     assert Path.home() / ".claude" / "skills" == claude.USER_SKILLS

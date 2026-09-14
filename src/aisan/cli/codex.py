@@ -41,6 +41,22 @@ from aisan.session_mcp import SessionMCP, codex_host_mcp, mcp_search_path
 from aisan.statedir import read_sealed_text
 
 USER_MEMORY = Path.home() / ".codex" / "AGENTS.md"
+# Codex scans both as user-level skill roots. The first is where its own
+# skill-installer writes, so it wins when a host has skills in both.
+USER_SKILLS = (
+    Path.home() / ".codex" / "skills",
+    Path.home() / ".agents" / "skills",
+)
+
+
+def user_skills(sources: tuple[Path, ...] = USER_SKILLS) -> Path | None:
+    """Return the host skills directory to mount, or ``None`` when absent.
+
+    ``CODEX_HOME`` is the box's state directory, so host skills below the
+    host's ``~/.codex`` are never read. Only one source can be mounted, because
+    the box exposes a single directory at the root Codex reads.
+    """
+    return next((s for s in sources if s.is_dir()), None)
 
 
 def seed_user_memory(state: Path, source: Path) -> None:
@@ -121,6 +137,7 @@ async def _main(argv: list[str]) -> int:
         repo,
         state=state,
         egress=(backend,),
+        skills=user_skills(),
         extra_ro=mcp_launcher_binds(mcp),
         extra_env=(("PATH", mcp_search_path(local_bin=mcp.enabled)), *terminal_env()),
         unshare_net=not args.net,

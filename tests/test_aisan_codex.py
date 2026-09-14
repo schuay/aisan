@@ -299,6 +299,42 @@ def test_codex_preset_is_registered_and_uses_isolated_state(tmp_path):
     ]
 
 
+def test_host_skills_mount_at_the_home_skill_root(tmp_path):
+    """`$CODEX_HOME/skills` holds the writable `.system` bundle, so use the
+    home root Codex also scans."""
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    skills = tmp_path / "host-skills"
+    (skills / "demo").mkdir(parents=True)
+
+    spec = codex(worktree, state=state, skills=skills)
+    mounts = Box(
+        dataclasses.replace(
+            spec, limits=dataclasses.replace(spec.limits, use_cgroup=False)
+        ),
+        box_id="t",
+    ).mounts()
+    at_home_root = [m for m in mounts if m.dst == Path.home() / ".agents" / "skills"]
+
+    assert [(m.op, m.src) for m in at_home_root] == [("ro", skills)]
+    # Codex writes its bundled skills there; a mount would make that fail.
+    assert all(m.dst != state / "skills" for m in mounts)
+    # Nothing to create on the host: the destination sits in the home tmpfs.
+    assert all(e.path != Path.home() / ".agents" / "skills" for e in spec.ensure)
+
+
+def test_codex_skills_are_optional(tmp_path):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    spec = codex(worktree, state=tmp_path / "state")
+    assert all(
+        getattr(b, "dst", None) != Path.home() / ".agents" / "skills"
+        for b in spec.binds
+    )
+
+
 def test_responses_port_is_distinct_from_every_existing_backend():
     from aisan.egress.anthropic import PORT as ANTHROPIC_PORT
     from aisan.egress.openai_compat import PORT as COMPAT_PORT

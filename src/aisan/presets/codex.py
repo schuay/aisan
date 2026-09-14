@@ -9,6 +9,10 @@ Responses backend supplies highest-precedence CLI config for the provider route
 and disabled non-model egress. The user config remains writable for repository
 trust and TUI preferences.
 
+Host skills mount at ``~/.agents/skills``, one of the roots Codex scans. The
+other user-level root, ``$CODEX_HOME/skills``, is where Codex materializes its
+own bundled skills under ``.system``, so it must stay writable.
+
 The box doesn't mount the host credential. Codex sends a placeholder bearer to
 the local backend, which replaces it with the host credential.
 
@@ -23,7 +27,7 @@ from pathlib import Path
 
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
-from ..sandbox import RO, RW, Bind, BindSpec
+from ..sandbox import RO, RW, Bind, BindOver, BindSpec
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
 
 
@@ -51,6 +55,7 @@ def codex(
     *,
     state: Path,
     egress: tuple[Backend, ...] = (),
+    skills: Path | None = None,
     extra_ro: tuple[Path, ...] = (),
     extra_env: tuple[tuple[str, str], ...] = (),
     unshare_net: bool = True,
@@ -73,6 +78,10 @@ def codex(
         # those objects from the shared store.
         *git_binds(worktree, pin_packs=unshare_net),
         *([] if state.is_relative_to(worktree) else [Bind(state, RW)]),
+        # Codex 0.153.4 scans `$CODEX_HOME/skills`, `~/.agents/skills`, and two
+        # worktree roots. Use the home root: it needs no host mount point under
+        # the state directory, and it leaves the `.system` bundle writable.
+        *([BindOver(skills, home / ".agents" / "skills")] if skills else []),
     ]
     return BoxSpec(
         root=worktree,
