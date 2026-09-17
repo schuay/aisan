@@ -213,7 +213,7 @@ _SYSTEM_RO_BINDS = tuple(
 )
 
 
-def _system_ro_roots() -> frozenset[Path]:
+def system_ro_roots() -> frozenset[Path]:
     """Return identity-mounted system roots that need no second read-only bind.
 
     Re-emitting one after a tmpfs could expose host contents again. This once
@@ -394,7 +394,7 @@ class Sandbox:
                 elif not spec.path.exists():
                     raise FileNotFoundError(f"bind source missing: {spec.path}")
                 if spec.mode is RO:
-                    if spec.path.resolve() in _system_ro_roots():
+                    if spec.path.resolve() in system_ro_roots():
                         continue
                     if any(_strict_ancestor(spec.path, t) for t in tmpfs_mounts):
                         early.append(spec)

@@ -167,7 +167,8 @@ def test_runtime_dir_rejects_symlink_and_permissive_existing_path(tmp_path):
     finally:
         d.unlink(missing_ok=True)
 
-    d.mkdir(mode=0o755)
+    d.mkdir()
+    d.chmod(0o755)  # mkdir's mode is trimmed by the umask
     try:
         with pytest.raises(PermissionError, match="too permissive"):
             prepare_runtime_dir(box_id)
@@ -812,3 +813,25 @@ def test_consumer_ro_pins_inside_the_root_are_untouched(tmp_path, monkeypatch):
     assert ("ro", pin) in ops
 
     assert ops.index(("rw", tmp_path)) < ops.index(("ro", pin))
+
+
+@needs_bwrap
+async def test_the_launcher_interpreter_imports_aisan_inside_a_real_box(tmp_path):
+    # The launcher binds are a prediction about the box. Only a launch confirms
+    # it: a home tmpfs can mask a bound ancestor, so a bind list that looks
+    # complete can still leave the package unimportable.
+    root = tmp_path / "work"
+    root.mkdir()
+    spec = _spec(root, tmpfs=((str(Path.home()), 64 << 20),))
+    box = Box(spec, box_id=str(tmp_path / "launcher-import"))
+    async with box:
+        argv = box.command(
+            [
+                sys.executable,
+                "-c",
+                "import aisan, aisan.launch; print(aisan.launch.__file__)",
+            ]
+        )
+        result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("launch.py")

@@ -16,6 +16,7 @@ import pytest
 
 from aisan import launch as launch_mod
 from aisan.launch import (
+    interpreter_chain_dirs,
     interpreter_roots,
     launch_prefix,
     launcher_binds,
@@ -66,26 +67,62 @@ async def test_shared_mode_injects_client_env_then_execs(tmp_path, monkeypatch):
     assert seen["env"]["AISAN_TEST_TOKEN"] == "secret"
 
 
-def test_launcher_binds_cover_the_venv_and_every_interpreter_hop():
+def test_launcher_binds_cover_both_interpreter_prefixes_and_the_link_chain():
 
     binds = launcher_binds()
     paths = [Path(str(b.path)) for b in binds]
-    venv = Path(sys.executable).parent.parent
-    assert paths[0] == venv
+    assert paths[0] == Path(sys.prefix)
+    assert Path(sys.base_prefix) in paths
     assert all(b.mode is RO for b in binds)
-    for root in interpreter_roots(Path(sys.executable)):
-        assert root in paths
+    for hop in interpreter_chain_dirs(Path(sys.executable)):
+        assert hop in paths
 
 
-def test_launcher_binds_do_not_guess_a_venv_for_a_system_interpreter(tmp_path):
+def test_launcher_binds_omit_paths_the_system_surface_already_mounts(tmp_path):
 
     usr = tmp_path / "usr" / "bin"
     usr.mkdir(parents=True)
     py = usr / "python3"
     py.write_text("")
-    binds = [Path(str(b.path)) for b in launcher_binds(py)]
-    assert binds.count(tmp_path / "usr") == 1
+    # A system interpreter reports the system prefix for both values.
+    binds = [
+        Path(str(b.path)) for b in launcher_binds(py, (Path("/usr"), Path("/usr")))
+    ]
+    assert Path("/usr") not in binds
+    assert usr in binds, "the link chain still needs its own directory"
     assert len(binds) == len(set(binds))
+
+
+def test_launcher_binds_reach_source_masked_by_a_later_tmpfs(tmp_path, monkeypatch):
+
+    # A checkout whose path lies under an interpreter prefix by name only. The
+    # box masks the tree between them, so prefix containment cannot stand in for
+    # readability and the source bind must be emitted regardless.
+    prefix = tmp_path / "prefix"
+    (prefix / "bin").mkdir(parents=True)
+    py = prefix / "bin" / "python3"
+    py.write_text("")
+    own = prefix / "nested" / "checkout" / "src"
+    own.mkdir(parents=True)
+    monkeypatch.setattr(launch_mod, "own_source_root", lambda: own)
+    binds = [Path(str(b.path)) for b in launcher_binds(py, (prefix, prefix))]
+    assert own in binds
+
+
+def test_launcher_binds_do_not_claim_the_home_directory_as_a_prefix(tmp_path):
+
+    # An interpreter reached through a personal link farm sits at <home>/bin/x,
+    # whose parent-of-parent is the home directory. Binding that would shadow
+    # the box's home tmpfs and every profile would be refused.
+    farm = tmp_path / "bin"
+    farm.mkdir()
+    py = farm / "python3"
+    py.write_text("")
+    binds = [
+        Path(str(b.path)) for b in launcher_binds(py, (Path("/usr"), Path("/usr")))
+    ]
+    assert tmp_path not in binds
+    assert farm in binds
 
 
 def test_launcher_binds_carry_this_package_and_no_other_editable_tree():

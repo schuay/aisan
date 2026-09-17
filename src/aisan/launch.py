@@ -26,7 +26,7 @@ from pathlib import Path
 
 from .proxy import relay
 from .runtime import CLIENT_ENV_NAME, read_client_env, read_manifest
-from .sandbox import RO, Bind, BindSpec
+from .sandbox import RO, Bind, BindSpec, system_ro_roots
 
 # Forward terminal and supervisor termination signals to the payload.
 _FORWARD = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
@@ -35,9 +35,14 @@ _FORWARD = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 def interpreter_roots(python: Path) -> list[Path]:
     """Return every root traversed by an interpreter symlink chain.
 
-    uv may connect a venv interpreter to a versioned installation through an
-    unversioned directory symlink. Binding only the resolved target leaves that
-    intermediate name absent from the box, so bind every hop.
+    Each root is inferred from path depth, assuming ``<root>/bin/<exe>``. The
+    assumption holds for an installation prefix and fails for a link farm such
+    as a personal ``~/bin``, where the inferred root is the home directory. The
+    two are indistinguishable by shape, so a caller must establish that the
+    executable really sits in a prefix before trusting the result.
+
+    Use this only for a foreign interpreter, whose ``sys.prefix`` cannot be read
+    without executing it. `launcher_binds` asks its own interpreter instead.
     """
     roots: list[Path] = []
     seen: set[Path] = set()
@@ -63,6 +68,35 @@ def interpreter_roots(python: Path) -> list[Path]:
     return roots
 
 
+def interpreter_chain_dirs(python: Path) -> list[Path]:
+    """Return the directory holding every name on an interpreter's link chain.
+
+    ``exec`` resolves the chain inside the box, so each name on it must exist at
+    its own path. A prefix bind covers the hops beneath it; a hop through an
+    unrelated directory has no other mount and would fail with ENOENT.
+
+    Directory symlinks in intermediate components need no entry of their own: a
+    bind resolves its source, so the hop's directory carries the target's
+    contents to the path the chain names.
+    """
+    dirs: list[Path] = []
+    seen: set[Path] = set()
+
+    p = python
+    for _ in range(10):  # Bound cycles and unexpectedly long chains.
+        try:
+            if p.parent not in seen:
+                seen.add(p.parent)
+                dirs.append(p.parent)
+            if not p.is_symlink():
+                break
+            target = Path(os.readlink(p))
+            p = target if target.is_absolute() else (p.parent / target)
+        except OSError:
+            break
+    return dirs
+
+
 def own_source_root() -> Path | None:
     """This package's own source tree, when it is installed editable.
 
@@ -81,29 +115,50 @@ def _in_site_packages(path: Path) -> bool:
     return any(part in ("site-packages", "dist-packages") for part in path.parts)
 
 
-def launcher_binds(python: Path | None = None) -> list[BindSpec]:
+def launcher_binds(
+    python: Path | None = None,
+    prefixes: tuple[Path, Path] | None = None,
+) -> list[BindSpec]:
     """Return read-only binds for the in-box aisan launcher.
 
-    The launcher runs inside the box and requires its interpreter, venv, and
-    imported source even when the payload doesn't use Python. Including these
-    binds in the launcher policy avoids relying on payload-specific mounts.
+    The launcher runs inside the box and requires its interpreter, that
+    interpreter's runtime trees, and its imported source even when the payload
+    doesn't use Python. Including these binds in the launcher policy avoids
+    relying on payload-specific mounts.
 
-    The binds cover the unresolved venv, the interpreter symlink chain, and the
-    package source root for editable installations.
+    Two separate requirements produce the list:
 
-    ``pyvenv.cfg`` distinguishes a venv from a system interpreter whose parent
-    directory is already covered by ``interpreter_roots``.
+    * ``exec`` walks the interpreter's symlink chain, so every name on it must
+      exist in the box. `interpreter_chain_dirs` supplies those directories.
+    * CPython locates its stdlib, ``pyvenv.cfg``, and site-packages under
+      ``sys.prefix`` and ``sys.base_prefix``. Read both from the interpreter
+      rather than inferring a root from path depth: the same computation runs
+      again in the box, and it keeps an unresolved intermediate path that a
+      resolved target would drop.
+
+    Omit a path the fixed system surface already mounts. Re-declaring one adds
+    no mount, so leaving it in would misreport the policy.
+
+    Always bind `own_source_root`. Asking whether another bind already covers it
+    would compare path prefixes, and containment does not answer whether a path
+    is readable: a later tmpfs can mask a bound ancestor. One nested read-only
+    bind costs less than a predicate that cannot be right.
+
+    `prefixes` overrides the interpreter's own report so a test can describe a
+    layout without installing one. Production reads `sys`.
     """
     exe = python or Path(sys.executable)
-    venv = exe.parent.parent
-    binds = [Bind(venv, RO)] if (venv / "pyvenv.cfg").is_file() else []
-    covered = {Path(b.path) for b in binds}
-    for root in interpreter_roots(exe):
-        if root not in covered:
-            covered.add(root)
-            binds.append(Bind(root, RO))
+    prefix, base = prefixes or (Path(sys.prefix), Path(sys.base_prefix))
+    system = system_ro_roots()
+    binds: list[BindSpec] = []
+    seen: set[Path] = set()
+    for path in (prefix, base, *interpreter_chain_dirs(exe)):
+        if path in seen or path in system:
+            continue
+        seen.add(path)
+        binds.append(Bind(path, RO))
     own = own_source_root()
-    if own is not None and not any(own.is_relative_to(p) for p in covered):
+    if own is not None:
         binds.append(Bind(own, RO))
     return binds
 
