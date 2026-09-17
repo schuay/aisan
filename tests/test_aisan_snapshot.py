@@ -65,6 +65,20 @@ def pinned_host(tmp_path, monkeypatch):
     depot.mkdir()
     monkeypatch.setattr(preset.shutil, "which", lambda cmd: str(depot / cmd))
 
+    # Pin the launcher layout. These binds vary in number as well as in path
+    # across installations, so the snapshot needs a fixed layout rather than an
+    # elision in the report.
+    launch = importlib.import_module("aisan.launch")
+    from aisan.sandbox import RO, Bind
+
+    prefix = tmp_path / "aisan-prefix"
+    (prefix / "bin").mkdir(parents=True)
+    src = tmp_path / "aisan-src"
+    src.mkdir()
+    monkeypatch.setattr(
+        launch, "launcher_binds", lambda: [Bind(prefix, RO), Bind(src, RO)]
+    )
+
     opencode = importlib.import_module("aisan.presets.opencode")
     catalog = depot.parent / "opencode" / "models.json"
     catalog.parent.mkdir(parents=True)
@@ -91,6 +105,8 @@ def _report(
             (depot, "<DEPOT_TOOLS>"),
             (depot.parent / "vpython-cache", "<VPYTHON_CACHE>"),
             (depot.parent / "opencode", "<OPENCODE_CACHE>"),
+            (depot.parent / "aisan-prefix", "<AISAN PREFIX>"),
+            (depot.parent / "aisan-src", "<AISAN SRC>"),
             *extra_paths,
         ),
     )

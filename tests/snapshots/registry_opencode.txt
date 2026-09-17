@@ -29,7 +29,8 @@
   [..] ro-pin    <MAIN>/.git/worktrees/wt/config.worktree
   [..] ro-pin    <MAIN>/.git/objects/pack
   [..] ro-sub    <HOME>/.cache/opencode/models.json
-  <AISAN RUNTIME>
+  [..] ro        <AISAN PREFIX>
+  [..] ro        <AISAN SRC>
   [..] seal-ro   <MAIN>/.git/worktrees
   [..] seal-ro   <AISAN PRIVATE>
 
@@ -142,7 +143,12 @@
   --ro-bind
   <OPENCODE_CACHE>/models.json
   <HOME>/.cache/opencode/models.json
-  <AISAN RUNTIME>
+  --ro-bind
+  <AISAN PREFIX>
+  <AISAN PREFIX>
+  --ro-bind
+  <AISAN SRC>
+  <AISAN SRC>
   --tmpfs
   <AISAN PRIVATE>
   --remount-ro

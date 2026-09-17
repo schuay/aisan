@@ -29,7 +29,8 @@
   [..] ro-pin    <MAIN>/.git/worktrees/wt/config.worktree
   [..] ro-pin    <MAIN>/.git/objects/pack
   [..] rw        <STATE>
-  <AISAN RUNTIME>
+  [..] ro        <AISAN PREFIX>
+  [..] ro        <AISAN SRC>
   [..] ro        <AISAN PRIVATE>/proxy-16a0eeb0791b6c92
   [..] seal-ro   <MAIN>/.git/worktrees
   [..] seal-ro   <AISAN PRIVATE>
@@ -141,7 +142,12 @@
   --bind
   <STATE>
   <STATE>
-  <AISAN RUNTIME>
+  --ro-bind
+  <AISAN PREFIX>
+  <AISAN PREFIX>
+  --ro-bind
+  <AISAN SRC>
+  <AISAN SRC>
   --tmpfs
   <AISAN PRIVATE>
   --ro-bind

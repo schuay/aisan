@@ -314,34 +314,6 @@ def explain(
     return out.getvalue()
 
 
-_AISAN_MARK = "  <AISAN RUNTIME>"
-
-
-def _collapse_aisan_runtime(text: str) -> str:
-    """Replace aisan runtime bind lines with one stable marker.
-
-    Runtime binds depend on installation layout and appear in every box. Query
-    ``launcher_binds`` so only paths added by ``Box`` are collapsed.
-    """
-    from .launch import launcher_binds
-
-    paths = {str(b.path) for b in launcher_binds()}
-    lines = text.split("\n")
-    drop = [any(ln.endswith(p) for p in paths) for ln in lines]
-    for i, dropped in enumerate(drop):
-        # Remove the bind flag with its source and destination lines.
-        if dropped and i and lines[i - 1].strip() in ("--ro-bind", "--bind"):
-            drop[i - 1] = True
-    out: list[str] = []
-    # ``drop`` contains one entry per input line.
-    for line, dropped in zip(lines, drop, strict=True):
-        if not dropped:
-            out.append(line)
-        elif not out or out[-1] != _AISAN_MARK:
-            out.append(_AISAN_MARK)
-    return "\n".join(out)
-
-
 def normalise(
     text: str,
     *,
@@ -351,14 +323,16 @@ def normalise(
     """Replace host-specific report paths with stable snapshot placeholders.
 
     Normalize home, temp, private root, checkout, runtime, interpreter, caller
-    paths, and mount indices. Preserve mount order, kinds, sizes, environment
-    values, and bubblewrap flags because they define the policy. Apply path
-    replacements longest first so nested caller paths retain their own labels.
+    paths, and mount indices. Preserve every mount line, its order, kind, and
+    size, plus environment values and bubblewrap flags, because they define the
+    policy. Apply path replacements longest first so nested caller paths retain
+    their own labels.
     """
     import re
     import sys
     import tempfile
 
+    from .launch import own_source_root
     from .private import private_root
     from .spec import NESTING_ENV
 
@@ -366,8 +340,13 @@ def normalise(
 
     subs = [
         *((str(Path(p).resolve()), name) for p, name in paths),
-        # Interpreter paths vary with the aisan installation layout.
+        # Interpreter paths vary with the aisan installation layout. Label them
+        # rather than eliding the binds: a reader of this report must be able to
+        # see every mount the box receives, including the system surface.
         (str(Path(sys.executable)), "<AISAN PYTHON>"),
+        (str(Path(sys.prefix)), "<AISAN PREFIX>"),
+        (str(Path(sys.base_prefix)), "<AISAN BASE PREFIX>"),
+        (str(own_source_root()), "<AISAN SRC>") if own_source_root() else None,
         (str(root.resolve()), "<ROOT>") if root else None,
         (str(Path.home()), "<HOME>"),
         (str(private_root()), "<AISAN PRIVATE>"),
@@ -375,7 +354,6 @@ def normalise(
         (_NESTED_ROOT, "<AISAN NESTED ROOT>"),
         (tempfile.gettempdir(), "<TMP>"),
     ]
-    text = _collapse_aisan_runtime(text)
     # Replace nested paths before their parents.
     for pair in sorted([s for s in subs if s], key=lambda s: -len(s[0])):
         text = text.replace(*pair)

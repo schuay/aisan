@@ -197,24 +197,37 @@ def test_normalise_blanks_the_mount_index_but_not_the_order(tmp_path):
     assert normalise(text) == "  [..] rw-root  /a\n  [..] seal-ro  /b\n"
 
 
-def test_normalise_collapses_aisans_own_runtime_binds():
+def test_normalise_labels_the_runtime_binds_without_hiding_any_line():
+    import sys
 
-    from aisan.launch import launcher_binds
+    from aisan.launch import own_source_root
 
-    paths = [str(b.path) for b in launcher_binds()]
-    assert len(paths) > 1, "the collapse is only interesting for a run of lines"
+    paths = [str(Path(sys.prefix)), str(Path(sys.base_prefix))]
     lines = "".join(f"  [ {i:>2}] ro       {p}\n" for i, p in enumerate(paths))
     out = normalise(f"  [ 10] rw-root  /a\n{lines}  [ 99] seal-ro  /b\n")
-    assert out == "  [..] rw-root  /a\n  <AISAN RUNTIME>\n  [..] seal-ro  /b\n"
+    assert out.count("\n") == 4, f"a mount line went missing:\n{out}"
+    assert "<AISAN PREFIX>" in out
+    assert "<AISAN BASE PREFIX>" in out
+    assert own_source_root() is None or "<AISAN SRC>" in normalise(
+        f"  [  0] ro       {own_source_root()}\n"
+    )
 
 
-def test_normalise_drops_the_bind_flag_with_the_path_it_names():
+def test_normalise_removes_no_line_from_a_report():
 
+    # The report is the audit, so normalisation may rename a path but never drop
+    # a mount. Runtime binds are included because eliding them once swallowed
+    # the fixed system surface on a host where the two overlapped.
     from aisan.launch import launcher_binds
 
-    p = str(launcher_binds()[0].path)
-    out = normalise(f"  --ro-bind\n  {p}\n  {p}\n  --unshare-net\n")
-    assert out == "  <AISAN RUNTIME>\n  --unshare-net\n"
+    runtime = "".join(
+        f"  --ro-bind\n  {b.path}\n  {b.path}\n" for b in launcher_binds()
+    )
+    text = f"  --ro-bind\n  /usr\n  /usr\n{runtime}  --ro-bind\n  /etc\n  /etc\n"
+    out = normalise(text)
+    assert out.count("\n") == text.count("\n"), f"a line went missing:\n{out}"
+    assert "\n  /usr\n  /usr\n" in out
+    assert "\n  /etc\n  /etc\n" in out
 
 
 def test_the_package_does_not_re_export_the_renderer():
