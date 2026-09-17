@@ -72,8 +72,10 @@ def interpreter_chain_dirs(python: Path) -> list[Path]:
     """Return the directory holding every name on an interpreter's link chain.
 
     ``exec`` resolves the chain inside the box, so each name on it must exist at
-    its own path. A prefix bind covers the hops beneath it; a hop through an
-    unrelated directory has no other mount and would fail with ENOENT.
+    its own path. A hop through a directory outside every prefix has no other
+    mount and would fail with ENOENT. Hops beneath a prefix are returned too:
+    binding one twice is harmless, and whether the prefix bind reaches it is a
+    question about the whole mount list that this function cannot answer.
 
     Directory symlinks in intermediate components need no entry of their own: a
     bind resolves its source, so the hop's directory carries the target's
@@ -153,7 +155,8 @@ def launcher_binds(
     binds: list[BindSpec] = []
     seen: set[Path] = set()
     for path in (prefix, base, *interpreter_chain_dirs(exe)):
-        if path in seen or path in system:
+        # Match by resolved path, as `Sandbox` does when it drops the same binds.
+        if path in seen or path.resolve() in system:
             continue
         seen.add(path)
         binds.append(Bind(path, RO))

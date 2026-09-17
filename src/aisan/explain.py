@@ -334,18 +334,29 @@ def normalise(
 
     from .launch import own_source_root
     from .private import private_root
+    from .sandbox import system_ro_roots
     from .spec import NESTING_ENV
 
     _NESTED_ROOT = NESTING_ENV["AISAN_PRIVATE_ROOT"]
 
+    # Interpreter prefixes vary with the aisan installation layout. Label them
+    # rather than eliding the binds: a reader of this report must be able to
+    # see every mount the box receives, including the system surface. A prefix
+    # that is itself a system root gets no label, or every path under it would
+    # be rewritten and the system surface would disappear from the report.
+    prefixes = [
+        (Path(p), name)
+        for p, name in (
+            (sys.prefix, "<AISAN PREFIX>"),
+            (sys.base_prefix, "<AISAN BASE PREFIX>"),
+        )
+        if Path(p).resolve() not in system_ro_roots()
+    ]
+
     subs = [
         *((str(Path(p).resolve()), name) for p, name in paths),
-        # Interpreter paths vary with the aisan installation layout. Label them
-        # rather than eliding the binds: a reader of this report must be able to
-        # see every mount the box receives, including the system surface.
         (str(Path(sys.executable)), "<AISAN PYTHON>"),
-        (str(Path(sys.prefix)), "<AISAN PREFIX>"),
-        (str(Path(sys.base_prefix)), "<AISAN BASE PREFIX>"),
+        *((str(p), name) for p, name in prefixes),
         (str(own_source_root()), "<AISAN SRC>") if own_source_root() else None,
         (str(root.resolve()), "<ROOT>") if root else None,
         (str(Path.home()), "<HOME>"),

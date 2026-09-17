@@ -197,12 +197,16 @@ def test_normalise_blanks_the_mount_index_but_not_the_order(tmp_path):
     assert normalise(text) == "  [..] rw-root  /a\n  [..] seal-ro  /b\n"
 
 
-def test_normalise_labels_the_runtime_binds_without_hiding_any_line():
+def test_normalise_labels_the_runtime_binds_without_hiding_any_line(
+    tmp_path, monkeypatch
+):
     import sys
 
     from aisan.launch import own_source_root
 
-    paths = [str(Path(sys.prefix)), str(Path(sys.base_prefix))]
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+    paths = [sys.prefix, sys.base_prefix]
     lines = "".join(f"  [ {i:>2}] ro       {p}\n" for i, p in enumerate(paths))
     out = normalise(f"  [ 10] rw-root  /a\n{lines}  [ 99] seal-ro  /b\n")
     assert out.count("\n") == 4, f"a mount line went missing:\n{out}"
@@ -228,6 +232,21 @@ def test_normalise_removes_no_line_from_a_report():
     assert out.count("\n") == text.count("\n"), f"a line went missing:\n{out}"
     assert "\n  /usr\n  /usr\n" in out
     assert "\n  /etc\n  /etc\n" in out
+
+
+def test_normalise_leaves_a_system_root_alone_when_it_is_a_prefix(monkeypatch):
+    import sys
+
+    # A venv created from the distro interpreter reports the system root as
+    # its base prefix. Labelling it would rewrite every path under /usr,
+    # including the fixed system surface the report exists to show.
+    monkeypatch.setattr(sys, "prefix", "/usr")
+    monkeypatch.setattr(sys, "base_prefix", "/usr")
+    text = "  --ro-bind\n  /usr\n  /usr\n  [  3] ro       /usr/bin/tool\n"
+    assert (
+        normalise(text)
+        == "  --ro-bind\n  /usr\n  /usr\n  [..] ro       /usr/bin/tool\n"
+    )
 
 
 def test_the_package_does_not_re_export_the_renderer():

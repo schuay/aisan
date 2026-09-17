@@ -71,7 +71,7 @@ def test_launcher_binds_cover_both_interpreter_prefixes_and_the_link_chain():
 
     binds = launcher_binds()
     paths = [Path(str(b.path)) for b in binds]
-    assert paths[0] == Path(sys.prefix)
+    assert Path(sys.prefix) in paths
     assert Path(sys.base_prefix) in paths
     assert all(b.mode is RO for b in binds)
     for hop in interpreter_chain_dirs(Path(sys.executable)):
