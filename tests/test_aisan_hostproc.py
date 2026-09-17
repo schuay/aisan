@@ -50,7 +50,8 @@ def test_private_root_rejects_unsafe_existing_paths(tmp_path, monkeypatch):
         private_mod.prepare_private_dir(private_mod.host_child_root())
 
     private.unlink()
-    private.mkdir(mode=0o755)
+    private.mkdir()
+    private.chmod(0o755)  # mkdir's mode is trimmed by the umask
     with pytest.raises(PermissionError, match="too permissive"):
         private_mod.prepare_private_dir(private_mod.host_child_root())
 

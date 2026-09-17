@@ -35,7 +35,9 @@ def test_prepare_state_dir_is_private(tmp_path):
 def test_prepare_state_dir_tightens_a_stale_world_readable_dir(tmp_path):
 
     state = tmp_path / "state"
-    state.mkdir(mode=0o755)
+    state.mkdir()
+    # chmod, not mkdir's mode argument: the umask would trim it.
+    state.chmod(0o755)
     assert stat.S_IMODE(state.lstat().st_mode) == 0o755
     prepare_state_dir(state)
     assert stat.S_IMODE(state.lstat().st_mode) == 0o700
