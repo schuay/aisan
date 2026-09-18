@@ -55,6 +55,7 @@ def _spec(root: Path, *, egress=(), **kw) -> BoxSpec:
         egress=tuple(egress),
         unshare_net=kw.get("unshare_net", bool(egress)),
         limits=kw.get("limits", Limits(use_cgroup=False)),
+        ensure=kw.get("ensure", ()),
     )
 
 
@@ -832,6 +833,31 @@ def test_a_writable_spec_bind_covers_a_launcher_path_the_root_does_not(
 
     assert tools / "venv" not in {m.dst for m in mounts if m.op == "ro"}
     assert tools in {m.dst for m in mounts if m.op == "rw"}
+
+
+def test_an_ensure_path_refuses_a_symlinked_component_the_box_could_plant(
+    tmp_path,
+):
+    from contextlib import ExitStack
+
+    from aisan.sandbox import EnsurePath
+
+    root = tmp_path / "root"
+    git = root / ".git"
+    git.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    # The box replaced a directory under its writable root with a link, and
+    # the next staging would otherwise create the guard source through it.
+    (git / "objects").symlink_to(elsewhere)
+    spec = _spec(
+        root, ensure=(EnsurePath(git / "objects" / "info" / "alternates", False),)
+    )
+    box = Box(spec, box_id=str(tmp_path / "j"))
+
+    with ExitStack() as stack, pytest.raises(ValueError, match="symlink"):
+        box._ensure_host_paths(stack)
+    assert list(elsewhere.iterdir()) == []
 
 
 def test_a_writable_symlink_does_not_cover_its_target(tmp_path, monkeypatch):

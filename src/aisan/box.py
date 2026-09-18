@@ -128,6 +128,16 @@ class Box:
         created_dirs: list[Path] = []
 
         def ensure_dir(d: Path) -> None:
+            # `mkdir(parents=True)` follows a symlink in any component, so a
+            # box that replaced a directory on this path with a link would
+            # have the next staging create the guard source wherever the link
+            # points. Refuse a symlinked component inside anything the box can
+            # write; components above that are the host's own.
+            for p in (d, *d.parents):
+                if _rw_grant_covers(p, self.spec) and p.is_symlink():
+                    raise ValueError(
+                        f"{p} is a symlink; refusing to create {d} through it"
+                    )
             cursor = d
             while not cursor.exists():
                 created_dirs.append(cursor)
