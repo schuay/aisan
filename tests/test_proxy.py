@@ -665,9 +665,13 @@ async def test_a_box_cannot_choose_its_own_session_id(tmp_path):
     assert got[_SESSION_HEADER] == "ours"
 
 
-async def test_gemini_requests_carry_no_session_id(tmp_path):
-    got = await _forwarded_headers(tmp_path, f"{BASE}/cachedContents")
-    assert _SESSION_HEADER not in got
+async def test_gemini_requests_carry_the_same_session_id(tmp_path):
+    """Gemini's cache is implicit, but it is still held by one replica; a turn
+    routed elsewhere reads nothing back."""
+    got = await _forwarded_headers(
+        tmp_path, f"{BASE}/cachedContents", session_id="box-session"
+    )
+    assert got[_SESSION_HEADER] == "box-session"
 
 
 async def test_no_session_header_means_no_affinity_at_all(tmp_path):

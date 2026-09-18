@@ -11,8 +11,10 @@ patterns keep requests within those resources. Gemini and Anthropic models use
 separate routes and body policies, selected by the pattern that matched.
 
 No request headers pass through. The proxy builds its own headers and can add a
-per-box session ID for cache affinity. Dropping the client's session ID prevents
-the box from choosing an upstream routing key.
+per-box session ID for cache affinity, on both dialects: Claude's explicit
+prefix cache and Gemini's implicit one are each served by the replica that
+holds the prefix. Dropping the client's session ID prevents the box from
+choosing an upstream routing key.
 
 Body policy permits only operations executed inside the box. Server-side search,
 URL retrieval, and referenced file data could otherwise bypass ``unshare_net``.
@@ -344,8 +346,7 @@ def make_app(
             "Authorization": f"Bearer {await token()}",
             "Content-Type": "application/json",
         }
-        if session_header and dialect == "anthropic":
-            # Only Anthropic routes use explicit session affinity.
+        if session_header:
             headers[session_header] = vertex_session
         session = request.app[_SESSION]
         url = f"{upstream}{request.path_qs}"

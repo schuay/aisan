@@ -104,7 +104,8 @@ class VertexBackend(Backend):
         self._models = models
         # Keep Claude model names on their separate Anthropic route.
         self._anthropic_models = anthropic_models
-        # The deployment supplies its Anthropic session-affinity header name.
+        # The deployment supplies the session-affinity header name; the proxy
+        # sends it on every route.
         self._session_header = session_header
         self._impersonate = impersonate
         # A box that reads the ADC source file could mint its own tokens.
