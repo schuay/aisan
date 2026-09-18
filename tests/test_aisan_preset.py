@@ -83,6 +83,8 @@ def test_git_binds_is_the_policy_read_top_to_bottom(tmp_path):
         Bind(wt / ".git", RO),
         Bind(git / "config", RO),
         Bind(git / "config.worktree", RO),
+        Bind(git / "objects", RW),
+        Bind(git / "objects" / "info", RW),
         Bind(git / "objects" / "info" / "alternates", RO),
         Bind(git / "hooks", RO),
         Seal(git / "worktrees"),
@@ -165,6 +167,8 @@ def test_git_binds_pins_a_plain_checkouts_steering_files(tmp_path):
         Bind(git, RW),
         Bind(git / "config", RO),
         Bind(git / "config.worktree", RO),
+        Bind(git / "objects", RW),
+        Bind(git / "objects" / "info", RW),
         Bind(git / "objects" / "info" / "alternates", RO),
         Bind(git / "hooks", RO),
         Seal(git / "worktrees"),
@@ -206,6 +210,11 @@ async def test_a_plain_checkouts_git_cannot_be_steered_or_replaced_end_to_end(
     root = tmp_path / "repo"
     root.mkdir()
     subprocess.run(["git", "init", "-q", str(root)], check=True)
+    git = root / ".git"
+    # A submodule gitdir, pinned like the top-level one.
+    sub = git / "modules" / "dep"
+    (sub / "hooks").mkdir(parents=True)
+    (sub / "config").write_text("[core]\n")
     (tmp_path / "state").mkdir()
     spec = claude_code(root, state=tmp_path / "state")
     spec = dataclasses.replace(
@@ -218,6 +227,12 @@ async def test_a_plain_checkouts_git_cannot_be_steered_or_replaced_end_to_end(
             "git config core.fsmonitor /tmp/x 2>&1 || echo config_refused; "
             "echo x > .git/hooks/pre-commit 2>&1 || echo hook_refused; "
             "mv .git .git.old 2>&1 || echo rename_refused; "
+            # A pin holds only its own path: these are the plain directories
+            # above one, which a rename would have replaced wholesale.
+            "mv .git/objects .git/objects.old 2>&1 || echo objects_refused; "
+            "mv .git/objects/info .git/info.old 2>&1 || echo info_refused; "
+            "mv .git/modules .git/modules.old 2>&1 || echo modules_refused; "
+            "mv .git/modules/dep .git/modules/old 2>&1 || echo sub_refused; "
             f"git worktree add -q {tmp_path}/wt 2>&1 || echo worktree_refused; "
             "git -c user.name=a -c user.email=a@b commit -q --allow-empty -m m"
             " && echo committed",
@@ -228,14 +243,26 @@ async def test_a_plain_checkouts_git_cannot_be_steered_or_replaced_end_to_end(
         "config_refused",
         "hook_refused",
         "rename_refused",
+        "objects_refused",
+        "info_refused",
+        "modules_refused",
+        "sub_refused",
         "worktree_refused",
     ):
         assert refused in out, out
 
-    assert (root / ".git").is_dir()
-    assert "fsmonitor" not in (root / ".git" / "config").read_text()
-    assert not (root / ".git" / "hooks" / "pre-commit").exists()
+    assert git.is_dir()
+    assert "fsmonitor" not in (git / "config").read_text()
+    assert not (git / "hooks" / "pre-commit").exists()
     assert not (tmp_path / "wt").exists()
+    # The refused renames leave the pinned paths where host Git reads them. A
+    # copy mv made before its rename failed may remain elsewhere; it steers
+    # nothing.
+    alternates = git / "objects" / "info" / "alternates"
+    assert (git / "objects" / "info").is_dir()
+    assert not alternates.exists() or alternates.read_text() == ""
+    assert (sub / "config").read_text() == "[core]\n"
+    assert list((sub / "hooks").iterdir()) == []
 
 
 def test_depot_tools_job_profile(tmp_path):
@@ -532,9 +559,15 @@ def test_a_submodule_gitdir_config_and_hooks_are_pinned(tmp_path):
     sub.mkdir(parents=True)
     (sub / "config").write_text("")
     (sub / "hooks").mkdir()
-    pinned = {b.path for b in git_binds(wt) if getattr(b, "mode", None) == RO}
+    binds = git_binds(wt)
+    pinned = {b.path for b in binds if getattr(b, "mode", None) == RO}
     assert sub / "config" in pinned
     assert sub / "hooks" in pinned
+    # The directories above the pins are mount points, listed before them.
+    order = [b.path for b in binds if isinstance(b, Bind)]
+    for parent in (sub.parent, sub):
+        assert Bind(parent, RW) in binds
+        assert order.index(parent) < order.index(sub / "config")
 
 
 def test_external_symlink_targets_confined_to_the_main_checkout(tmp_path, caplog):

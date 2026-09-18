@@ -10,19 +10,22 @@
   (none; the box has no route off the machine)
 
 == tmpfs mounts (intended writable scratch; binds below land on top) ==
+  [..] <HOME>  (1073741824  <- $HOME)
   [..] <TMP>  (2147483648)
   [..] <AISAN PRIVATE>  (no size)
   [..] <MAIN>/.git/worktrees  (no size)
-  [..] <HOME>  (1073741824  <- $HOME)
 
 == binds by destination (deeper wins; * marks a guard: nothing plain below) ==
   system    /usr /bin /lib /lib64 /sbin /etc /proc /dev /run/systemd/journal/stdout
+  [..] ro-sub  * <HOME>/.cache/opencode/models.json
   [..] ro      * <AISAN PREFIX>
   [..] ro      * <AISAN SRC>
   [..] rw      * <MAIN>/.git
   [..] ro-pin  * <MAIN>/.git/config
   [..] ro-pin  * <MAIN>/.git/config.worktree
   [..] ro-pin  * <MAIN>/.git/hooks
+  [..] rw      * <MAIN>/.git/objects
+  [..] rw      * <MAIN>/.git/objects/info
   [..] ro-pin  * <MAIN>/.git/objects/info/alternates
   [..] ro-pin  * <MAIN>/.git/objects/pack
   [..] rw      * <MAIN>/.git/worktrees/wt
@@ -30,7 +33,6 @@
   [..] ro-pin  * <MAIN>/.git/worktrees/wt/config.worktree
   [..] rw-root   <ROOT>
   [..] ro-pin  * <ROOT>/.git
-  [..] ro-sub  * <HOME>/.cache/opencode/models.json
   [..] seal-ro * <AISAN PRIVATE>
   [..] seal-ro * <MAIN>/.git/worktrees
 
@@ -98,6 +100,13 @@
   /run/systemd/journal/stdout
   /run/systemd/journal/stdout
   --size
+  1073741824
+  --tmpfs
+  <HOME>
+  --ro-bind
+  <OPENCODE_CACHE>/models.json
+  <HOME>/.cache/opencode/models.json
+  --size
   2147483648
   --tmpfs
   <TMP>
@@ -121,6 +130,12 @@
   --ro-bind
   <MAIN>/.git/hooks
   <MAIN>/.git/hooks
+  --bind
+  <MAIN>/.git/objects
+  <MAIN>/.git/objects
+  --bind
+  <MAIN>/.git/objects/info
+  <MAIN>/.git/objects/info
   --ro-bind
   <MAIN>/.git/objects/info/alternates
   <MAIN>/.git/objects/info/alternates
@@ -144,13 +159,6 @@
   --ro-bind
   <ROOT>/.git
   <ROOT>/.git
-  --size
-  1073741824
-  --tmpfs
-  <HOME>
-  --ro-bind
-  <OPENCODE_CACHE>/models.json
-  <HOME>/.cache/opencode/models.json
   --remount-ro
   <AISAN PRIVATE>
   --remount-ro

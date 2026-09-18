@@ -10,10 +10,10 @@
   openai-responses 127.0.0.1:8715 -> <AISAN PRIVATE>/proxy-16a0eeb0791b6c92/openai-responses.sock
 
 == tmpfs mounts (intended writable scratch; binds below land on top) ==
+  [..] <HOME>  (1073741824  <- $HOME)
   [..] <TMP>  (2147483648)
   [..] <AISAN PRIVATE>  (no size)
   [..] <MAIN>/.git/worktrees  (no size)
-  [..] <HOME>  (1073741824  <- $HOME)
 
 == binds by destination (deeper wins; * marks a guard: nothing plain below) ==
   system    /usr /bin /lib /lib64 /sbin /etc /proc /dev /run/systemd/journal/stdout
@@ -24,6 +24,8 @@
   [..] ro-pin  * <MAIN>/.git/config
   [..] ro-pin  * <MAIN>/.git/config.worktree
   [..] ro-pin  * <MAIN>/.git/hooks
+  [..] rw      * <MAIN>/.git/objects
+  [..] rw      * <MAIN>/.git/objects/info
   [..] ro-pin  * <MAIN>/.git/objects/info/alternates
   [..] ro-pin  * <MAIN>/.git/objects/pack
   [..] rw      * <MAIN>/.git/worktrees/wt
@@ -97,6 +99,10 @@
   /run/systemd/journal/stdout
   /run/systemd/journal/stdout
   --size
+  1073741824
+  --tmpfs
+  <HOME>
+  --size
   2147483648
   --tmpfs
   <TMP>
@@ -123,6 +129,12 @@
   --ro-bind
   <MAIN>/.git/hooks
   <MAIN>/.git/hooks
+  --bind
+  <MAIN>/.git/objects
+  <MAIN>/.git/objects
+  --bind
+  <MAIN>/.git/objects/info
+  <MAIN>/.git/objects/info
   --ro-bind
   <MAIN>/.git/objects/info/alternates
   <MAIN>/.git/objects/info/alternates
@@ -149,10 +161,6 @@
   --ro-bind
   <ROOT>/.git
   <ROOT>/.git
-  --size
-  1073741824
-  --tmpfs
-  <HOME>
   --remount-ro
   <AISAN PRIVATE>
   --remount-ro

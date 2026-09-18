@@ -103,12 +103,18 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
         Bind(gitfile, RO)      guard  the pointers and configs that steer
         Bind(common/config, RO)       host-side git are pinned below it
         Bind(common/config.worktree, RO)
+        Bind(common/objects, RW)      the directories above a pin are mount
+        Bind(common/objects/info, RW) points too, so they cannot be renamed
         Bind(common/objects/info/alternates, RO)
         Bind(common/hooks, RO)
         Seal(common/worktrees)        no sibling, and nothing creatable
         Bind(private, RW)      guard  ...except this job's own dir
         Bind(private/commondir, RO)   whose own pointers are pinned again
         Bind(private/config.worktree, RO)
+        Bind(common/modules, RW)      each submodule gitdir, pinned the same way
+        Bind(common/modules/<name>, RW)
+        Bind(common/modules/<name>/config, RO)
+        Bind(common/modules/<name>/hooks, RO)
         Bind(common/objects/pack, RO) with pin_packs: nothing in the box repacks
 
     Every pin and the seal are guards, so no plain bind can reopen any part of
@@ -146,9 +152,17 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
 
     The self-bind turns `.git` into a mount point that cannot be renamed. Testing
     showed that file pins alone allowed `mv .git .git.old`, after which the box
-    could create new config and hooks for host Git to read. The worktrees seal
-    also prevents the box from creating a worktree with an attacker-controlled
-    `commondir`. Consequently, `git worktree add` is unavailable inside the box.
+    could create new config and hooks for host Git to read. The same holds one
+    level down: a mount point pins only its own path, and a plain directory
+    above it can still be renamed even though it holds one, so `mv objects
+    objects.old` followed by a fresh `objects/info/alternates` steered host
+    Git past the pin, and a renamed `modules/<name>` took new hooks and config
+    with it. Every directory between `.git` and a pin is therefore bound
+    writable as well, which makes it a mount point of its own; `config`,
+    `hooks` and `worktrees` sit directly under `.git` and need none. The
+    worktrees seal also prevents the box from creating a worktree with an
+    attacker-controlled `commondir`. Consequently, `git worktree add` is
+    unavailable inside the box.
 
     `pin_packs` protects objects reachable only from hidden siblings. Because
     the seal hides their HEAD and index, in-box `git gc` can otherwise consider
@@ -174,8 +188,8 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
             Bind(git, RW),
             *_steering_pins(git),
             Seal(git / "worktrees"),
+            *_submodule_binds(git),
         ]
-        binds += [Bind(p, RO) for p, _is_dir in _submodule_steering(git)]
         if pin_packs:
             binds.append(Bind(git / "objects" / "pack", RO))
         return binds
@@ -191,20 +205,41 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
     # would make Git interpret the filesystem root as the common directory.
     binds.append(Bind(private, RW))
     binds += [Bind(private / "commondir", RO), Bind(private / "config.worktree", RO)]
-    binds += [Bind(p, RO) for p, _is_dir in _submodule_steering(main_git)]
+    binds += _submodule_binds(main_git)
     if pin_packs:
         binds.append(Bind(main_git / "objects" / "pack", RO))
     return binds
 
 
 def _steering_pins(git: Path) -> list[BindSpec]:
-    """Return read-only pins for config, object redirects, and hooks."""
+    """Return read-only pins for config, object redirects, and hooks.
+
+    `objects` and `objects/info` are bound writable first so each is a mount
+    point: a pin holds only its own path, and a plain directory above it can
+    be renamed out from under it (see `git_binds`). Writable, because Git
+    writes loose objects and `info/packs` there.
+    """
     return [
         Bind(git / "config", RO),
         Bind(git / "config.worktree", RO),
+        Bind(git / "objects", RW),
+        Bind(git / "objects" / "info", RW),
         Bind(git / "objects" / "info" / "alternates", RO),
         Bind(git / "hooks", RO),
     ]
+
+
+def _submodule_binds(main_git: Path) -> list[BindSpec]:
+    """Return the pins for every present submodule gitdir, behind the mount
+    points that keep `modules` and each gitdir in place."""
+    steering = _submodule_steering(main_git)
+    if not steering:
+        return []
+    binds: list[BindSpec] = [Bind(main_git / "modules", RW)]
+    for sub in dict.fromkeys(p.parent for p, _is_dir in steering):
+        binds.append(Bind(sub, RW))
+        binds += [Bind(p, RO) for p, _is_dir in steering if p.parent == sub]
+    return binds
 
 
 def _steering_host_files(git: Path) -> list[EnsurePath]:
