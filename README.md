@@ -132,7 +132,9 @@ errors.
   stricter mode wins. A *guard* (the default for `Bind` and `Overlay`; always
   for `Seal` and `BindOver`) admits only other guards below it, so a user bind
   cannot reopen part of a policy mount. User bind files and `extra_ro` are
-  plain.
+  plain. The fixed system surface (`/usr`, `/etc`, `/proc`, `/dev`, the
+  journal socket) is in the tree too: a bind at one of its paths conflicts,
+  and a bind above one is refused because bwrap mounts the surface first.
 - **Credential-aware egress in both network modes.** Isolated boxes reach host
   proxies through Unix sockets and in-box loopback relays. Interactive boxes
   started with `--net` reach authenticated host-loopback TCP listeners directly;

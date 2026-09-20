@@ -108,16 +108,19 @@ def test_journal_socket_bound_when_present(profile, monkeypatch, tmp_path):
 
     from aisan import sandbox as sb
 
+    # The socket is part of the fixed surface, so it cannot sit below the
+    # profile's /tmp tmpfs; a sandbox without one hosts the substitute.
+    boxed = Sandbox(root=profile.root, use_cgroup=False)
     sock_path = tmp_path / "journal-stdout"
     s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     s.bind(str(sock_path))
     try:
         monkeypatch.setattr(sb, "_JOURNAL_STDOUT_SOCK", Path(sock_path))
-        assert f"--ro-bind {sock_path} {sock_path}" in " ".join(profile.wrapper())
+        assert f"--ro-bind {sock_path} {sock_path}" in " ".join(boxed.wrapper())
 
         missing = tmp_path / "nope"
         monkeypatch.setattr(sb, "_JOURNAL_STDOUT_SOCK", missing)
-        assert str(missing) not in " ".join(profile.wrapper())
+        assert str(missing) not in " ".join(boxed.wrapper())
     finally:
         s.close()
 
@@ -765,6 +768,70 @@ def test_a_writable_bind_at_a_system_root_conflicts(tmp_path):
     root.mkdir()
     with pytest.raises(MountConflict, match="/etc"):
         Sandbox(root=root, binds=(Bind(Path("/etc"), RW),)).tree()
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        Bind(Path("/dev"), RW),
+        Bind(Path("/dev"), RO, guard=False),
+        Bind(Path("/proc"), RO),
+        Bind(Path("/run/systemd/journal/stdout"), RW),
+    ],
+    ids=["dev-rw", "dev-plain-ro", "proc", "journal-rw"],
+)
+def test_a_bind_at_a_fixed_surface_path_conflicts(tmp_path, spec):
+    """bwrap mounts the surface first, so a bind there would cover it; the
+    tree declares the surface and refuses the bind instead."""
+    root = tmp_path / "wt"
+    root.mkdir()
+    with pytest.raises(MountConflict, match=str(spec.path)):
+        Sandbox(root=root, binds=(spec,)).tree()
+
+
+def test_restating_the_journal_socket_read_only_adds_no_mount(tmp_path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    sock = Path("/run/systemd/journal/stdout")
+    boxed = Sandbox(root=root, binds=(Bind(sock, RO),), use_cgroup=False)
+    assert str(sock) not in [d for _op, d in _ops(boxed)]
+
+
+@pytest.mark.parametrize("guard", [True, False], ids=["guard", "plain"])
+def test_a_bind_above_a_fixed_surface_path_is_refused(tmp_path, guard):
+    """Nothing can be ordered before the surface, so an ancestor of the
+    journal socket would land on top of it whatever the tree says."""
+    root = tmp_path / "wt"
+    root.mkdir()
+    with pytest.raises(MountConflict, match="above the fixed system surface"):
+        Sandbox(root=root, binds=(Bind(Path("/run"), RO, guard=guard),)).tree()
+
+
+def test_a_bind_below_a_fixed_surface_path_is_allowed(tmp_path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    node = tmp_path / "node"
+    node.write_text("")
+    boxed = Sandbox(
+        root=root, binds=(BindOver(node, Path("/dev/aisan-node")),), use_cgroup=False
+    )
+    assert ("ro", "/dev/aisan-node") in _ops(boxed)
+
+
+@needs_bwrap
+async def test_a_bind_below_the_device_surface_lands_inside_it(tmp_path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    node = tmp_path / "node"
+    node.write_text("from the host\n")
+    boxed = Sandbox(
+        root=root,
+        binds=(BindOver(node, Path("/dev/aisan-node")),),
+        env=(("HOME", str(tmp_path)), *DEFANG_ENV.items()),
+        use_cgroup=False,
+    )
+    out = await run_boxed("cat /dev/aisan-node; ls /dev/null", sandbox=boxed)
+    assert out.startswith("from the host\n/dev/null\n"), out
 
 
 def test_a_seal_and_a_bind_at_one_path_conflict(tmp_path):

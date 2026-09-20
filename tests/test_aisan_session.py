@@ -667,6 +667,23 @@ def test_a_user_bind_file_cannot_widen_a_grant(tmp_path, command):
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_a_user_bind_file_cannot_cover_the_fixed_system_surface(tmp_path, command):
+    """bwrap mounts /dev before any bind, so a user entry there would have
+    replaced its device set with the host's; the tree refuses it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spec_file = tmp_path / "mine.toml"
+    spec_file.write_text('rw = ["/dev"]\n')
+
+    result = _cli(
+        tmp_path, [command, "--binds", str(spec_file), "--explain", str(repo)]
+    )
+
+    assert "BOX ASSEMBLY REFUSED" in result.stdout, result.stderr
+    assert "mount conflict at /dev" in result.stdout
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_an_unknown_grant_is_refused_by_name(tmp_path, command):
     repo = tmp_path / "repo"
     repo.mkdir()

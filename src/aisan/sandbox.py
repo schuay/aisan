@@ -23,6 +23,11 @@ list carries no meaning. Four rules decide what the box sees:
 * A seal is an empty directory that becomes read-only after every hole through
   it has been mounted.
 
+The fixed system surface takes part in the tree as plain entries, so a bind at
+one of its paths is a conflict and a bind below one lands on top of it. bwrap
+mounts that surface before anything else, so a bind above one of its paths
+cannot be ordered and is refused.
+
 Destinations are literal box paths. One that passes through a symlink the box
 can see is refused, because bwrap would mount at the link's target and the
 rules above would have judged the wrong path.
@@ -57,9 +62,7 @@ _SYSTEM_ARGS = (
     "--dev", "/dev",
 )  # fmt: skip
 
-# A login shell may invoke `systemd-cat` from `/etc/profile.d`. Because `/run` is
-# otherwise absent, expose this socket when present to prevent harmless journal
-# connection errors from appearing in every command result.
+# See `_journal_socket_mount`.
 _JOURNAL_STDOUT_SOCK = Path("/run/systemd/journal/stdout")
 
 _ISOLATION_ARGS = (
@@ -210,14 +213,17 @@ class SymlinkDestination(ValueError):
 class Op(enum.Enum):
     """A mount operation at one destination.
 
-    `SEAL` and `TMPFS` hide the host path. The other three expose it with
-    decreasing restriction: `RO` forbids writes, `OVERLAY` discards them, `RW`
-    passes them through. That order is the tie-break when two identity binds
-    name one destination.
+    `SEAL` and `TMPFS` hide the host path, and `PROC` and `DEV` are the
+    kernel filesystems bwrap creates. The other three expose the host path
+    with decreasing restriction: `RO` forbids writes, `OVERLAY` discards them,
+    `RW` passes them through. That order is the tie-break when two identity
+    binds name one destination.
     """
 
     SEAL = "seal"
     TMPFS = "tmpfs"
+    PROC = "proc"
+    DEV = "dev"
     RO = "ro"
     OVERLAY = "overlay"
     RW = "rw"
@@ -237,13 +243,14 @@ class Entry:
 
     `fixed` marks an entry whose operation cannot be changed by merging: the
     root, because the payload runs in it; tmpfs and seals, because they hide
-    rather than expose; system roots and bind-overs, because their content is
-    not the host path. Two identical fixed entries still collapse.
+    rather than expose; the system surface and bind-overs, because their
+    content is not the host path. Two identical fixed entries still collapse.
 
-    The root, tmpfs mounts, and system roots are plain, not guards: operator
-    binds live below them by design, such as a cache under the home tmpfs or a
-    pin inside the worktree. They are subject to the guard rule like any other
-    plain entry, so a guard above the root is a policy error.
+    The root, tmpfs mounts, and the system surface are plain, not guards:
+    operator binds live below them by design, such as a cache under the home
+    tmpfs, a pin inside the worktree, or a device node under `/dev`. They are
+    subject to the guard rule like any other plain entry, so a guard above the
+    root is a policy error.
     """
 
     dst: Path
@@ -293,7 +300,7 @@ class Entry:
         return Entry(self.dst, op, self.dst, self.guard or other.guard, optional)
 
     def _describe(self) -> str:
-        if self.op in (Op.SEAL, Op.TMPFS):
+        if self.src is None:
             return self.op.value
         if self.src != self.dst:
             return f"{self.op.value} from {self.src}"
@@ -347,6 +354,30 @@ _SYSTEM_RO_BINDS = tuple(
 )
 
 
+def _surface_entries() -> tuple[Entry, ...]:
+    """Return the fixed system surface as tree entries.
+
+    Everything `wrapper()` mounts before the policy is declared here, so a
+    bind at one of these paths is a conflict rather than a silent cover, and
+    a bind above one is refused. The journal socket is declared whether or
+    not the host has it: the tree is pure, and a bind there is wrong either
+    way. Built per call because tests substitute the system roots.
+    """
+    out = [Entry(dst, Op.RO, src, fixed=True) for src, dst in _SYSTEM_RO_BINDS]
+    for i, arg in enumerate(_SYSTEM_ARGS):
+        if arg == "--proc":
+            out.append(Entry(Path(_SYSTEM_ARGS[i + 1]), Op.PROC, fixed=True))
+        elif arg == "--dev":
+            out.append(Entry(Path(_SYSTEM_ARGS[i + 1]), Op.DEV, fixed=True))
+    sock = _JOURNAL_STDOUT_SOCK
+    out.append(Entry(sock, Op.RO, sock, fixed=True))
+    return tuple(out)
+
+
+def _surface_dsts() -> frozenset[Path]:
+    return frozenset(e.dst for e in _surface_entries())
+
+
 def system_ro_roots() -> frozenset[Path]:
     """Return identity-mounted system roots that need no second read-only bind.
 
@@ -381,13 +412,27 @@ def through_system_symlink(path: Path) -> Path:
     return path
 
 
+def _journal_socket_mount() -> Mount | None:
+    """The journal socket bind, when the host has one.
+
+    A login shell may invoke `systemd-cat` from `/etc/profile.d`. `/run` is
+    otherwise absent, so this bind lets that connect without a harmless
+    journal error in every command result.
+    """
+    if _JOURNAL_STDOUT_SOCK.is_socket():
+        return Mount("ro", _JOURNAL_STDOUT_SOCK, _JOURNAL_STDOUT_SOCK)
+    return None
+
+
 def _system_mounts() -> list[Mount]:
-    """Return the complete fixed system surface in bwrap order.
+    """Return the host paths the fixed system surface exposes, in bwrap order.
 
     Policy checks need the mounts the box receives implicitly as well as those
     requested by the caller.
     """
-    return [Mount("ro", dst, src) for src, dst in _SYSTEM_RO_BINDS]
+    mounts = [Mount("ro", dst, src) for src, dst in _SYSTEM_RO_BINDS]
+    journal = _journal_socket_mount()
+    return mounts if journal is None else [*mounts, journal]
 
 
 def _resolved(p: Path) -> Path:
@@ -505,6 +550,26 @@ def _check_guards(tree: dict[Path, Entry]) -> None:
                     f" {parent} ({above._describe()}); only guards may be"
                     " mounted below a guard, so remove the nested entry or"
                     " declare the guard plain"
+                )
+
+
+def _check_surface(tree: dict[Path, Entry]) -> None:
+    """Refuse an entry above a fixed system surface path.
+
+    bwrap mounts the surface before the policy, so a bind above `/dev` or the
+    journal socket would land on top of it whatever the tree says. A bind
+    below one follows it in the usual order and is fine.
+    """
+    surface = _surface_dsts()
+    for dst in tree:
+        if dst in surface:
+            continue
+        for below in surface:
+            if below != dst and below.is_relative_to(dst):
+                raise MountConflict(
+                    f"mount at {dst} lies above the fixed system surface at"
+                    f" {below}, which bwrap mounts first; nothing can be"
+                    " mounted above it, so name a path below it instead"
                 )
 
 
@@ -643,10 +708,11 @@ class Sandbox:
     def entries(self) -> list[Entry]:
         """Return every declared mount as a tree entry, system surface included.
 
-        The system roots take part so a bind at `/usr` collapses into the one
-        the box already has and a writable bind there is a conflict.
+        The surface takes part so a bind at `/usr` collapses into the one the
+        box already has, and a bind at `/dev` or a writable one at `/usr` is a
+        conflict.
         """
-        out = [Entry(dst, Op.RO, src, fixed=True) for src, dst in _SYSTEM_RO_BINDS]
+        out = list(_surface_entries())
         out += [
             Entry(Path(m), Op.TMPFS, fixed=True, size=size) for m, size in self.tmpfs
         ]
@@ -661,6 +727,9 @@ class Sandbox:
         for a policy that has no single meaning.
         """
         tree = _merge(self.entries())
+        # Before the guard check: a guard above the surface would otherwise be
+        # told to declare itself plain, which is refused as well.
+        _check_surface(tree)
         _check_guards(tree)
         return tree
 
@@ -683,8 +752,9 @@ class Sandbox:
         _check_symlink_free(tree)
         mounts: list[Mount] = []
         seal_ro: list[Mount] = []
+        surface = _surface_dsts()
         for e in sorted(tree.values(), key=lambda e: e.dst.parts):
-            if any(e.dst == dst for _src, dst in _SYSTEM_RO_BINDS):
+            if e.dst in surface:
                 continue
             m = _mount(e)
             if m is None:
@@ -740,7 +810,8 @@ class Sandbox:
         argv += ["bwrap", *_SYSTEM_ARGS]
         if self.unshare_net:
             argv += ["--unshare-net"]
-        argv += self._journal_socket_args()
+        journal = _journal_socket_mount()
+        argv += _mount_args([journal] if journal else [])
         argv += _mount_args(mounts)
         argv += _ISOLATION_ARGS
         argv += ["--clearenv"]
@@ -763,13 +834,6 @@ class Sandbox:
         if self.tasks_max:
             args += ["-p", f"TasksMax={self.tasks_max}"]
         return [*args, "--"]
-
-    @staticmethod
-    def _journal_socket_args() -> list[str]:
-        # Let login-shell `systemd-cat` calls connect without exposing `/run`.
-        if _JOURNAL_STDOUT_SOCK.is_socket():
-            return ["--ro-bind", str(_JOURNAL_STDOUT_SOCK), str(_JOURNAL_STDOUT_SOCK)]
-        return []
 
     # The mount namespace enforces containment. A second in-process copy of the
     # policy could drift from the emitted argv; tools needing confinement must

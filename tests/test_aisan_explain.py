@@ -287,6 +287,29 @@ def test_a_credential_exposing_spec_renders_as_a_refusal(tmp_path):
     assert "would expose the anthropic backend" in text
 
 
+def test_a_bind_at_the_fixed_system_surface_renders_as_a_refusal(tmp_path):
+
+    from aisan import Box
+    from aisan.explain import explain
+    from aisan.sandbox import RW, Bind
+    from aisan.spec import BoxSpec, Limits
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    spec = BoxSpec(
+        root=wt,
+        binds=(Bind(Path("/dev"), RW),),
+        tmpfs=(),
+        env=(),
+        egress=(),
+        unshare_net=False,
+        limits=Limits(use_cgroup=False),
+    )
+    text = explain(Box(spec, box_id="t"), inputs=())
+    assert "BOX ASSEMBLY REFUSED" in text
+    assert "mount conflict at /dev" in text
+
+
 def test_explaining_a_worktree_does_not_mutate_the_host_git(tmp_path):
 
     from aisan import Box
