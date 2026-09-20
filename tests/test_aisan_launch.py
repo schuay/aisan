@@ -78,6 +78,18 @@ def test_launcher_binds_cover_both_interpreter_prefixes_and_the_link_chain():
         assert hop in paths
 
 
+@pytest.mark.skipif(
+    not Path("/bin/true").exists() or not Path("/bin").is_symlink(),
+    reason="needs a merged-/usr host",
+)
+def test_launcher_binds_name_a_system_symlink_dir_by_its_target(tmp_path):
+    """`/bin` is a symlink inside every box, and the sandbox refuses a
+    destination through a link, so the chain directory is renamed."""
+    binds = [Path(str(b.path)) for b in launcher_binds(Path("/bin/true"))]
+    assert Path("/bin") not in binds
+    assert Path("/usr/bin") in binds
+
+
 def test_launcher_binds_omit_paths_the_system_surface_already_mounts(tmp_path):
 
     usr = tmp_path / "usr" / "bin"

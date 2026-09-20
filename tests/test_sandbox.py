@@ -5,6 +5,7 @@
 import dataclasses
 import shutil
 import socket
+import subprocess
 import threading
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from aisan.sandbox import (
     Overlay,
     Sandbox,
     Seal,
+    SymlinkDestination,
+    through_system_symlink,
 )
 from aisan.spec import DEFANG_ENV
 
@@ -963,3 +966,131 @@ async def test_overlay_is_warm_to_read_and_writes_go_nowhere(profile, tmp_path):
 
     assert not (cache / "evil.txt").exists()
     assert (cache / "warm.txt").read_text() == "from the host\n"
+
+
+def _linked_checkout(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A writable root holding a relative symlink into a guarded tree."""
+    main = tmp_path / "main"
+    hooks = main / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    root = tmp_path / "wt"
+    root.mkdir()
+    (root / "tools").symlink_to(Path("..") / "main" / ".git")
+    return root, hooks, root / "tools"
+
+
+@pytest.mark.parametrize("through", ["hooks", ""], ids=["below-link", "at-link"])
+def test_a_destination_through_a_symlink_the_box_sees_is_refused(tmp_path, through):
+    root, hooks, link = _linked_checkout(tmp_path)
+    dst = link / through if through else link
+    boxed = Sandbox(
+        root=root,
+        binds=(Bind(hooks, RO), Bind(dst, RW, guard=False)),
+        use_cgroup=False,
+    )
+    with pytest.raises(SymlinkDestination, match=rf"through the symlink {link}"):
+        boxed.resolve()
+
+
+def test_a_guard_through_a_symlink_is_refused_too(tmp_path):
+    root, _hooks, link = _linked_checkout(tmp_path)
+    boxed = Sandbox(root=root, binds=(Bind(link / "hooks", RO),), use_cgroup=False)
+    with pytest.raises(SymlinkDestination):
+        boxed.resolve()
+
+
+def test_a_symlink_the_box_does_not_see_is_allowed(tmp_path):
+    """Nothing mounts the link's parent, or a tmpfs hides it: bwrap creates
+    plain directories there, so the host link never reaches the box."""
+    real_home = tmp_path / "real-home"
+    (real_home / ".cache" / "tool").mkdir(parents=True)
+    home = tmp_path / "home"
+    home.symlink_to(real_home)
+    root = tmp_path / "wt"
+    root.mkdir()
+    unmounted_parent = Sandbox(
+        root=root, binds=(Bind(home / ".cache" / "tool", RW),), use_cgroup=False
+    )
+    assert ("rw", str(home / ".cache" / "tool")) in _ops(unmounted_parent)
+
+    shown = Bind(tmp_path, RO, guard=False)
+    with pytest.raises(SymlinkDestination):
+        Sandbox(
+            root=root,
+            binds=(shown, Bind(home / ".cache" / "tool", RW)),
+            use_cgroup=False,
+        ).resolve()
+
+    # The same link below a tmpfs: the tmpfs hides what the host has there.
+    under_tmpfs = Sandbox(
+        root=root,
+        binds=(Bind(home / ".cache" / "tool", RW),),
+        tmpfs=((str(tmp_path), 1 << 20),),
+        use_cgroup=False,
+    )
+    assert ("rw", str(home / ".cache" / "tool")) in _ops(under_tmpfs)
+
+
+def test_a_bind_over_component_is_checked_at_its_source(tmp_path):
+    src = tmp_path / "published"
+    (src / "real").mkdir(parents=True)
+    (src / "link").symlink_to("real")
+    dst = tmp_path / "shown"
+    dst.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    boxed = Sandbox(
+        root=root,
+        binds=(BindOver(src, dst), Bind(dst / "link" / "x", RW)),
+        use_cgroup=False,
+    )
+    with pytest.raises(SymlinkDestination, match=rf"symlink {dst / 'link'}"):
+        boxed.resolve()
+    # The same name is a real directory on the host side of `dst`; the box
+    # shows `src`, so that does not matter.
+    (dst / "link").mkdir()
+    with pytest.raises(SymlinkDestination):
+        boxed.resolve()
+
+
+def test_a_destination_under_a_system_symlink_is_refused_by_name(tmp_path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    boxed = Sandbox(
+        root=root, binds=(Bind(Path("/bin/true"), RO, optional=True),), use_cgroup=False
+    )
+    with pytest.raises(SymlinkDestination, match=r"/bin -> /usr/bin"):
+        boxed.resolve()
+    assert through_system_symlink(Path("/bin/true")) == Path("/usr/bin/true")
+    assert through_system_symlink(Path("/usr/bin/true")) == Path("/usr/bin/true")
+
+
+def test_an_optional_bind_below_a_missing_path_is_not_a_symlink(tmp_path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    boxed = Sandbox(
+        root=root,
+        binds=(Bind(root / "absent" / "deeper", RO, optional=True),),
+        use_cgroup=False,
+    )
+    assert ("ro", str(root / "absent" / "deeper")) not in _ops(boxed)
+
+
+@needs_bwrap
+def test_bwrap_follows_a_relative_symlink_destination(tmp_path):
+    """The premise of the check, kept as a test so a bwrap that stops
+    following links shows up as a failure here rather than silently."""
+    _root, hooks, link = _linked_checkout(tmp_path)
+    (hooks / "f").write_text("guarded\n")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "f").write_text("mine\n")
+    argv = [
+        "bwrap", "--dev-bind", "/", "/",
+        "--ro-bind", str(hooks), str(hooks),
+        "--bind", str(scratch), str(link / "hooks"),
+        "--", "cat", str(hooks / "f"),
+    ]  # fmt: skip
+    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "mine\n"

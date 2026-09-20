@@ -141,7 +141,9 @@ def test_every_checkout_under_the_root_gets_the_override(tmp_path):
         mint=lambda: asyncio.sleep(0, result="fake-token"),
     )
     backend.prepare(rt)
-    overrides = [b for b in backend.box_binds(rt) if b.dst != Path("/etc/hosts")]
+    overrides = [
+        b for b in backend.box_binds(rt) if b.dst != Path("/etc/hosts").resolve()
+    ]
 
     assert [b.dst for b in overrides] == dsts
 
@@ -180,7 +182,9 @@ def test_a_single_sisoenv_may_arrive_as_a_string(tmp_path):
         mint=lambda: asyncio.sleep(0, result="fake-token"),
     )
     backend.prepare(rt)
-    overrides = [b for b in backend.box_binds(rt) if b.dst != Path("/etc/hosts")]
+    overrides = [
+        b for b in backend.box_binds(rt) if b.dst != Path("/etc/hosts").resolve()
+    ]
 
     assert [b.dst for b in overrides] == [dst]
 

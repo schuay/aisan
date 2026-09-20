@@ -26,7 +26,7 @@ from pathlib import Path
 
 from .proxy import relay
 from .runtime import CLIENT_ENV_NAME, read_client_env, read_manifest
-from .sandbox import RO, Bind, BindSpec, system_ro_roots
+from .sandbox import RO, Bind, BindSpec, system_ro_roots, through_system_symlink
 
 # Forward terminal and supervisor termination signals to the payload.
 _FORWARD = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
@@ -139,7 +139,9 @@ def launcher_binds(
       resolved target would drop.
 
     Omit a path the fixed system surface already mounts. Re-declaring one adds
-    no mount, so leaving it in would misreport the policy.
+    no mount, so leaving it in would misreport the policy. A path under one of
+    the surface's merged-`/usr` links, such as `/bin`, is renamed to the
+    directory the box has: the sandbox refuses a destination through a link.
 
     Always bind `own_source_root`. Asking whether another bind already covers it
     would compare path prefixes, and containment does not answer whether a path
@@ -154,7 +156,8 @@ def launcher_binds(
     system = system_ro_roots()
     binds: list[BindSpec] = []
     seen: set[Path] = set()
-    for path in (prefix, base, *interpreter_chain_dirs(exe)):
+    for hop in (prefix, base, *interpreter_chain_dirs(exe)):
+        path = through_system_symlink(hop)
         # Match by resolved path, as `Sandbox` does when it drops the same binds.
         if path in seen or path.resolve() in system:
             continue

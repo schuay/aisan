@@ -34,6 +34,8 @@ log = logging.getLogger(__name__)
 
 HOSTS_FILE = "hosts"
 SISOENV_FILE = "sisoenv"
+# The box path the hosts bind-over replaces, before symlink resolution.
+HOSTS_DST = Path("/etc/hosts")
 
 # LUCI tokens last at most 30 minutes. Refresh with 20 minutes remaining because
 # a cold V8 build can outlast one token.
@@ -154,9 +156,14 @@ class ReapiBackend(Backend):
         The hosts file preserves Google's routing authority while reaching
         loopback. ``.sisoenv`` may live in a dependency cache shared by several
         checkouts, so each box overlays it instead of editing it in place.
+
+        `/etc/hosts` is a symlink on some distributions. The box shows that
+        link through the `/etc` system bind, and the sandbox refuses a
+        destination through a visible link, so the bind-over targets the file
+        the link resolves to; the box's link then leads to it.
         """
         return [
-            BindOver(self.hosts_path(runtime_dir), Path("/etc/hosts")),
+            BindOver(self.hosts_path(runtime_dir), HOSTS_DST.resolve()),
             *(
                 BindOver(self.sisoenv_path(runtime_dir), dst)
                 for dst in self._sisoenv_dsts

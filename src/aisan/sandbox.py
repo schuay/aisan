@@ -23,6 +23,10 @@ list carries no meaning. Four rules decide what the box sees:
 * A seal is an empty directory that becomes read-only after every hole through
   it has been mounted.
 
+Destinations are literal box paths. One that passes through a symlink the box
+can see is refused, because bwrap would mount at the link's target and the
+rules above would have judged the wrong path.
+
 This layer has three known limits:
 
 * Without `unshare_net`, the box shares the host network. With it, the box has
@@ -195,6 +199,14 @@ class GuardViolation(ValueError):
     """A plain mount sits below a guard, which would reopen part of it."""
 
 
+class SymlinkDestination(ValueError):
+    """A destination passes through a symlink the box can see.
+
+    bwrap follows it, so the mount would land somewhere the tree did not
+    reason about; a relative link can redirect a plain bind into a guard.
+    """
+
+
 class Op(enum.Enum):
     """A mount operation at one destination.
 
@@ -347,6 +359,28 @@ def system_ro_roots() -> frozenset[Path]:
     return frozenset(dst for src, dst in _SYSTEM_RO_BINDS if src == dst)
 
 
+# Symlinks `_SYSTEM_ARGS` creates inside the box, link to absolute target. They
+# exist only in the box, so a host-side check cannot see them.
+_SYSTEM_SYMLINKS = {
+    Path(_SYSTEM_ARGS[i + 2]): Path("/") / _SYSTEM_ARGS[i + 1]
+    for i in range(len(_SYSTEM_ARGS) - 2)
+    if _SYSTEM_ARGS[i] == "--symlink"
+}
+
+
+def through_system_symlink(path: Path) -> Path:
+    """Return `path` with a leading system symlink replaced by its target.
+
+    `/bin/python3` is `/usr/bin/python3` inside the box. A caller that derives
+    a destination from a host path uses this so the destination names the
+    directory the box has, not the link bwrap would follow.
+    """
+    for link, target in _SYSTEM_SYMLINKS.items():
+        if path.is_relative_to(link):
+            return target / path.relative_to(link)
+    return path
+
+
 def _system_mounts() -> list[Mount]:
     """Return the complete fixed system surface in bwrap order.
 
@@ -385,8 +419,9 @@ def _reachable_through(mounts: list[Mount], path: Path) -> tuple[Path, ...]:
 
     Resolve sources because they belong to the host filesystem, where symlink
     aliases identify the same data. Keep destinations literal because they
-    belong to the box. bwrap rejects symlink destinations, so host-side
-    resolution would invent masks that the box never receives.
+    belong to the box: `_check_symlink_free` refuses any destination bwrap
+    would redirect, so host-side resolution would only invent masks that the
+    box never receives.
     """
     target = _resolved(path)
     visible: dict[Path, Path] = {}
@@ -471,6 +506,67 @@ def _check_guards(tree: dict[Path, Entry]) -> None:
                     " mounted below a guard, so remove the nested entry or"
                     " declare the guard plain"
                 )
+
+
+def _host_view(tree: dict[Path, Entry], c: Path) -> Path | None:
+    """Return the host path the box shows at `c` before anything mounts there.
+
+    The nearest entry strictly above `c` decides. None, or a tmpfs or seal,
+    means bwrap creates plain directories on the way to a deeper mount, so
+    nothing at `c` comes from the host. Any entry with a source shows that
+    source's content, offset by `c`'s position below it.
+    """
+    for parent in c.parents:
+        above = tree.get(parent)
+        if above is None:
+            continue
+        if above.src is None:
+            return None
+        return above.src / c.relative_to(parent)
+    return None
+
+
+def _check_symlink_free(tree: dict[Path, Entry]) -> None:
+    """Refuse a destination that passes through a symlink the box can see.
+
+    bwrap resolves each destination inside the box it is building. A relative
+    symlink on the way, or at the destination itself, is followed, and the
+    mount lands at the link's target. The tree reasons about the written path,
+    so that landing spot escapes the deeper-wins, same-destination, and guard
+    rules: a plain bind through `wt/tools -> ../main/.git` would reopen the
+    guarded hooks directory. An absolute link fails inside bwrap instead;
+    refusing it here gives the same message.
+
+    Only links the box shows matter. A component below an unmounted path or a
+    tmpfs is a directory bwrap creates, whatever the host has there, which
+    keeps a symlinked home directory usable. A proper ancestor that is itself
+    a destination is a mount point, not a link. A component `lstat` cannot
+    read counts as a directory: bwrap runs as the same user and could not
+    traverse it either. The merged-`/usr` links the system surface creates are
+    links in the box whatever the host has, so they are checked by name.
+
+    The check reads the host at resolution time. A link planted afterwards by
+    another host process is outside the model; the host is trusted.
+    """
+    for dst in tree:
+        for c in (dst, *dst.parents):
+            if c != dst and c in tree:
+                continue
+            if c in _SYSTEM_SYMLINKS:
+                target = f" -> {_SYSTEM_SYMLINKS[c]}"
+            else:
+                host = _host_view(tree, c)
+                if host is None or not host.is_symlink():
+                    continue
+                try:
+                    target = f" -> {host.readlink()}"
+                except OSError:
+                    target = ""
+            raise SymlinkDestination(
+                f"mount destination {dst} passes through the symlink {c}"
+                f"{target}, which the box sees; bwrap would mount at the"
+                " link's target, so name that path instead"
+            )
 
 
 def _mount(e: Entry) -> Mount | None:
@@ -579,10 +675,15 @@ class Sandbox:
         Ancestors precede descendants, so the deeper destination wins where two
         overlap. Seals remount read-only after the complete list because bwrap
         cannot create a mount point inside a read-only tmpfs.
+
+        Destinations are checked against the host here, not in `tree()`, which
+        stays free of filesystem access.
         """
+        tree = self.tree()
+        _check_symlink_free(tree)
         mounts: list[Mount] = []
         seal_ro: list[Mount] = []
-        for e in sorted(self.tree().values(), key=lambda e: e.dst.parts):
+        for e in sorted(tree.values(), key=lambda e: e.dst.parts):
             if any(e.dst == dst for _src, dst in _SYSTEM_RO_BINDS):
                 continue
             m = _mount(e)
