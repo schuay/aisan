@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -33,8 +34,16 @@ def _checkout(tmp_path: Path) -> Path:
     return wt
 
 
-def _check(name: str, text: str) -> None:
-    path = SNAPSHOTS / f"{name}.txt"
+# The home directory per snapshot variant. A profile's mount order follows
+# the sorted destination tree, so where the home tmpfs lands depends on how
+# its path sorts against the others: beside them under a top-level directory,
+# or below the /usr system bind, which it must follow. Both are pinned so the
+# snapshots do not depend on the host running them.
+_HOMES = {"home": "/home/snapshot-user", "usr-home": "/usr/local/home/snapshot-user"}
+
+
+def _check(name: str, layout: str, text: str) -> None:
+    path = SNAPSHOTS / f"{name}.{layout}.txt"
     if os.environ.get("UPDATE_SNAPSHOTS"):
         path.parent.mkdir(exist_ok=True)
         path.write_text(text)
@@ -50,8 +59,16 @@ def _check(name: str, text: str) -> None:
     )
 
 
+@pytest.fixture(params=sorted(_HOMES))
+def home_layout(request, monkeypatch) -> str:
+    monkeypatch.setenv("HOME", _HOMES[request.param])
+    # The presets blank a literal /tmp; the report names the host's temp dir.
+    monkeypatch.setattr(tempfile, "tempdir", "/tmp")
+    return request.param
+
+
 @pytest.fixture
-def pinned_host(tmp_path, monkeypatch):
+def pinned_host(tmp_path, monkeypatch, home_layout):
 
     preset = importlib.import_module("aisan.presets.depot_tools_job")
 
@@ -112,13 +129,13 @@ def _report(
     )
 
 
-def test_depot_tools_job_profile_snapshot(tmp_path, pinned_host):
+def test_depot_tools_job_profile_snapshot(tmp_path, pinned_host, home_layout):
     wt = _checkout(tmp_path)
     spec = depot_tools_job(wt, depot_tools=pinned_host, unshare_net=True)
-    _check("depot_tools_job", _report(wt, pinned_host, spec))
+    _check("depot_tools_job", home_layout, _report(wt, pinned_host, spec))
 
 
-def test_claude_code_profile_snapshot(tmp_path, pinned_host):
+def test_claude_code_profile_snapshot(tmp_path, pinned_host, home_layout):
     from aisan.egress.anthropic import AnthropicBackend
     from aisan.presets.claude_code import claude_code
 
@@ -135,6 +152,7 @@ def test_claude_code_profile_snapshot(tmp_path, pinned_host):
     )
     _check(
         "claude_code",
+        home_layout,
         _report(
             wt,
             pinned_host,
@@ -145,7 +163,7 @@ def test_claude_code_profile_snapshot(tmp_path, pinned_host):
     )
 
 
-def test_codex_profile_snapshot(tmp_path, pinned_host):
+def test_codex_profile_snapshot(tmp_path, pinned_host, home_layout):
     from aisan.egress.openai_responses import CodexBackend
     from aisan.presets.codex import codex
 
@@ -156,6 +174,7 @@ def test_codex_profile_snapshot(tmp_path, pinned_host):
     spec = codex(wt, state=state, egress=(backend,))
     _check(
         "codex",
+        home_layout,
         _report(
             wt,
             pinned_host,
@@ -166,7 +185,11 @@ def test_codex_profile_snapshot(tmp_path, pinned_host):
     )
 
 
-def test_every_registered_preset_has_a_snapshot(tmp_path, pinned_host):
+def test_every_registered_preset_has_a_snapshot(tmp_path, pinned_host, home_layout):
     for name, build in sorted(PRESETS.items()):
         wt = _checkout(tmp_path / name)
-        _check(f"registry_{name}", _report(wt, pinned_host, build(wt), preset=name))
+        _check(
+            f"registry_{name}",
+            home_layout,
+            _report(wt, pinned_host, build(wt), preset=name),
+        )
