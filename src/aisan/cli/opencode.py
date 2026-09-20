@@ -127,7 +127,8 @@ async def _main(argv: list[str]) -> int:
     )
     # Bind the XDG-aware Git config file without its credential directory.
     spec = spec.with_binds(git_config_binds())
-    # User bind files may shadow the operator's global instructions.
+    # A user bind file cannot replace this: a bind-over is a guard, and a user
+    # entry at the same path is refused as a conflict.
     spec = spec.with_binds(user_memory_bind(USER_MEMORY))
     return await run_interactive(
         client="opencode",

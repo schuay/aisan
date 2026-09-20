@@ -607,7 +607,7 @@ def test_a_grant_brings_its_mounts_its_path_and_its_environment(tmp_path, comman
     )
 
     assert result.returncode == 0, result.stderr
-    assert f"ro        {depot_tools}" in result.stdout
+    assert f"ro      * {depot_tools}" in result.stdout
     assert "DEPOT_TOOLS_UPDATE=0" in result.stdout
     path_line = next(
         line for line in result.stdout.splitlines() if line.strip().startswith("PATH=")
@@ -637,7 +637,9 @@ def test_a_grant_this_host_lacks_says_so(tmp_path, command):
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
-def test_a_user_bind_file_still_shadows_a_grant(tmp_path, command):
+def test_a_user_bind_file_cannot_widen_a_grant(tmp_path, command):
+    """The grant's read-only bind and the user's writable one share a
+    destination; the stricter mode wins and the guard marker stays."""
     repo = tmp_path / "repo"
     repo.mkdir()
     depot_tools = _fake_depot_tools(tmp_path)
@@ -660,8 +662,8 @@ def test_a_user_bind_file_still_shadows_a_grant(tmp_path, command):
 
     assert result.returncode == 0, result.stderr
 
-    assert f"ro-shadow {depot_tools}" in result.stdout
-    assert f"rw        {depot_tools}" in result.stdout
+    assert f"ro      * {depot_tools}" in result.stdout
+    assert f"rw        {depot_tools}" not in result.stdout
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])

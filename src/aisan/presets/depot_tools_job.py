@@ -170,16 +170,16 @@ def depot_tools_job(
             " (a box is rooted at a real directory: bound rw, and its cwd)"
         )
     grant = depot_tools_grant(depot_tools)
-    ro = [*external_symlink_targets(worktree), *extra_ro]
     home = Path.home()
     # Keep depot_tools first and include launcher directories for bare MCP commands.
     path_env = ":".join([*(str(d) for d in grant.path), *extra_path, "/usr/bin"])
-    # Later mounts take precedence. Git pins follow the writable worktree during
-    # resolution; Box then appends runtime, interpreter, and backend mounts.
+    # Box adds the runtime, interpreter, and backend mounts. Git pins are
+    # guards below the writable worktree and its metadata. Caller paths are
+    # plain so the caller's other mounts may refine them.
     binds: list[BindSpec] = [
-        # Consumer read-only binds may shadow paths from the grant.
         *grant.binds,
-        *(Bind(p, RO, optional=True) for p in ro),
+        *(Bind(p, RO, optional=True) for p in external_symlink_targets(worktree)),
+        *(Bind(p, RO, optional=True, guard=False) for p in extra_ro),
         *git_binds(worktree, pin_packs=unshare_net),
     ]
     return BoxSpec(

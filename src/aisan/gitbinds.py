@@ -94,22 +94,25 @@ def external_symlink_targets(
 
 
 def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
-    """Return ordered binds for the Git metadata behind `worktree`.
+    """Return the binds for the Git metadata behind `worktree`.
 
     For a linked worktree, `.git` points to
     `<main>/.git/worktrees/<name>`. The policy is:
 
         Bind(common, RW)              in-worktree git works
-        Bind(gitfile, RO)             the pointers and configs that steer
-        Bind(common/config, RO)       host-side git are pinned on top of it
+        Bind(gitfile, RO)      guard  the pointers and configs that steer
+        Bind(common/config, RO)       host-side git are pinned below it
         Bind(common/config.worktree, RO)
         Bind(common/objects/info/alternates, RO)
         Bind(common/hooks, RO)
         Seal(common/worktrees)        no sibling, and nothing creatable
-        Bind(private, RW)             ...except this job's own dir
+        Bind(private, RW)      guard  ...except this job's own dir
         Bind(private/commondir, RO)   whose own pointers are pinned again
         Bind(private/config.worktree, RO)
         Bind(common/objects/pack, RO) with pin_packs: nothing in the box repacks
+
+    Every pin and the seal are guards, so no plain bind can reopen any part of
+    them; see `sandbox.Bind`.
 
     The common `.git` remains writable because Git locks `packed-refs` during
     ref updates. A read-only directory makes every commit report a lock error,
@@ -124,9 +127,10 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
 
     Sealing `worktrees/` also covers siblings created after profile assembly.
     Pinning only existing siblings would leave later `config.worktree` files
-    writable. The seal hides all siblings and prevents new entries. A later bind
-    restores this worktree's private directory so Git can create `index.lock`,
-    then pins its steering files inside that hole.
+    writable. The seal hides all siblings and prevents new entries. A guarded
+    writable bind below it restores this worktree's private directory so Git
+    can create `index.lock`, and the pins below that hole hold its steering
+    files.
 
     A plain checkout has an in-tree `.git` directory. It needs the same pins,
     minus the linked-worktree pointers, plus a self-bind:

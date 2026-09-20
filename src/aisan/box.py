@@ -254,13 +254,13 @@ class Box:
           client state;
         * backend-specific mounts sourced from that directory.
 
-        Runtime and backend mounts come last so the spec cannot shadow its egress
-        control files. Launcher mounts are omitted when an explicit writable
-        grant already provides the path, preserving that grant.
+        The seal, the runtime directory, and the backend bind-overs are guards,
+        so the spec cannot mount anything at or below them; the sandbox refuses
+        the profile instead. Launcher mounts are omitted when an explicit
+        writable grant already provides the path, preserving that grant.
 
-        Compose the unresolved bind list and resolve it once. Concatenating
-        resolved lists could place one seal's deferred read-only remount before
-        another seal's holes have been mounted.
+        Compose the unresolved bind list and resolve it once so every seal's
+        deferred read-only remount follows the complete list.
         """
         # Keep this import off the package initialization path. `python -m`
         # otherwise finds `launch` already imported, warns, and re-executes it.

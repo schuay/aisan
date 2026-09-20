@@ -75,7 +75,9 @@ def runtime_bind(box_id: str) -> Bind:
 
     Presets include this bind so the spec describes the complete mount policy.
     Connecting to a socket doesn't require write access to its file. The bind is
-    optional because explaining a box doesn't create its runtime directory.
+    a guard so a spec cannot mount anything below it, and optional because
+    explaining a box doesn't create its runtime directory; the guard check runs
+    on declared entries, so an absent directory still forbids binds below it.
     """
     return Bind(runtime_dir(box_id), RO, optional=True)
 

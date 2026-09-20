@@ -118,9 +118,10 @@ def interactive_parser(prog: str, executable: str) -> argparse.ArgumentParser:
         metavar="FILE",
         action="append",
         help="user bind spec, TOML (keys: ro, rw, overlay, path, mcp, include);"
-        " appended after the preset's binds, so these shadow. `mcp` names the"
-        " host MCP servers this box may start; without it, none do. Repeatable,"
-        " applied in the order given (see aisan.userbinds)",
+        " merged with the preset's binds: deeper paths win, the stricter mode"
+        " wins at one path, and entries under a preset guard are refused. `mcp`"
+        " names the host MCP servers this box may start; without it, none do."
+        " Repeatable (see aisan.userbinds)",
     )
     parser.add_argument(
         "--egress",
@@ -236,10 +237,9 @@ class LauncherFlags:
     def apply(self, spec: BoxSpec) -> BoxSpec:
         """Add the profiles, grants and user binds to ``spec``.
 
-        Apply them in that order so user bind files can shadow preset and grant
-        paths. Each item applies on its own because `with_path_prefix` prepends
-        and `with_env` appends: composing a flattened list instead would
-        reverse PATH precedence between two grants.
+        Bind order carries no precedence. Each item applies on its own because
+        `with_path_prefix` prepends and `with_env` appends: composing a
+        flattened list instead would reverse PATH precedence between two grants.
         """
         for name, profile in self.profiles:
             try:
@@ -313,7 +313,6 @@ def resolve_launcher_flags(
 
     # The credential guard needs every backend the box will carry.
     egress = (*base_egress, *(b for _, profile in profiles for b in profile.backends))
-    # Later files take precedence, matching bind order within one file.
     users: list[userbinds.UserSpec] = []
     for spec_file in binds or []:
         try:

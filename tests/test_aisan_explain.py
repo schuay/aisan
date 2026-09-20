@@ -23,7 +23,7 @@ def test_wrapper_phases_ro_ancestor_before_the_tmpfs(tmp_path):
     root.mkdir()
     sb = Sandbox(
         root=root,
-        binds=(Bind(tmp_path, RO),),
+        binds=(Bind(tmp_path, RO, guard=False),),
         tmpfs=((str(home), 64 << 20),),
         env=(("HOME", str(home)),),
         use_cgroup=False,
@@ -66,7 +66,7 @@ def test_parses_the_tmpfs_size_cap(tmp_path):
     assert [m.size for m in prof.tmpfs] == [str(64 << 20)]
 
 
-def test_classifies_a_pin_by_the_ordering_not_by_a_field(tmp_path):
+def test_classifies_a_pin_by_its_position_below_a_writable_mount(tmp_path):
 
     root = tmp_path / "wt"
     root.mkdir()
@@ -82,8 +82,8 @@ def test_classifies_a_pin_by_the_ordering_not_by_a_field(tmp_path):
         root=root,
         binds=(
             Bind(dep, RO),
-            Bind(ctrl, RW),
-            Bind(gitdir, RW),
+            Bind(ctrl, RW, guard=False),
+            Bind(gitdir, RW, guard=False),
             Bind(gitcfg, RO),
         ),
         tmpfs=(("/tmp", 64 << 20),),
@@ -97,7 +97,7 @@ def test_classifies_a_pin_by_the_ordering_not_by_a_field(tmp_path):
     assert kinds["usr"] == "system"
 
 
-def test_a_ro_bind_a_later_rw_defeats_is_labelled_shadowed(tmp_path):
+def test_a_pin_below_a_plain_rw_keeps_its_guard_marker(tmp_path):
 
     root = tmp_path / "wt"
     root.mkdir()
@@ -107,11 +107,15 @@ def test_a_ro_bind_a_later_rw_defeats_is_labelled_shadowed(tmp_path):
     gitcfg.write_text("")
     sb = Sandbox(
         root=root,
-        binds=(Bind(gitcfg, RO), Bind(gitdir, RW)),
+        binds=(Bind(gitcfg, RO), Bind(gitdir, RW, guard=False)),
         use_cgroup=False,
     )
-    kinds = {Path(m.path).name: m.kind for m in parse_wrapper(sb.wrapper(), sb).mounts}
-    assert kinds["config"] == "ro-shadow"
+    prof = parse_wrapper(sb.wrapper(), sb)
+    lines = {Path(m.path).name: m for m in prof.mounts}
+    assert lines["config"].kind == "ro-pin"
+    assert lines["config"].guard
+    assert not lines["gitdir"].guard
+    assert _idx(prof, gitdir) < _idx(prof, gitcfg)
 
 
 def test_a_bind_over_is_labelled_a_substitution_not_a_plain_ro(tmp_path):

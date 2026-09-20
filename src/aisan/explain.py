@@ -3,7 +3,7 @@
 
 """Describe the effective bubblewrap confinement profile.
 
-Mount order, optional sources, hoisting, and deferred remounts determine the
+The destination tree, optional sources, and deferred remounts determine the
 final filesystem view. Reports use the same staged ``BoxSpec`` as a real launch
 and show both a classified mount list and the exact argument vector. Staging
 creates bind sources without minting credentials or opening sockets.
@@ -23,18 +23,18 @@ from .sandbox import Sandbox
 class MountLine:
     """A mount parsed from the wrapper arguments, keyed by destination path."""
 
-    kind: str  # system | proc | dev | symlink | ro | ro-pin | ro-shadow | ro-sub
+    kind: str  # system | proc | dev | symlink | ro | ro-pin | ro-sub
     #           | rw-root | rw | tmpfs | overlay | seal-ro
     path: str
     idx: int  # token index of the mount spec (for ordering)
     size: str | None = None  # tmpfs only
+    guard: bool = False  # nothing plain may be mounted below it
 
 
-# Colors distinguish effective access: red for a shadowed read-only bind, yellow
-# for writable mounts, green for guards, cyan for substitutions, and dim for
-# fixed or read-only surface.
+# Colors distinguish effective access: yellow for writable mounts, green for
+# pins and seals, cyan for substitutions, and dim for fixed or read-only
+# surface.
 _KIND_ANSI = {
-    "ro-shadow": "1;31",
     "rw-root": "33",
     "rw": "33",
     "tmpfs": "33",
@@ -53,8 +53,12 @@ _KIND_ANSI = {
 _SURFACE_KINDS = frozenset({"system", "proc", "dev", "symlink"})
 
 
-def _kind_field(kind: str, color: bool, width: int = 9) -> str:
-    """Format a padded mount kind with optional ANSI color."""
+def _kind_field(kind: str, color: bool, width: int = 8) -> str:
+    """Format a padded mount kind with optional ANSI color.
+
+    The width leaves one column after the longest kind for the guard marker, so
+    paths align whether or not a line carries one.
+    """
     field = f"{kind:<{width}}"
     ansi = _KIND_ANSI.get(kind)
     return f"\x1b[{ansi}m{field}\x1b[0m" if color and ansi else field
@@ -83,44 +87,34 @@ def _policy_dests(sb: Sandbox) -> set[Path]:
     return dests
 
 
-def _pins_and_shadows(sb: Sandbox) -> tuple[set[Path], set[Path]]:
-    """Classify read-only mounts affected by a covering writable mount.
+def _pins_and_guards(sb: Sandbox) -> tuple[set[Path], set[Path]]:
+    """Return read-only destinations below a writable mount, and guards.
 
-    A later read-only mount pins a path inside a writable region. A later
-    writable mount shadows the earlier read-only mount. Derive both sets from
-    resolved mount order.
+    A read-only mount below a writable one pins that subtree; depth decides,
+    so no order is consulted. Guards come from the resolved mounts directly.
     """
     mounts = sb.resolve()
-    resolved = [(m, Path(m.dst).resolve()) for m in mounts]
-    pinned: set[Path] = set()
-    shadowed: set[Path] = set()
-    writable: list[Path] = []
-    for i, (m, dst) in enumerate(resolved):
-        if m.op == "rw":
-            writable.append(dst)
-        elif m.op == "ro":
-            if any(dst.is_relative_to(w) for w in writable):
-                pinned.add(dst)
-            elif any(
-                later.covers
-                and later.op in ("rw", "tmpfs", "overlay")
-                and dst.is_relative_to(ld)
-                for later, ld in resolved[i + 1 :]
-            ):
-                shadowed.add(dst)
-    return pinned, shadowed
+    writable = [m.dst for m in mounts if m.op in ("rw", "overlay")]
+    pinned = {
+        m.dst
+        for m in mounts
+        if m.op == "ro" and any(m.dst.is_relative_to(w) for w in writable)
+    }
+    guards = {m.dst for m in mounts if m.guard}
+    return pinned, guards
 
 
 def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
     """Parse supported sandbox arguments into mounts, environment, and cwd.
 
-    Argument order defines mount precedence. The resolved bind list identifies
-    read-only pins and profile mounts.
+    The argument vector is the sorted destination tree, so ancestors precede
+    descendants. The resolved mount list identifies pins, guards, and profile
+    mounts.
     """
     mounts: list[MountLine] = []
     env: dict[str, str] = {}
     chdir = ""
-    pinned, shadowed = _pins_and_shadows(sb)
+    pinned, guards = _pins_and_guards(sb)
     policy = _policy_dests(sb)
     i = 0
     n = len(argv)
@@ -129,35 +123,30 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
         if a == "--tmpfs" and i + 1 < n:
             # A size, when present, immediately precedes --tmpfs.
             size = argv[i - 1] if i >= 2 and argv[i - 2] == "--size" else None
-            mounts.append(MountLine("tmpfs", argv[i + 1], i, size))
+            dst = Path(argv[i + 1])
+            mounts.append(MountLine("tmpfs", argv[i + 1], i, size, dst in guards))
             i += 2
         elif a == "--tmp-overlay" and i + 1 < n:
-            mounts.append(MountLine("overlay", argv[i + 1], i))
+            dst = Path(argv[i + 1])
+            mounts.append(MountLine("overlay", argv[i + 1], i, guard=dst in guards))
             i += 2
         elif a == "--remount-ro" and i + 1 < n:
             # Seal the empty tmpfs after mounting its allowed descendants.
-            mounts.append(MountLine("seal-ro", argv[i + 1], i))
+            mounts.append(MountLine("seal-ro", argv[i + 1], i, guard=True))
             i += 2
         elif a == "--ro-bind" and i + 2 < n:
             src, dst = argv[i + 1], Path(argv[i + 2])
             if src != argv[i + 2]:
                 # BindOver substitutes a different source at this destination.
                 kind = "ro-sub"
+            elif dst in pinned:
+                kind = "ro-pin"
             else:
                 try:
-                    d = dst.resolve()
-                    kind = (
-                        "ro-pin"
-                        if d in pinned
-                        else "ro-shadow"
-                        if d in shadowed
-                        else "ro"
-                        if d in policy
-                        else "system"
-                    )
+                    kind = "ro" if dst.resolve() in policy else "system"
                 except OSError:
                     kind = "ro"
-            mounts.append(MountLine(kind, argv[i + 2], i))
+            mounts.append(MountLine(kind, argv[i + 2], i, guard=dst in guards))
             i += 3
         elif a == "--proc" and i + 1 < n:
             mounts.append(MountLine("proc", argv[i + 1], i))
@@ -170,10 +159,9 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
             mounts.append(MountLine("symlink", argv[i + 2], i))
             i += 3
         elif a == "--bind" and i + 2 < n:
-            dst = argv[i + 2]
-            d = Path(dst).resolve()
-            kind = "rw-root" if d == Path(str(sb.root)).resolve() else "rw"
-            mounts.append(MountLine(kind, dst, i))
+            dst = Path(argv[i + 2])
+            kind = "rw-root" if dst.resolve() == sb.root.resolve() else "rw"
+            mounts.append(MountLine(kind, argv[i + 2], i, guard=dst in guards))
             i += 3
         elif a == "--setenv" and i + 2 < n:
             env[argv[i + 1]] = argv[i + 2]
@@ -198,8 +186,8 @@ def _anc_eq(child: str, ancestor: str) -> bool:
 def assembly_refusal(box: Box) -> Exception | None:
     """Return the error raised while assembling ``box``, if any.
 
-    Assembly detects credential exposure, missing required sources, and mounts
-    that shadow tmpfs or the writable root. Both builders are pure, so this
+    Assembly detects credential exposure, missing required sources, mount
+    conflicts, and plain mounts below a guard. Both builders are pure, so this
     check doesn't mint credentials or open sockets.
     """
     try:
@@ -272,7 +260,7 @@ def explain(
     else:
         out.write("  (none; egress off -- the box shares the host network)\n")
 
-    section("tmpfs mounts (mounted before binds; intended writable scratch)")
+    section("tmpfs mounts (intended writable scratch; binds below land on top)")
     if prof.tmpfs:
         for m in prof.tmpfs:
             tag = "  <- $HOME" if home and _anc_eq(home, m.path) else ""
@@ -280,16 +268,17 @@ def explain(
     else:
         out.write("  (none)\n")
 
-    section("binds in argv order (later shadows earlier on overlap)")
+    section("binds by destination (deeper wins; * marks a guard: nothing plain below)")
     ordered = [m for m in sorted(prof.mounts, key=lambda x: x.idx) if m.kind != "tmpfs"]
     surface = [m for m in ordered if m.kind in _SURFACE_KINDS]
     if surface:
         paths = " ".join(m.path for m in surface)
-        out.write(f"  {_kind_field('system', color)} {paths}\n")
+        out.write(f"  {_kind_field('system', color)}  {paths}\n")
     for m in ordered:
         if m.kind in _SURFACE_KINDS:
             continue
-        out.write(f"  [{m.idx:>3}] {_kind_field(m.kind, color)} {m.path}\n")
+        mark = "*" if m.guard else " "
+        out.write(f"  [{m.idx:>3}] {_kind_field(m.kind, color)}{mark} {m.path}\n")
 
     # A seal combines an empty tmpfs with a later read-only remount.
     sealed = [m for m in prof.mounts if m.kind == "seal-ro"]

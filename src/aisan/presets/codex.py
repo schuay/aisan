@@ -69,7 +69,7 @@ def codex(
     """Build a Codex confinement spec for ``worktree``."""
     home = Path.home()
     binds: list[BindSpec] = [
-        *(Bind(p, RO, optional=True) for p in extra_ro),
+        *(Bind(p, RO, optional=True, guard=False) for p in extra_ro),
         # Keep shared Git objects writable, pin steering files read-only, and
         # hide sibling worktrees. Plain checkouts receive the same steering pins.
         #

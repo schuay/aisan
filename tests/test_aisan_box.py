@@ -28,7 +28,16 @@ from aisan.runtime import (
     read_manifest,
     runtime_dir,
 )
-from aisan.sandbox import RO, RW, Bind, BindOver, BindSpec, Mount
+from aisan.sandbox import (
+    RO,
+    RW,
+    Bind,
+    BindOver,
+    BindSpec,
+    GuardViolation,
+    Mount,
+    MountConflict,
+)
 from aisan.spec import BoxSpec, Limits
 
 _SUN_PATH_MAX = 107
@@ -494,24 +503,30 @@ def test_the_check_models_the_system_surface_by_source_not_by_name(
 
 def test_masking_follows_the_destination_not_the_source(tmp_path):
     store = tmp_path / "store"
-    store.mkdir()
-    token = store / "token"
+    creds = store / "creds"
+    creds.mkdir(parents=True)
+    token = creds / "token"
     token.write_text("t\n")
     d = tmp_path / "d"
     d.mkdir()
-    (d / "t").touch()
     wt = tmp_path / "wt"
     wt.mkdir()
     b = _FakeBackend()
     b.credentials = (token,)
-    published = BindOver(token, d / "t")
+    hide_creds = ((str(creds), 1 << 20),)
 
-    box = Box(_spec(wt, egress=(b,), binds=(published,)), box_id=str(tmp_path / "j"))
-    with box.staged(), pytest.raises(ValueError, match="would expose the fake backend"):
-        box.wrapper()
+    # A tmpfs at the credential's host path hides it only at that box path.
+    # The alias published at `d` still shows `d/creds/token`.
+    aliased = Box(
+        _spec(wt, egress=(b,), binds=(BindOver(store, d),), tmpfs=hide_creds),
+        box_id=str(tmp_path / "j"),
+    )
+    with aliased.staged(), pytest.raises(ValueError, match="would expose the fake"):
+        aliased.wrapper()
 
+    # Bound at its own name, the same tmpfs lands below the bind and masks it.
     masked = Box(
-        _spec(wt, egress=(b,), binds=(published, Bind(d, RO))),
+        _spec(wt, egress=(b,), binds=(Bind(store, RO, guard=False),), tmpfs=hide_creds),
         box_id=str(tmp_path / "j"),
     )
     with masked.staged():
@@ -583,10 +598,12 @@ def test_every_box_seals_the_private_host_root_before_its_runtime(
     with box.staged():
         mounts = box.mounts()
 
-    seal = mounts.index(Mount("tmpfs", private))
-    own_runtime = mounts.index(Mount("ro", box.runtime_dir, box.runtime_dir))
+    seal = mounts.index(Mount("tmpfs", private, guard=True))
+    own_runtime = mounts.index(
+        Mount("ro", box.runtime_dir, box.runtime_dir, guard=True)
+    )
     assert seal < own_runtime
-    assert Mount("seal-ro", private) == mounts[-1]
+    assert Mount("seal-ro", private, guard=True) == mounts[-1]
 
 
 def test_private_root_alias_is_refused_even_when_own_runtime_is_allowed(
@@ -610,7 +627,7 @@ def test_private_root_alias_is_refused_even_when_own_runtime_is_allowed(
         box.wrapper()
 
 
-def test_private_root_at_its_normal_name_is_hidden_by_the_seal(tmp_path, monkeypatch):
+def test_a_spec_bind_at_the_private_root_conflicts_with_the_seal(tmp_path, monkeypatch):
     private = tmp_path / "private"
     private.mkdir(mode=0o700)
     monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", private)
@@ -622,7 +639,37 @@ def test_private_root_at_its_normal_name_is_hidden_by_the_seal(tmp_path, monkeyp
         box_id="private-canonical",
     )
 
-    box.wrapper()
+    with pytest.raises(MountConflict):
+        box.wrapper()
+
+
+@pytest.mark.parametrize(
+    ("guard", "refusal", "message"),
+    [
+        (False, GuardViolation, "below"),
+        (True, ValueError, "private host-control root"),
+    ],
+    ids=["plain", "guard"],
+)
+def test_a_spec_bind_below_the_private_root_is_refused(
+    tmp_path, monkeypatch, guard, refusal, message
+):
+    """A plain bind trips the seal's guard; a guard bind trips the leak check."""
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    other = private / "other-box"
+    other.mkdir(mode=0o700)
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", private)
+    _launcher(monkeypatch)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    box = Box(
+        _spec(wt, egress=(_FakeBackend(),), binds=(Bind(other, RO, guard=guard),)),
+        box_id="private-below",
+    )
+
+    with box.staged(), pytest.raises(refusal, match=message):
+        box.wrapper()
 
 
 def test_runtime_paths_ignore_ambient_tmpdir(tmp_path, monkeypatch):

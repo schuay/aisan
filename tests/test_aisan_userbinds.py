@@ -23,8 +23,8 @@ def _spec_file(tmp_path: Path, text: str) -> Path:
 def test_ro_binds_are_optional_and_rw_binds_are_mandatory(tmp_path):
     f = _spec_file(tmp_path, 'ro = ["/refs/a"]\nrw = ["/scratch/b"]\n')
     assert load(f, egress=()).binds == [
-        Bind(Path("/refs/a"), RO, optional=True),
-        Bind(Path("/scratch/b"), RW),
+        Bind(Path("/refs/a"), RO, optional=True, guard=False),
+        Bind(Path("/scratch/b"), RW, guard=False),
     ]
 
 
@@ -38,8 +38,8 @@ def test_tilde_expands_and_relative_resolves_against_the_file(tmp_path, monkeypa
     monkeypatch.setenv("HOME", str(home))
     f = _spec_file(tmp_path, 'ro = ["~/refs", "neighbour"]\n')
     assert load(f, egress=()).binds == [
-        Bind(home / "refs", RO, optional=True),
-        Bind(tmp_path / "neighbour", RO, optional=True),
+        Bind(home / "refs", RO, optional=True, guard=False),
+        Bind(tmp_path / "neighbour", RO, optional=True, guard=False),
     ]
 
 
@@ -77,17 +77,20 @@ def test_a_path_in_two_mount_keys_is_refused(tmp_path, text, match):
 
 
 @pytest.mark.parametrize(
-    "text",
+    ("text", "expected"),
     [
-        'ro = ["/a/b"]\nrw = ["/a"]\n',
-        'overlay = ["/a/cache"]\nrw = ["/a"]\n',
-        'overlay = ["/a/cache"]\nro = ["/a"]\n',
-        'rw = ["/a"]\nro = ["/a/../a/b"]\n',
+        ('ro = ["/a/b"]\nrw = ["/a"]\n', [("/a/b", RO), ("/a", RW)]),
+        ('overlay = ["/a/cache"]\nrw = ["/a"]\n', [("/a/cache", None), ("/a", RW)]),
+        ('overlay = ["/a/cache"]\nro = ["/a"]\n', [("/a/cache", None), ("/a", RO)]),
     ],
 )
-def test_a_mount_nested_under_a_later_broader_one_is_refused(tmp_path, text):
-    with pytest.raises(ValueError, match="remove the nesting"):
-        load(_spec_file(tmp_path, text), egress=())
+def test_a_mount_nested_under_a_broader_one_of_another_mode_is_kept(
+    tmp_path, text, expected
+):
+    """Nesting across keys is policy, not a mistake: the sandbox mounts the
+    broader entry first and the deeper one on top of it."""
+    binds = load(_spec_file(tmp_path, text), egress=()).binds
+    assert [(str(b.path), getattr(b, "mode", None)) for b in binds] == expected
 
 
 def test_same_mode_nesting_is_allowed(tmp_path):
@@ -95,7 +98,32 @@ def test_same_mode_nesting_is_allowed(tmp_path):
     assert [b.path for b in load(f, egress=()).binds] == [Path("/a/b"), Path("/a")]
 
 
-def test_the_includer_may_still_shadow_an_included_mount(tmp_path):
+def test_nested_mixed_modes_resolve_with_the_deeper_entry_on_top(tmp_path):
+    from aisan.sandbox import Sandbox
+
+    a = tmp_path / "a"
+    b = a / "b"
+    b.mkdir(parents=True)
+    root = tmp_path / "wt"
+    root.mkdir()
+    f = _spec_file(tmp_path, f'rw = ["{a}"]\nro = ["{b}"]\n')
+    sb = Sandbox(root=root, binds=tuple(load(f, egress=()).binds), use_cgroup=False)
+    ops = [(m.op, m.dst) for m in sb.resolve() if m.dst in (a, b)]
+    assert ops == [("rw", a), ("ro", b)]
+
+
+def test_a_dotdot_mount_entry_is_refused_when_resolved(tmp_path):
+    from aisan.sandbox import Sandbox
+
+    root = tmp_path / "wt"
+    root.mkdir()
+    f = _spec_file(tmp_path, f'ro = ["{tmp_path}/a/../a"]\n')
+    sb = Sandbox(root=root, binds=tuple(load(f, egress=()).binds), use_cgroup=False)
+    with pytest.raises(ValueError, match=r"contain no '\.\.'"):
+        sb.resolve()
+
+
+def test_the_includer_and_an_included_mount_may_nest(tmp_path):
     _named_spec(tmp_path / "base.toml", 'ro = ["/a/b"]\n')
     outer = _named_spec(
         tmp_path / "outer.toml", 'include = ["base.toml"]\nrw = ["/a"]\n'
@@ -113,7 +141,9 @@ def test_the_same_path_in_two_spellings_is_one_bind(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     f = _spec_file(tmp_path, 'ro = ["~/a", "%s"]\n' % (home / "a"))
-    assert load(f, egress=()).binds == [Bind(home / "a", RO, optional=True)]
+    assert load(f, egress=()).binds == [
+        Bind(home / "a", RO, optional=True, guard=False)
+    ]
 
 
 def test_order_is_overlays_then_ro_then_rw(tmp_path):
@@ -204,13 +234,13 @@ def test_egress_is_required_so_the_guard_is_never_off_by_default(tmp_path):
 
 def test_an_overlay_is_mandatory_and_keeps_its_own_bind_type(tmp_path):
     f = _spec_file(tmp_path, 'overlay = ["/cache/store"]\n')
-    assert load(f, egress=()).binds == [Overlay(Path("/cache/store"))]
+    assert load(f, egress=()).binds == [Overlay(Path("/cache/store"), guard=False)]
 
 
 def test_path_entries_are_returned_separately_from_the_binds(tmp_path):
     f = _spec_file(tmp_path, 'ro = ["/tools"]\npath = ["/tools"]\n')
     spec = load(f, egress=())
-    assert spec.binds == [Bind(Path("/tools"), RO, optional=True)]
+    assert spec.binds == [Bind(Path("/tools"), RO, optional=True, guard=False)]
     assert spec.path == (Path("/tools"),)
 
 

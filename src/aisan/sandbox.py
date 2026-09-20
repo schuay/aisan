@@ -1,16 +1,27 @@
 # Copyright 2026 The aisan developers
 # SPDX-License-Identifier: MIT
 
-"""Render an ordered mount policy as a bubblewrap command line.
+"""Compile a mount policy into a bubblewrap command line.
 
 Each call runs in a fresh mount namespace. The job worktree is writable at its
 absolute host path, declared dependencies are read-only, and undeclared paths
 such as the host home and other worktrees are absent. An optional systemd scope
 applies resource limits.
 
-Mount order is the policy: when paths overlap, the later bwrap mount wins. No
-separate rule gives read-only or writable mounts priority, so reading the list
-from top to bottom reveals the effective policy.
+The policy is a tree keyed by box destination. The written order of the bind
+list carries no meaning. Four rules decide what the box sees:
+
+* A mount applies to its destination and everything below it that no other
+  mount names. Mounts are emitted ancestor first, so the deeper destination
+  wins where two overlap.
+* Two identity binds at one destination merge to the stricter mode: read-only
+  over overlay over writable. Any other pair at one destination is a conflict.
+* A guard admits only other guards below it. Every mount is a guard unless
+  declared plain, so policy written in Python is closed by default and a plain
+  mount from a bind file cannot reopen part of it. Plain mounts are for
+  operator declarations that other operator declarations may refine.
+* A seal is an empty directory that becomes read-only after every hole through
+  it has been mounted.
 
 This layer has three known limits:
 
@@ -58,10 +69,7 @@ _ISOLATION_ARGS = (
 
 
 class Mode(enum.Enum):
-    """Whether a bind is read-only or writable.
-
-    Its position in the bind list determines precedence.
-    """
+    """Whether a bind is read-only or writable."""
 
     RO = "ro"
     RW = "rw"
@@ -75,18 +83,26 @@ RW = Mode.RW
 class Bind:
     """Mount `path` into the box at its own absolute path.
 
-    Later overlapping binds win. A pin, a hole through it, and another pin
-    inside the hole are represented as three binds in that order; the modes do
-    not alter their precedence.
+    A bind covers its path and everything below it that no other mount names.
+    A read-only bind below a writable one pins that subtree; a writable bind
+    below a read-only one opens a hole. Two binds at the same path merge to
+    the stricter mode.
 
     Set `optional` only when a missing source is safe to omit, such as a vanished
     dependency symlink target. A missing guard must fail because omitting it can
     leave the underlying path writable. Sources are mandatory by default.
+
+    A bind is a guard unless `guard=False`: nothing but another guard may be
+    mounted below it, so a plain mount cannot reopen part of a Git hooks
+    directory, a credential store, or a hole through a `Seal`. Declare a bind
+    plain only when it is an operator mount that other operator mounts may
+    refine, as bind files do.
     """
 
     path: Path
     mode: Mode
     optional: bool = False
+    guard: bool = True
 
 
 @dataclass(frozen=True)
@@ -95,7 +111,8 @@ class BindOver:
 
     This supplies a file where software already expects it, such as a per-job
     `/etc/hosts` or a build configuration in another checkout. It is always
-    mandatory because omitting it would silently expose the original file.
+    mandatory because omitting it would silently expose the original file, and
+    always a guard because it substitutes content that nothing may reopen.
     """
 
     src: Path
@@ -111,13 +128,14 @@ class Overlay:
     a lock file to use its multi-gigabyte cache; a read-only bind fails, while an
     absent cache triggers an offline rebuild that hangs.
 
-    An overlay remains writable inside the box. Use a later read-only `Bind` for
-    files that must not change even temporarily, such as pinned Git config or
-    credentials. Overlays are mandatory because silently omitting a cache can
-    hang the tool that needs it.
+    An overlay remains writable inside the box. Use a read-only `Bind` below it
+    for files that must not change even temporarily, such as pinned Git config
+    or credentials. Overlays are mandatory because silently omitting a cache can
+    hang the tool that needs it. `guard` has the same meaning as on `Bind`.
     """
 
     path: Path
+    guard: bool = True
 
 
 @dataclass(frozen=True)
@@ -131,8 +149,10 @@ class Seal:
     Git worktrees require this stronger operation. Pinning the sibling configs
     found during assembly captures only a snapshot; a job could later add a
     sibling or invent a directory containing `config.worktree`. Sealing the
-    entire worktrees directory hides every sibling, while a later writable bind
-    restores the current worktree's directory.
+    entire worktrees directory hides every sibling, while a guarded writable
+    bind below it restores the current worktree's directory.
+
+    A seal is always a guard: only guards may be mounted below it.
 
     bwrap cannot create a mount point inside an already read-only tmpfs. The
     read-only remount therefore runs after the complete bind list. This behavior
@@ -167,6 +187,107 @@ class EnsurePath:
     is_dir: bool
 
 
+class MountConflict(ValueError):
+    """Two mounts name one destination and neither can yield to the other."""
+
+
+class GuardViolation(ValueError):
+    """A plain mount sits below a guard, which would reopen part of it."""
+
+
+class Op(enum.Enum):
+    """A mount operation at one destination.
+
+    `SEAL` and `TMPFS` hide the host path. The other three expose it with
+    decreasing restriction: `RO` forbids writes, `OVERLAY` discards them, `RW`
+    passes them through. That order is the tie-break when two identity binds
+    name one destination.
+    """
+
+    SEAL = "seal"
+    TMPFS = "tmpfs"
+    RO = "ro"
+    OVERLAY = "overlay"
+    RW = "rw"
+
+
+# Identity binds that may merge at one destination, strictest first.
+_MERGEABLE = (Op.RO, Op.OVERLAY, Op.RW)
+
+
+@dataclass(frozen=True)
+class Entry:
+    """One declared mount, normalized for the destination tree.
+
+    Every declared thing becomes an entry: the fixed system roots, tmpfs
+    mounts, the writable root, and each `BindSpec`. The tree is a dict from
+    `dst` to the entry that wins there.
+
+    `fixed` marks an entry whose operation cannot be changed by merging: the
+    root, because the payload runs in it; tmpfs and seals, because they hide
+    rather than expose; system roots and bind-overs, because their content is
+    not the host path. Two identical fixed entries still collapse.
+
+    The root, tmpfs mounts, and system roots are plain, not guards: operator
+    binds live below them by design, such as a cache under the home tmpfs or a
+    pin inside the worktree. They are subject to the guard rule like any other
+    plain entry, so a guard above the root is a policy error.
+    """
+
+    dst: Path
+    op: Op
+    src: Path | None = None
+    guard: bool = False
+    optional: bool = False
+    fixed: bool = False
+    size: int = 0
+    allow_missing: bool = False
+
+    @property
+    def _identity(self) -> tuple[object, ...]:
+        return (self.op, self.src, self.size, self.allow_missing)
+
+    def merge(self, other: Entry) -> Entry:
+        """Return the entry that wins where `self` and `other` share `dst`.
+
+        Identical entries collapse. A fixed entry defines its destination, so a
+        restatement takes its guard status; a system root restated by a
+        resolved interpreter prefix stays plain. Otherwise the result is a
+        guard if either side was. The optional flag survives only if both had
+        it. Two mergeable identity binds take the stricter mode under the same
+        flag rules. Anything else is a conflict: the operator wrote two
+        different things for one path.
+        """
+        optional = self.optional and other.optional
+        if self._identity == other._identity:
+            fixed = self if self.fixed else other if other.fixed else None
+            guard = fixed.guard if fixed else (self.guard or other.guard)
+            return Entry(
+                self.dst, self.op, self.src, guard, optional, fixed is not None,
+                self.size, self.allow_missing,
+            )  # fmt: skip
+        mergeable = (
+            not self.fixed
+            and not other.fixed
+            and self.op in _MERGEABLE
+            and other.op in _MERGEABLE
+        )
+        if not mergeable:
+            raise MountConflict(
+                f"mount conflict at {self.dst}: {self._describe()} and"
+                f" {other._describe()} cannot both apply; remove one"
+            )
+        op = min(self.op, other.op, key=_MERGEABLE.index)
+        return Entry(self.dst, op, self.dst, self.guard or other.guard, optional)
+
+    def _describe(self) -> str:
+        if self.op in (Op.SEAL, Op.TMPFS):
+            return self.op.value
+        if self.src != self.dst:
+            return f"{self.op.value} from {self.src}"
+        return self.op.value
+
+
 @dataclass(frozen=True)
 class Mount:
     """One resolved mount operation, in the order bwrap will apply it.
@@ -179,6 +300,7 @@ class Mount:
     dst: Path
     src: Path | None = None
     size: int = 0
+    guard: bool = False
 
     @property
     def covers(self) -> bool:
@@ -216,9 +338,8 @@ _SYSTEM_RO_BINDS = tuple(
 def system_ro_roots() -> frozenset[Path]:
     """Return identity-mounted system roots that need no second read-only bind.
 
-    Re-emitting one after a tmpfs could expose host contents again. This once
-    happened when a resolved interpreter root caused `/usr` to be mounted after
-    the home tmpfs.
+    Callers that build bind lists skip these so the reported policy does not
+    list a mount the box receives anyway.
 
     A non-identity system bind does not qualify because it leaves the source's
     own path unmounted.
@@ -286,15 +407,6 @@ def _reachable_through(mounts: list[Mount], path: Path) -> tuple[Path, ...]:
     return tuple(visible.values())
 
 
-def _strict_ancestor(a: Path, b: Path) -> bool:
-    """Return whether resolved path `a` is a strict ancestor of `b`."""
-    try:
-        ra, rb = a.resolve(), b.resolve()
-    except OSError:
-        return False
-    return ra != rb and rb.is_relative_to(ra)
-
-
 def _validate_destination(path: Path) -> None:
     """Require a box path whose kernel meaning matches its written shape.
 
@@ -308,6 +420,91 @@ def _validate_destination(path: Path) -> None:
         )
 
 
+def _entry(spec: BindSpec) -> Entry:
+    """Normalize one declared bind into a tree entry."""
+    match spec:
+        case Bind(path=p, mode=mode, optional=optional, guard=guard):
+            return Entry(p, Op(mode.value), p, guard=guard, optional=optional)
+        case BindOver(src=src, dst=dst):
+            return Entry(dst, Op.RO, src, guard=True, fixed=True)
+        case Overlay(path=p, guard=guard):
+            return Entry(p, Op.OVERLAY, p, guard=guard)
+        case Seal(path=p, allow_missing=allow_missing):
+            return Entry(
+                p, Op.SEAL, guard=True, fixed=True, allow_missing=allow_missing
+            )
+    raise TypeError(f"not a bind spec: {spec!r}")
+
+
+def _merge(entries: Iterable[Entry]) -> dict[Path, Entry]:
+    """Build the destination tree, merging entries that share a destination.
+
+    Destinations are literal box paths. Two spellings that resolve to one host
+    directory stay separate entries because the box needs both names; a venv's
+    unversioned interpreter link and its target are the usual case.
+    """
+    tree: dict[Path, Entry] = {}
+    for e in entries:
+        _validate_destination(e.dst)
+        held = tree.get(e.dst)
+        tree[e.dst] = e if held is None else held.merge(e)
+    return tree
+
+
+def _check_guards(tree: dict[Path, Entry]) -> None:
+    """Reject a plain entry below a guard.
+
+    Walk every ancestor, not only the nearest named one: a guard higher up
+    still forbids the entry when an unguarded mount sits in between. The
+    check runs on declared entries, before optional sources are dropped, so an
+    absent optional guard keeps protecting its subtree.
+    """
+    for dst, e in tree.items():
+        if e.guard:
+            continue
+        for parent in dst.parents:
+            above = tree.get(parent)
+            if above is not None and above.guard:
+                raise GuardViolation(
+                    f"{e._describe()} mount at {dst} lies below the guard at"
+                    f" {parent} ({above._describe()}); only guards may be"
+                    " mounted below a guard, so remove the nested entry or"
+                    " declare the guard plain"
+                )
+
+
+def _mount(e: Entry) -> Mount | None:
+    """Turn one entry into a mount, or `None` for an unreachable optional one.
+
+    Mandatory sources raise so a missing guard cannot silently leave its
+    underlying path writable.
+    """
+    match e.op:
+        case Op.TMPFS:
+            return Mount("tmpfs", e.dst, size=e.size)
+        case Op.SEAL:
+            if not e.allow_missing and not e.dst.is_dir():
+                raise FileNotFoundError(f"seal source missing: {e.dst}")
+            if e.dst.exists() and not e.dst.is_dir():
+                raise NotADirectoryError(f"seal path is not a directory: {e.dst}")
+            return Mount("tmpfs", e.dst, guard=True)
+        case Op.OVERLAY:
+            assert e.src is not None
+            if not e.src.is_dir():
+                raise FileNotFoundError(f"tmp-overlay source missing: {e.src}")
+            return Mount("overlay", e.dst, e.src, guard=e.guard)
+    assert e.src is not None
+    if e.src != e.dst:
+        if not e.src.exists():
+            raise FileNotFoundError(f"bind-over source missing: {e.src}")
+    elif e.optional:
+        if not _bindable(e.src):
+            return None
+    elif not e.src.exists():
+        raise FileNotFoundError(f"bind source missing: {e.src}")
+    return Mount(e.op.value, e.dst, e.src, guard=e.guard)
+
+
 @dataclass(frozen=True)
 class Sandbox:
     """An immutable confinement profile for one job.
@@ -316,22 +513,14 @@ class Sandbox:
     """
 
     # The writable job root and cwd. It retains its absolute host path because
-    # remote execution resolves build inputs by that path. It is mounted after
-    # tmpfs entries and before `binds`, allowing later guards such as the .git
-    # gitdir pointer to make paths inside it read-only.
+    # remote execution resolves build inputs by that path. Guards below it,
+    # such as the .git gitdir pointer, make paths inside it read-only.
     root: Path
-    # Everything else the box may touch, in mount order: later wins.
-    #
-    # One safety rule adjusts the written order: a read-only strict ancestor of
-    # the writable root or a tmpfs is hoisted before that mount. Such ancestors
-    # often depend on host layout, including editable source roots and resolved
-    # interpreter chains. Requiring callers to predict them would make the same
-    # profile unsafe on another host. This rule fixed `/usr` being remounted
-    # after the home tmpfs and exposing the host home read-only. All other binds
-    # retain their relative order.
+    # Everything else the box may touch. Order carries no meaning; see the
+    # module docstring for the rules that decide overlaps.
     binds: tuple[BindSpec, ...] = ()
-    # (mount point, size in bytes). Mounted before the root and the binds so a
-    # bind under a tmpfs (the worktree under the blanked $HOME) lands on top.
+    # (mount point, size in bytes). A bind below a tmpfs lands on top of it, so
+    # the worktree stays visible under the blanked $HOME.
     tmpfs: tuple[tuple[str, int], ...] = ()
     # The complete box environment, applied after `--clearenv` so host
     # credentials cannot leak through inheritance. Callers add noninteractive
@@ -355,88 +544,53 @@ class Sandbox:
     # relay disables their service.
     unshare_net: bool = False
 
-    def resolve(self) -> list[Mount]:
-        """Compile the bind list into ordered mount operations.
+    def entries(self) -> list[Entry]:
+        """Return every declared mount as a tree entry, system surface included.
 
-        `wrapper()`, `_assert_no_leak`, and the inspector consume the result.
+        The system roots take part so a bind at `/usr` collapses into the one
+        the box already has and a writable bind there is a conflict.
+        """
+        out = [Entry(dst, Op.RO, src, fixed=True) for src, dst in _SYSTEM_RO_BINDS]
+        out += [
+            Entry(Path(m), Op.TMPFS, fixed=True, size=size) for m, size in self.tmpfs
+        ]
+        out.append(Entry(self.root, Op.RW, self.root, fixed=True))
+        out += [_entry(spec) for spec in self.binds]
+        return out
+
+    def tree(self) -> dict[Path, Entry]:
+        """Return the merged, guard-checked destination tree.
+
+        Pure: no filesystem access. Raises `MountConflict` or `GuardViolation`
+        for a policy that has no single meaning.
+        """
+        tree = _merge(self.entries())
+        _check_guards(tree)
+        return tree
+
+    def resolve(self) -> list[Mount]:
+        """Compile the policy into ordered mount operations.
+
+        `wrapper()`, the exposure checks, and the inspector consume the result.
         Resolution omits unreachable optional sources and raises for missing
         mandatory sources, so the returned operations describe the actual box.
+        The system surface is excluded because `wrapper()` emits it separately.
+
+        Ancestors precede descendants, so the deeper destination wins where two
+        overlap. Seals remount read-only after the complete list because bwrap
+        cannot create a mount point inside a read-only tmpfs.
         """
-        tmpfs_mounts = [Path(m) for m, _ in self.tmpfs]
         mounts: list[Mount] = []
-        # A seal becomes read-only only after all holes through it are mounted.
         seal_ro: list[Mount] = []
-        # Track the effective mode at each literal destination to avoid duplicate
-        # binds. Do not resolve these paths: a venv's unversioned interpreter
-        # symlink and its target need separate destinations even when they resolve
-        # to one host directory. A covering mount invalidates entries below it so
-        # a guard repeated after a hole is preserved.
-        in_effect: dict[Path, Mode] = {}
-
-        def emit(m: Mount) -> None:
-            _validate_destination(m.dst)
+        for e in sorted(self.tree().values(), key=lambda e: e.dst.parts):
+            if any(e.dst == dst for _src, dst in _SYSTEM_RO_BINDS):
+                continue
+            m = _mount(e)
+            if m is None:
+                continue
             mounts.append(m)
-            if not m.covers:
-                return
-            for k in [k for k in in_effect if k == m.dst or k.is_relative_to(m.dst)]:
-                del in_effect[k]
-
-        early: list[Bind] = []  # Read-only ancestors mounted before tmpfs entries.
-        mid: list[Bind] = []  # Read-only ancestors mounted before the root.
-        rest: list[BindSpec] = []
-        for spec in self.binds:
-            if isinstance(spec, Bind):
-                # Validate every bind in this pass so hoisted and ordinary binds
-                # handle missing sources consistently.
-                if spec.optional:
-                    if not _bindable(spec.path):
-                        continue
-                elif not spec.path.exists():
-                    raise FileNotFoundError(f"bind source missing: {spec.path}")
-                if spec.mode is RO:
-                    if spec.path.resolve() in system_ro_roots():
-                        continue
-                    if any(_strict_ancestor(spec.path, t) for t in tmpfs_mounts):
-                        early.append(spec)
-                        continue
-                    if _strict_ancestor(spec.path, self.root):
-                        mid.append(spec)
-                        continue
-            rest.append(spec)
-
-        def emit_bind(b: Bind) -> None:
-            if in_effect.get(b.path) is b.mode:
-                return
-            emit(Mount(b.mode.value, b.path, b.path))
-            in_effect[b.path] = b.mode
-
-        for b in early:
-            emit_bind(b)
-        for mnt, size in self.tmpfs:
-            emit(Mount("tmpfs", Path(mnt), size=size))
-        for b in mid:
-            emit_bind(b)
-        emit(Mount("rw", self.root, self.root))
-        in_effect[self.root] = RW
-        for spec in rest:
-            match spec:
-                case Bind():
-                    emit_bind(spec)
-                case Overlay(path=p):
-                    if not p.is_dir():
-                        raise FileNotFoundError(f"tmp-overlay source missing: {p}")
-                    emit(Mount("overlay", p, p))
-                case Seal(path=p, allow_missing=allow_missing):
-                    if not allow_missing and not p.is_dir():
-                        raise FileNotFoundError(f"seal source missing: {p}")
-                    if p.exists() and not p.is_dir():
-                        raise NotADirectoryError(f"seal path is not a directory: {p}")
-                    emit(Mount("tmpfs", p))
-                    seal_ro.append(Mount("seal-ro", p))
-                case BindOver(src=src, dst=dst):
-                    if not src.exists():
-                        raise FileNotFoundError(f"bind-over source missing: {src}")
-                    emit(Mount("ro", dst, src))
+            if e.op is Op.SEAL:
+                seal_ro.append(Mount("seal-ro", e.dst, guard=True))
         return [*mounts, *seal_ro]
 
     def exposed_path(
@@ -460,11 +614,11 @@ class Sandbox:
         when home resides below a system root such as `/usr/local`:
 
         * The implicit `/usr` bind exposes the credential directory until the
-          later home tmpfs hides it.
+          home tmpfs below it hides it.
         * A requested `/usr` bind compiles to no operation because the system
           surface already mounted it.
 
-        The final mount order decides whether to refuse the box.
+        The final mount list decides whether to refuse the box.
         """
         mounts = [*_system_mounts(), *self.resolve()]
         allowed = tuple(_resolved(p) for p in allowed_sources)
@@ -481,10 +635,6 @@ class Sandbox:
         if not self.root.is_dir():
             raise FileNotFoundError(f"sandbox root missing: {self.root}")
         mounts = self.resolve()
-        # A later mount covering an earlier tmpfs or the writable root can expose
-        # the host home, make the worktree read-only, or replace it with other
-        # host contents. Reject such profiles before launch.
-        self._assert_no_leak(mounts)
         argv = list(self._cgroup_args())
         argv += ["bwrap", *_SYSTEM_ARGS]
         if self.unshare_net:
@@ -497,30 +647,6 @@ class Sandbox:
             argv += ["--setenv", k, v]
         argv += ["--chdir", str(self.root)]
         return argv
-
-    def _assert_no_leak(self, mounts: list[Mount]) -> None:
-        """Reject a later mount that covers an earlier tmpfs or writable root.
-
-        Validate the resolved mount list used by both rendering and inspection
-        so the checked representation cannot differ from the displayed one.
-        """
-        root = self.root.resolve()
-        protected = [
-            (i, m.dst.resolve())
-            for i, m in enumerate(mounts)
-            if m.op == "tmpfs" or (m.op == "rw" and m.dst.resolve() == root)
-        ]
-        for pi, pp in protected:
-            for mi, m in enumerate(mounts):
-                if mi <= pi or not m.covers:
-                    continue
-                # Equality also shadows the earlier mount.
-                if pp.is_relative_to(m.dst.resolve()):
-                    raise ValueError(
-                        f"sandbox mount order leaks: {m.dst} (index {mi}) covers"
-                        f" protected {pp} (index {pi}) -- a later bind shadows"
-                        f" a tmpfs or the rw root"
-                    )
 
     def _cgroup_args(self) -> list[str]:
         # Hosts without a systemd user manager still use bwrap without cgroups.

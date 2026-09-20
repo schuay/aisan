@@ -9,34 +9,34 @@
 == egress backends (host half on a socket, in-box on loopback) ==
   (none; the box has no route off the machine)
 
-== tmpfs mounts (mounted before binds; intended writable scratch) ==
+== tmpfs mounts (intended writable scratch; binds below land on top) ==
   [..] <TMP>  (2147483648)
-  [..] <HOME>  (1073741824  <- $HOME)
-  [..] <MAIN>/.git/worktrees  (no size)
   [..] <AISAN PRIVATE>  (no size)
+  [..] <MAIN>/.git/worktrees  (no size)
+  [..] <HOME>  (1073741824  <- $HOME)
 
-== binds in argv order (later shadows earlier on overlap) ==
+== binds by destination (deeper wins; * marks a guard: nothing plain below) ==
   system    /usr /bin /lib /lib64 /sbin /etc /proc /dev /run/systemd/journal/stdout
+  [..] ro      * <AISAN PREFIX>
+  [..] ro      * <AISAN SRC>
+  [..] rw      * <MAIN>/.git
+  [..] ro-pin  * <MAIN>/.git/config
+  [..] ro-pin  * <MAIN>/.git/config.worktree
+  [..] ro-pin  * <MAIN>/.git/hooks
+  [..] ro-pin  * <MAIN>/.git/objects/info/alternates
+  [..] ro-pin  * <MAIN>/.git/objects/pack
+  [..] rw      * <MAIN>/.git/worktrees/wt
+  [..] ro-pin  * <MAIN>/.git/worktrees/wt/commondir
+  [..] ro-pin  * <MAIN>/.git/worktrees/wt/config.worktree
   [..] rw-root   <ROOT>
-  [..] rw        <MAIN>/.git
-  [..] ro-pin    <ROOT>/.git
-  [..] ro-pin    <MAIN>/.git/config
-  [..] ro-pin    <MAIN>/.git/config.worktree
-  [..] ro-pin    <MAIN>/.git/objects/info/alternates
-  [..] ro-pin    <MAIN>/.git/hooks
-  [..] rw        <MAIN>/.git/worktrees/wt
-  [..] ro-pin    <MAIN>/.git/worktrees/wt/commondir
-  [..] ro-pin    <MAIN>/.git/worktrees/wt/config.worktree
-  [..] ro-pin    <MAIN>/.git/objects/pack
-  [..] ro-sub    <HOME>/.cache/opencode/models.json
-  [..] ro        <AISAN PREFIX>
-  [..] ro        <AISAN SRC>
-  [..] seal-ro   <MAIN>/.git/worktrees
-  [..] seal-ro   <AISAN PRIVATE>
+  [..] ro-pin  * <ROOT>/.git
+  [..] ro-sub  * <HOME>/.cache/opencode/models.json
+  [..] seal-ro * <AISAN PRIVATE>
+  [..] seal-ro * <MAIN>/.git/worktrees
 
 == sealed directories (empty in the box; nothing creatable) ==
-  <MAIN>/.git/worktrees
   <AISAN PRIVATE>
+  <MAIN>/.git/worktrees
 
 == environment (the box's complete environment; --clearenv first) ==
   AISAN_PRIVATE_ROOT=<AISAN NESTED ROOT>
@@ -101,60 +101,60 @@
   2147483648
   --tmpfs
   <TMP>
+  --tmpfs
+  <AISAN PRIVATE>
+  --ro-bind
+  <AISAN PREFIX>
+  <AISAN PREFIX>
+  --ro-bind
+  <AISAN SRC>
+  <AISAN SRC>
+  --bind
+  <MAIN>/.git
+  <MAIN>/.git
+  --ro-bind
+  <MAIN>/.git/config
+  <MAIN>/.git/config
+  --ro-bind
+  <MAIN>/.git/config.worktree
+  <MAIN>/.git/config.worktree
+  --ro-bind
+  <MAIN>/.git/hooks
+  <MAIN>/.git/hooks
+  --ro-bind
+  <MAIN>/.git/objects/info/alternates
+  <MAIN>/.git/objects/info/alternates
+  --ro-bind
+  <MAIN>/.git/objects/pack
+  <MAIN>/.git/objects/pack
+  --tmpfs
+  <MAIN>/.git/worktrees
+  --bind
+  <MAIN>/.git/worktrees/wt
+  <MAIN>/.git/worktrees/wt
+  --ro-bind
+  <MAIN>/.git/worktrees/wt/commondir
+  <MAIN>/.git/worktrees/wt/commondir
+  --ro-bind
+  <MAIN>/.git/worktrees/wt/config.worktree
+  <MAIN>/.git/worktrees/wt/config.worktree
+  --bind
+  <ROOT>
+  <ROOT>
+  --ro-bind
+  <ROOT>/.git
+  <ROOT>/.git
   --size
   1073741824
   --tmpfs
   <HOME>
-  --bind
-  <ROOT>
-  <ROOT>
-  --bind
-  <MAIN>/.git
-  <MAIN>/.git
-  --ro-bind
-  <ROOT>/.git
-  <ROOT>/.git
-  --ro-bind
-  <MAIN>/.git/config
-  <MAIN>/.git/config
-  --ro-bind
-  <MAIN>/.git/config.worktree
-  <MAIN>/.git/config.worktree
-  --ro-bind
-  <MAIN>/.git/objects/info/alternates
-  <MAIN>/.git/objects/info/alternates
-  --ro-bind
-  <MAIN>/.git/hooks
-  <MAIN>/.git/hooks
-  --tmpfs
-  <MAIN>/.git/worktrees
-  --bind
-  <MAIN>/.git/worktrees/wt
-  <MAIN>/.git/worktrees/wt
-  --ro-bind
-  <MAIN>/.git/worktrees/wt/commondir
-  <MAIN>/.git/worktrees/wt/commondir
-  --ro-bind
-  <MAIN>/.git/worktrees/wt/config.worktree
-  <MAIN>/.git/worktrees/wt/config.worktree
-  --ro-bind
-  <MAIN>/.git/objects/pack
-  <MAIN>/.git/objects/pack
   --ro-bind
   <OPENCODE_CACHE>/models.json
   <HOME>/.cache/opencode/models.json
-  --ro-bind
-  <AISAN PREFIX>
-  <AISAN PREFIX>
-  --ro-bind
-  <AISAN SRC>
-  <AISAN SRC>
-  --tmpfs
+  --remount-ro
   <AISAN PRIVATE>
   --remount-ro
   <MAIN>/.git/worktrees
-  --remount-ro
-  <AISAN PRIVATE>
   --unshare-pid
   --unshare-ipc
   --unshare-uts

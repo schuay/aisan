@@ -4,8 +4,10 @@
 """Load user-written bind specs from a six-key TOML format.
 
 The format adds mounts without requiring users to copy and modify a launcher.
-Callers append the result to a preset, so these mounts follow the standard rule
-that later entries shadow earlier ones::
+Callers add the result to a preset. Every mount from a spec file is plain, and
+overlaps resolve as `sandbox` describes: the deeper path wins below it, the
+stricter mode wins at one path, and a plain mount at or below a guard the
+preset owns is refused::
 
     # a user spec, in full
     ro = [                       # optional: absent on this host -> dropped
@@ -13,6 +15,7 @@ that later entries shadow earlier ones::
     ]
     rw = [                       # mandatory: missing -> the launch refuses
         "~/rw_repo",
+        "~/ro_repo/scratch",     # a writable hole inside a read-only mount
     ]
     overlay = [                  # mandatory: warm to read, writable, discarded
         "~/.cache/some-tool-store",
@@ -24,21 +27,23 @@ that later entries shadow earlier ones::
         "v8-mcp",                # the launcher binary by name ...
         "~/tools/nvim-mcp/bin/nv",  # ... or by full path
     ]
-    include = [                  # other spec files, expanded in place
-        "./base-userbinds.toml", # BEFORE this file's own keys, so this
-    ]                            # file shadows what it includes
+    include = [                  # other spec files, merged with this one
+        "./base-userbinds.toml",
+    ]
 
 `~` expands to the user's home. Relative paths resolve from the spec file's
 directory, allowing checked-in specs to refer to neighboring repositories.
 Included files use the same resolution.
 
-An explicit include list keeps composition order in the file instead of the
-operator's command line or implicit filename sorting. Expansion is depth-first
-in the written order, with each file applied as a unit. The including file
-therefore shadows the files it includes.
+Nesting across keys is how a file states a mixed tree: `rw` above `ro` pins a
+subtree, `ro` above `rw` opens a hole. Neither the order of keys nor the order
+of files carries meaning. Two files that name one path with different modes
+get the stricter one; that is not an error because it is what a stricter
+include is for.
 
-Diamond includes apply a shared file once. Direct or transitive include cycles
-are rejected with the full chain.
+An explicit include list keeps the composed set visible in the file instead of
+the operator's command line. Diamond includes apply a shared file once. Direct
+or transitive include cycles are rejected with the full chain.
 
 The repository's measured use cases determine optionality. A missing read-only
 reference is skipped, while a missing writable path is an error because the box
@@ -116,8 +121,8 @@ def _refused_key_stores() -> tuple[Path, ...]:
     return tuple(Path.home() / name for name in _REFUSED_KEY_STORES)
 
 
-# Mount keys in emission order: writable overlays, read-only paths, then writable
-# paths. `path` adds no mount and must be covered by one of these entries.
+# Keys that produce mounts. `path` adds no mount and must be covered by one of
+# these entries.
 _MOUNT_KEYS = ("overlay", "ro", "rw")
 
 # Complete set of accepted keys. `include` names other spec files, and `mcp`
@@ -231,29 +236,11 @@ def _load(
                 f"{path}: {both[0]} appears in both {a} and {b} -- pick one"
             )
 
-    # Because keys emit in fixed order, a broad writable path could cover an
-    # earlier nested read-only path or overlay. That would make the nested path
-    # writable and could send overlay writes to the host. Reject overlaps within
-    # one file so its fixed key order stays unambiguous. Cross-file shadowing
-    # remains the documented include behavior.
-    emitted = [
-        (key, p, Path(os.path.normpath(p))) for key in _MOUNT_KEYS for p in mounts[key]
-    ]
-    for index, (early_key, _early_p, early_norm) in enumerate(emitted):
-        for late_key, late_p, late_norm in emitted[index + 1 :]:
-            if late_key != early_key and early_norm.is_relative_to(late_norm):
-                raise ValueError(
-                    f"{path}: {late_key} entry {late_p} covers the earlier"
-                    f" {early_key} entry {_early_p} -- the later mount would"
-                    " override it (a nested ro or overlay under rw becomes"
-                    " writable); remove the nesting"
-                )
-
-    # Apply includes first so this file can intentionally shadow their mounts.
+    # Spec mounts are plain: another spec entry may sit below any of them.
     binds: list[BindSpec] = [*inner_binds]
-    binds += [Overlay(p) for p in _dedup(mounts["overlay"])]
-    binds += [Bind(p, RO, optional=True) for p in _dedup(mounts["ro"])]
-    binds += [Bind(p, RW) for p in _dedup(mounts["rw"])]
+    binds += [Overlay(p, guard=False) for p in _dedup(mounts["overlay"])]
+    binds += [Bind(p, RO, optional=True, guard=False) for p in _dedup(mounts["ro"])]
+    binds += [Bind(p, RW, guard=False) for p in _dedup(mounts["rw"])]
 
     dirs = _dedup([*inner_dirs, *_entries(path, doc.get("path", []), "path")])
     # Includes first, like mounts, so one spec can add to what it includes.

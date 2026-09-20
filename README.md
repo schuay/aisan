@@ -61,17 +61,18 @@ $ aisan claude /path/to/repo --explain
 == egress backends (host half on a socket, in-box on loopback) ==
   anthropic 127.0.0.1:8713 -> /tmp/aisan-1000/proxy-59d1d1bc/anthropic.sock
 
-== tmpfs mounts (mounted before binds; intended writable scratch) ==
+== tmpfs mounts (intended writable scratch; binds below land on top) ==
   [ 39] /tmp  (2147483648)
   [ 43] /home/user  (1073741824  <- $HOME)
+  [ 45] /tmp/aisan-1000  (no size)
 
-== binds in argv order (later shadows earlier on overlap) ==
+== binds by destination (deeper wins; * marks a guard: nothing plain below) ==
   system    /usr /bin /lib /lib64 /sbin /etc /proc /dev
-  [ 45] rw-root   /path/to/repo
-  [ 63] rw        /home/user/.cache/aisan-claude/aisan-4475d1c31168
-  [ 66] ro        /home/user/.config/git/config
-  [ 69] seal      /tmp/aisan-1000
-  [ 72] ro        /tmp/aisan-1000/proxy-59d1d1bc
+  [ 63] rw      * /home/user/.cache/aisan-claude/aisan-4475d1c31168
+  [ 66] ro      * /home/user/.config/git/config
+  [ 69] rw-root   /path/to/repo
+  [ 72] ro      * /tmp/aisan-1000/proxy-59d1d1bc
+  [ 75] seal-ro * /tmp/aisan-1000
 
 == environment (the box's complete environment; --clearenv first) ==
   CLAUDE_CONFIG_DIR=/path/to/repo/.aisan-claude-state
@@ -125,8 +126,13 @@ errors.
 
 - **`BoxSpec`** is frozen, non-defaulting data. Call sites state every mount.
   `Limits` may leave resource caps unset.
-- **One ordered bind list, later wins**, matching Bubblewrap's mount behavior.
-  `Bind`, `Seal`, `Overlay`, and `BindOver` read top to bottom.
+- **Mounts form a tree keyed by destination.** Order in a `BoxSpec` carries no
+  meaning: an ancestor is mounted before its descendants, so the deeper entry
+  wins. Two entries at one path must agree, or be identity binds, where the
+  stricter mode wins. A *guard* (the default for `Bind` and `Overlay`; always
+  for `Seal` and `BindOver`) admits only other guards below it, so a user bind
+  cannot reopen part of a policy mount. User bind files and `extra_ro` are
+  plain.
 - **Credential-aware egress in both network modes.** Isolated boxes reach host
   proxies through Unix sockets and in-box loopback relays. Interactive boxes
   started with `--net` reach authenticated host-loopback TCP listeners directly;

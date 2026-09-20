@@ -450,6 +450,28 @@ def test_every_preset_disables_git_gc_in_the_box(tmp_path, preset):
     }
 
 
+@pytest.mark.parametrize(
+    "preset",
+    [
+        lambda wt, st, ro: claude_code(wt, state=st, unshare_net=True, extra_ro=ro),
+        lambda wt, st, ro: codex(wt, state=st, unshare_net=True, extra_ro=ro),
+        lambda wt, st, ro: opencode(wt, state=st, unshare_net=True, extra_ro=ro),
+        lambda wt, st, ro: depot_tools_job(wt, unshare_net=True, extra_ro=ro),
+    ],
+)
+def test_only_extra_ro_is_plain_in_a_preset(tmp_path, preset):
+    """Every bind a preset emits on its own is a guard; `extra_ro` carries the
+    operator's read-only extras and is the only plain set."""
+    wt, _, _ = _linked_worktree(tmp_path)
+    extra = (tmp_path / "refs-a", tmp_path / "refs-b")
+    for p in extra:
+        p.mkdir()
+    binds = preset(wt, tmp_path / "state", extra).binds
+    flagged = [b for b in binds if isinstance(b, (Bind, Overlay))]
+    assert {b.path for b in flagged if not b.guard} == set(extra)
+    assert all(b.guard for b in flagged if b.path not in extra)
+
+
 async def test_an_in_box_gc_cannot_destroy_a_sibling_worktrees_objects(tmp_path):
     import dataclasses
 

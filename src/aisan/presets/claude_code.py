@@ -89,7 +89,7 @@ def claude_code(
     """Build a Claude Code confinement spec for ``worktree``."""
     home = Path.home()
     binds: list[BindSpec] = [
-        *(Bind(p, RO, optional=True) for p in extra_ro),
+        *(Bind(p, RO, optional=True, guard=False) for p in extra_ro),
         # Keep shared Git objects writable, pin steering files read-only, and
         # hide sibling worktrees. Plain checkouts receive the same steering pins.
         #
@@ -97,14 +97,15 @@ def claude_code(
         # Pin packs read-only in an isolated network to prevent Git GC pruning
         # those objects from the shared store.
         *git_binds(worktree, pin_packs=unshare_net),
-        # Keep operator settings read-only above the writable home tmpfs.
+        # Operator settings stay read-only below the writable home tmpfs, and
+        # nothing may be mounted below them.
         *([Bind(config, RO)] if config is not None else []),
         # The writable root already exposes an embedded state directory and
         # allows Claude Code to create it after assembly.
         *([] if state.is_relative_to(worktree) else [Bind(state, RW)]),
         # Claude Code 2.1.259 resolves user skills as `$CLAUDE_CONFIG_DIR/skills`,
-        # so host skills reach the box only inside the state directory. Keep them
-        # read-only there, above the writable state bind.
+        # so host skills reach the box only inside the state directory. They stay
+        # read-only there, below the writable state bind.
         *([BindOver(skills, state / "skills")] if skills is not None else []),
     ]
     return BoxSpec(

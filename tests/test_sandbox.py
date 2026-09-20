@@ -16,7 +16,9 @@ from aisan.sandbox import (
     RW,
     Bind,
     BindOver,
+    GuardViolation,
     Mount,
+    MountConflict,
     Overlay,
     Sandbox,
     Seal,
@@ -219,12 +221,12 @@ async def test_a_ro_bind_is_enforced_by_the_kernel(profile):
     assert "Read-only file system" in out
 
 
-def test_ro_ancestor_of_root_is_hoisted_above_it(profile, tmp_path):
+def test_ro_ancestor_of_root_precedes_it(profile, tmp_path):
 
     casefile = profile.binds[1].path
     boxed = Sandbox(
         root=profile.root,
-        binds=(Bind(tmp_path, RO), Bind(casefile, RW, optional=True)),
+        binds=(Bind(tmp_path, RO, guard=False), Bind(casefile, RW, optional=True)),
         use_cgroup=False,
     )
     argv = boxed.wrapper()
@@ -239,7 +241,7 @@ def test_ro_ancestor_of_root_is_hoisted_above_it(profile, tmp_path):
 async def test_root_stays_writable_under_ro_ancestor_end_to_end(profile, tmp_path):
     boxed = Sandbox(
         root=profile.root,
-        binds=(Bind(tmp_path, RO),),
+        binds=(Bind(tmp_path, RO, guard=False),),
         tmpfs=(("/tmp", 1 << 20),),
         env=(("HOME", str(tmp_path)), *DEFANG_ENV.items()),
         use_cgroup=False,
@@ -271,7 +273,7 @@ def _pinned_box(tmp_path, use_cgroup=False):
     )
 
 
-def test_a_pin_written_after_the_rw_parent_is_emitted_after_it(tmp_path):
+def test_a_pin_is_emitted_after_its_rw_parent(tmp_path):
 
     gitdir, boxed = _pinned_box(tmp_path)
     argv = boxed.wrapper()
@@ -280,7 +282,7 @@ def test_a_pin_written_after_the_rw_parent_is_emitted_after_it(tmp_path):
     )
 
 
-def test_a_pin_written_before_the_rw_parent_does_not_win(tmp_path):
+def test_a_pin_written_before_the_rw_parent_still_wins(tmp_path):
 
     root = tmp_path / "wt"
     root.mkdir()
@@ -293,7 +295,7 @@ def test_a_pin_written_before_the_rw_parent_does_not_win(tmp_path):
         use_cgroup=False,
     )
     argv = boxed.wrapper()
-    assert _dest_at(argv, "--ro-bind", str(gitdir / "config")) < _dest_at(
+    assert _dest_at(argv, "--ro-bind", str(gitdir / "config")) > _dest_at(
         argv, "--bind", str(gitdir)
     )
 
@@ -381,7 +383,7 @@ async def test_seal_hides_siblings_and_forbids_creation_end_to_end(tmp_path):
 
 
 @needs_bwrap
-async def test_a_pin_inside_a_hole_holds_when_written_after_it(tmp_path):
+async def test_a_pin_inside_a_hole_holds_in_either_written_order(tmp_path):
 
     root = tmp_path / "wt"
     root.mkdir()
@@ -394,10 +396,10 @@ async def test_a_pin_inside_a_hole_holds_when_written_after_it(tmp_path):
     boxed = Sandbox(
         root=root,
         binds=(
+            Bind(private / "commondir", RO),
             Bind(gitdir, RW),
             Seal(wts),
             Bind(private, RW),
-            Bind(private / "commondir", RO),
             Bind(private / "config.worktree", RO),
         ),
         tmpfs=(("/tmp", 1 << 20),),
@@ -414,31 +416,24 @@ async def test_a_pin_inside_a_hole_holds_when_written_after_it(tmp_path):
     assert out.count("Read-only file system") >= 2
 
 
-@needs_bwrap
-async def test_a_pin_written_before_its_hole_is_re_opened_by_it(tmp_path):
+def test_a_plain_bind_below_a_seal_is_refused(tmp_path):
 
     root = tmp_path / "wt"
     root.mkdir()
     gitdir = tmp_path / "gitdir"
     private = gitdir / "worktrees" / "mine"
     private.mkdir(parents=True)
-    (private / "commondir").write_text("../..\n")
     boxed = Sandbox(
         root=root,
         binds=(
             Bind(gitdir, RW),
-            Bind(private / "commondir", RO),
-            Bind(private, RW),
+            Seal(gitdir / "worktrees"),
+            Bind(private, RW, guard=False),
         ),
-        tmpfs=(("/tmp", 1 << 20),),
-        env=(("HOME", str(tmp_path)), *DEFANG_ENV.items()),
         use_cgroup=False,
     )
-    out = await run_boxed(
-        f"echo x > {private}/commondir 2>&1 && echo REOPENED", sandbox=boxed
-    )
-    assert "REOPENED" in out
-    assert "Read-only file system" not in out
+    with pytest.raises(GuardViolation, match="below the guard"):
+        boxed.tree()
 
 
 def test_wrapper_refuses_a_missing_hole_source(tmp_path):
@@ -470,8 +465,8 @@ def test_an_internal_seal_may_hide_a_path_before_it_exists(tmp_path):
     )
 
     mounts = boxed.resolve()
-    assert Mount("tmpfs", absent) in mounts
-    assert Mount("seal-ro", absent) in mounts
+    assert Mount("tmpfs", absent, guard=True) in mounts
+    assert Mount("seal-ro", absent, guard=True) in mounts
     assert not absent.exists()
 
 
@@ -490,7 +485,7 @@ def test_an_internal_seal_still_refuses_an_existing_non_directory(tmp_path):
         boxed.resolve()
 
 
-def test_ro_ancestor_of_tmpfs_phases_before_it(tmp_path):
+def test_ro_ancestor_of_tmpfs_precedes_it(tmp_path):
 
     home = tmp_path / "home"
     home.mkdir()
@@ -498,7 +493,7 @@ def test_ro_ancestor_of_tmpfs_phases_before_it(tmp_path):
     root.mkdir()
     boxed = Sandbox(
         root=root,
-        binds=(Bind(tmp_path, RO),),
+        binds=(Bind(tmp_path, RO, guard=False),),
         tmpfs=((str(home), 1 << 20),),
         env=(("HOME", str(home)),),
         use_cgroup=False,
@@ -508,7 +503,23 @@ def test_ro_ancestor_of_tmpfs_phases_before_it(tmp_path):
     assert ro_at < _dest_at(argv, "--tmpfs", str(home))
 
 
-def test_descendant_of_a_tmpfs_is_not_hoisted(tmp_path):
+def test_a_guard_above_the_root_or_a_tmpfs_is_refused(tmp_path):
+
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    with pytest.raises(GuardViolation, match=str(root)):
+        Sandbox(root=root, binds=(Bind(tmp_path, RO),)).tree()
+    with pytest.raises(GuardViolation, match=str(home)):
+        Sandbox(
+            root=tmp_path / "elsewhere",
+            binds=(Bind(tmp_path, RO),),
+            tmpfs=((str(home), 1 << 20),),
+        ).tree()
+
+
+def test_a_bind_below_a_tmpfs_follows_it(tmp_path):
 
     home = tmp_path / "home"
     home.mkdir()
@@ -537,7 +548,7 @@ async def test_ro_ancestor_of_tmpfs_tmpfs_wins_end_to_end(tmp_path):
     root.mkdir()
     boxed = Sandbox(
         root=root,
-        binds=(Bind(tmp_path, RO),),
+        binds=(Bind(tmp_path, RO, guard=False),),
         tmpfs=((str(home), 1 << 20),),
         env=(("HOME", str(home)), ("PATH", "/usr/bin:/bin")),
         use_cgroup=False,
@@ -595,29 +606,110 @@ def test_a_repeated_bind_is_emitted_once(tmp_path):
     assert [d for op, d in _ops(boxed) if d == str(dep)] == [str(dep)]
 
 
-def test_a_pin_restated_after_a_hole_is_not_deduped_away(tmp_path):
+@pytest.mark.parametrize(
+    ("make_pair", "expected"),
+    [
+        (lambda p: (Bind(p, RW), Bind(p, RO)), "ro"),
+        (lambda p: (Bind(p, RW), Overlay(p)), "overlay"),
+        (lambda p: (Overlay(p), Bind(p, RO)), "ro"),
+    ],
+    ids=["ro-over-rw", "overlay-over-rw", "ro-over-overlay"],
+)
+def test_two_identity_binds_at_one_path_merge_to_the_stricter(
+    tmp_path, make_pair, expected
+):
 
     root = tmp_path / "wt"
     root.mkdir()
-    gitdir = tmp_path / "gitdir"
-    private = gitdir / "worktrees" / "mine"
-    private.mkdir(parents=True)
-    (private / "commondir").write_text("../..\n")
+    dep = tmp_path / "dep"
+    dep.mkdir()
+    pair = make_pair(dep)
+    for binds in (pair, pair[::-1]):
+        boxed = Sandbox(root=root, binds=binds, use_cgroup=False)
+        assert [op for op, d in _ops(boxed) if d == str(dep)] == [expected]
+
+
+def test_a_merge_keeps_the_guard_and_stays_mandatory_unless_both_optional(tmp_path):
+
+    root = tmp_path / "wt"
+    root.mkdir()
+    dep = tmp_path / "dep"
+    dep.mkdir()
+    tree = Sandbox(
+        root=root,
+        binds=(Bind(dep, RW, optional=True, guard=False), Bind(dep, RO)),
+    ).tree()
+    assert tree[dep].guard is True
+    assert tree[dep].optional is False
+    both = Sandbox(
+        root=root, binds=(Bind(dep, RO, optional=True), Bind(dep, RO, optional=True))
+    ).tree()
+    assert both[dep].optional is True
+
+
+def test_the_tree_is_pure(tmp_path):
+
+    missing = tmp_path / "never-created"
+    tree = Sandbox(root=missing, binds=(Bind(missing / "x", RO),)).tree()
+    assert set(tree) >= {missing, missing / "x"}
+    assert not missing.exists()
+
+
+def test_a_plain_bind_below_a_guard_is_refused(tmp_path):
+
+    root = tmp_path / "wt"
+    root.mkdir()
+    hooks = tmp_path / "gitdir" / "hooks"
+    hooks.mkdir(parents=True)
+    boxed = Sandbox(
+        root=root,
+        binds=(Bind(hooks, RO), Bind(hooks / "pre-commit", RW, guard=False)),
+        use_cgroup=False,
+    )
+    with pytest.raises(GuardViolation, match=str(hooks)):
+        boxed.tree()
+
+
+def test_a_guard_higher_up_still_forbids_below_an_unguarded_mount(tmp_path):
+
+    root = tmp_path / "wt"
+    root.mkdir()
+    top = tmp_path / "top"
+    (top / "mid" / "leaf").mkdir(parents=True)
     boxed = Sandbox(
         root=root,
         binds=(
-            Bind(gitdir, RW),
-            Bind(private / "commondir", RO),
-            Bind(private, RW),
-            Bind(private / "commondir", RO),
+            Bind(top, RO),
+            Bind(top / "mid", RW),
+            Bind(top / "mid" / "leaf", RO, guard=False),
         ),
-        use_cgroup=False,
     )
-    emitted = [d for op, d in _ops(boxed) if d == str(private / "commondir")]
-    assert len(emitted) == 2
+    with pytest.raises(GuardViolation, match=str(top / "mid")):
+        boxed.tree()
 
 
-def test_assert_no_leak_raises_on_a_later_ancestor(tmp_path):
+def test_a_guard_below_a_guard_is_allowed_and_an_optional_guard_still_guards(
+    tmp_path,
+):
+
+    root = tmp_path / "wt"
+    root.mkdir()
+    top = tmp_path / "top"
+    top.mkdir()
+    Sandbox(root=root, binds=(Bind(top, RO), Bind(top / "x", RW))).tree()
+    absent = tmp_path / "absent"
+    boxed = Sandbox(
+        root=root,
+        binds=(
+            Bind(absent, RO, optional=True),
+            Bind(absent / "x", RW, guard=False),
+        ),
+    )
+    with pytest.raises(GuardViolation):
+        boxed.tree()
+
+
+def test_a_bind_over_above_the_root_or_a_tmpfs_is_refused(tmp_path):
 
     home = tmp_path / "home"
     home.mkdir()
@@ -631,11 +723,11 @@ def test_assert_no_leak_raises_on_a_later_ancestor(tmp_path):
         tmpfs=((str(home), 1 << 20),),
         use_cgroup=False,
     )
-    with pytest.raises(ValueError, match="leaks"):
+    with pytest.raises(GuardViolation):
         boxed.wrapper()
 
 
-def test_assert_no_leak_raises_on_a_later_bind_of_the_exact_path(tmp_path):
+def test_a_bind_over_at_a_tmpfs_or_the_root_conflicts(tmp_path):
 
     home = tmp_path / "home"
     home.mkdir()
@@ -647,14 +739,42 @@ def test_assert_no_leak_raises_on_a_later_bind_of_the_exact_path(tmp_path):
         tmpfs=((str(home), 1 << 20),),
         use_cgroup=False,
     )
-    with pytest.raises(ValueError, match="leaks"):
+    with pytest.raises(MountConflict, match="mount conflict"):
         boxed.wrapper()
 
-    with pytest.raises(ValueError, match="leaks"):
+    with pytest.raises(MountConflict, match="mount conflict"):
         dataclasses.replace(boxed, binds=(BindOver(home, root),)).wrapper()
 
 
-def test_a_seal_does_not_count_as_covering_its_own_remount(tmp_path):
+def test_a_read_only_bind_at_the_root_conflicts(tmp_path):
+
+    root = tmp_path / "wt"
+    root.mkdir()
+    with pytest.raises(MountConflict, match=str(root)):
+        Sandbox(root=root, binds=(Bind(root, RO),)).tree()
+    # Restating the root writable is the same mount and collapses.
+    Sandbox(root=root, binds=(Bind(root, RW),)).tree()
+
+
+def test_a_writable_bind_at_a_system_root_conflicts(tmp_path):
+
+    root = tmp_path / "wt"
+    root.mkdir()
+    with pytest.raises(MountConflict, match="/etc"):
+        Sandbox(root=root, binds=(Bind(Path("/etc"), RW),)).tree()
+
+
+def test_a_seal_and_a_bind_at_one_path_conflict(tmp_path):
+
+    root = tmp_path / "wt"
+    root.mkdir()
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    with pytest.raises(MountConflict, match="seal"):
+        Sandbox(root=root, binds=(Seal(sealed), Bind(sealed, RW))).tree()
+
+
+def test_a_seal_may_sit_below_the_root(tmp_path):
 
     root = tmp_path / "wt"
     root.mkdir()
@@ -674,7 +794,7 @@ def test_bind_over_places_a_file_at_a_different_path(tmp_path):
     assert argv[i + 1] == "/etc/hosts"
 
 
-def test_bind_over_written_last_lands_after_the_system_binds(tmp_path):
+def test_bind_over_lands_after_the_system_bind_it_overrides(tmp_path):
     src = tmp_path / "my-hosts"
     src.write_text("x\n")
     root = tmp_path / "wt"
@@ -684,10 +804,9 @@ def test_bind_over_written_last_lands_after_the_system_binds(tmp_path):
     ro.mkdir()
     argv = Sandbox(
         root=root,
-        binds=(Bind(ro, RO), BindOver(src, Path("/etc/hosts"))),
+        binds=(BindOver(src, Path("/etc/hosts")), Bind(ro, RO)),
     ).wrapper()
-    binds = [i for i, a in enumerate(argv) if a in ("--ro-bind", "--bind", "--tmpfs")]
-    assert argv.index(str(src)) > max(binds[:-1])
+    assert argv.index(str(src)) > _dest_at(argv, "--ro-bind", "/etc")
 
 
 def test_bind_over_source_must_exist(tmp_path):
@@ -727,13 +846,13 @@ def test_the_rw_root_cannot_contain_parent_traversal(tmp_path):
         box.resolve()
 
 
-def test_bind_over_cannot_shadow_the_rw_root(tmp_path):
+def test_bind_over_at_the_rw_root_conflicts(tmp_path):
     src = tmp_path / "f"
     src.write_text("x\n")
     root = tmp_path / "wt"
     root.mkdir()
     box = Sandbox(root=root, binds=(BindOver(src, root),))
-    with pytest.raises(ValueError, match="leaks"):
+    with pytest.raises(MountConflict):
         box.wrapper()
 
 
@@ -818,14 +937,14 @@ def test_overlay_source_must_exist(tmp_path):
         box.wrapper()
 
 
-def test_overlay_cannot_shadow_a_tmpfs(tmp_path):
+def test_overlay_at_a_tmpfs_conflicts(tmp_path):
 
     src = tmp_path / "cache"
     src.mkdir()
     root = tmp_path / "wt"
     root.mkdir()
     box = Sandbox(root=root, tmpfs=((str(src), 1 << 20),), binds=(Overlay(src),))
-    with pytest.raises(ValueError, match="leaks"):
+    with pytest.raises(MountConflict):
         box.wrapper()
 
 

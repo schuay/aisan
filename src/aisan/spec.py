@@ -115,9 +115,10 @@ class BoxSpec:
 
     # The writable root, bound at its absolute host path and used as the cwd.
     root: Path
-    # All other mounts in bwrap order. Later mounts take precedence.
+    # All other mounts. Order carries no meaning; overlaps resolve by depth,
+    # strictness, and guards as described in `sandbox`.
     binds: tuple[BindSpec, ...]
-    # (mount point, size in bytes), mounted before the root and the binds.
+    # (mount point, size in bytes). Binds below a tmpfs land on top of it.
     tmpfs: tuple[tuple[str, int], ...]
     # The complete environment inside the box. `Box.env` adds only per-backend
     # client variables, whose values depend on ports resolved at runtime.
@@ -161,11 +162,11 @@ class BoxSpec:
             )
 
     def with_binds(self, extra: list[BindSpec]) -> BoxSpec:
-        """Return this spec with `extra` appended to the bind list.
+        """Return this spec with `extra` added to the bind list.
 
-        Appending applies these binds after the preset's binds under the existing
-        later-wins rule. Callers that need an earlier position must construct the
-        ordered spec directly.
+        Position in the list carries no precedence. An added bind at a deeper
+        path wins below it; at an existing path the stricter mode wins; at or
+        below a guard it is refused.
         """
         return replace(self, binds=(*self.binds, *extra))
 
