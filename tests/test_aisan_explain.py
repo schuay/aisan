@@ -4,8 +4,10 @@
 
 from pathlib import Path
 
-from aisan.explain import normalise, parse_wrapper
+from aisan import Box
+from aisan.explain import explain, normalise, parse_wrapper
 from aisan.sandbox import RO, RW, Bind, BindOver, Sandbox, Seal
+from aisan.spec import BoxSpec, Limits
 
 
 def _idx(prof, path: Path) -> int:
@@ -411,10 +413,6 @@ def test_a_hole_is_reported_only_where_every_seal_at_that_path_allows_it(tmp_pat
 
     The report is the audit, so it must show the holes that survive both.
     """
-    from aisan import Box
-    from aisan.explain import explain
-    from aisan.spec import BoxSpec, Limits
-
     root = tmp_path / "wt"
     root.mkdir()
     sealed = tmp_path / "worktrees"

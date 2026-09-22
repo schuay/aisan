@@ -1009,3 +1009,9 @@ async def test_the_launcher_interpreter_imports_aisan_inside_a_real_box(tmp_path
         result = subprocess.run(argv, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().endswith("launch.py")
+
+
+def test_a_relative_confidential_path_is_refused(tmp_path):
+    """It would resolve against the launcher cwd, protecting who knows what."""
+    with pytest.raises(ValueError, match="must be absolute"):
+        _spec(tmp_path, confidential=(Path("store"),))

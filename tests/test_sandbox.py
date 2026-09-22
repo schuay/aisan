@@ -430,6 +430,30 @@ def test_a_seal_hole_must_lie_strictly_inside_the_seal(tmp_path, hole):
         Seal(wts, allow=(wts if hole == "." else Path(hole),))
 
 
+def test_a_plain_bind_at_an_alias_of_a_seal_is_refused(tmp_path):
+    """The guard covers destinations below the seal, not second names for it.
+
+    User bind files produce plain mounts, so a sibling inside the seal already
+    trips the guard. A symlink to the sealed directory lands outside it and
+    passes that check; only the exposure check sees it.
+    """
+    root = tmp_path / "wt"
+    root.mkdir()
+    wts = tmp_path / "gitdir" / "worktrees"
+    (wts / "other").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(wts)
+    boxed = Sandbox(
+        root=root,
+        binds=(Seal(wts), Bind(alias, RO, guard=False)),
+        use_cgroup=False,
+    )
+    boxed.tree()
+    assert boxed.sealed_exposure() == (alias, wts)
+    with pytest.raises(ValueError, match="republish the sealed directory"):
+        boxed.wrapper()
+
+
 def test_a_plain_bind_below_a_seal_is_refused(tmp_path):
 
     root = tmp_path / "wt"

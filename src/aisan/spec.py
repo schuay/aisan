@@ -159,6 +159,12 @@ class BoxSpec:
             )
         if len(set(names)) != len(names):
             raise ValueError(f"egress backend names collide: {names}")
+        # A relative path resolves against the launcher's cwd, so the same spec
+        # would protect a different directory from one invocation to the next,
+        # and protect nothing when that directory is unmounted.
+        relative = [p for p in self.confidential if not p.is_absolute()]
+        if relative:
+            raise ValueError(f"confidential paths must be absolute: {relative}")
         ports = [b.port for b in self.egress]
         if self.unshare_net and len(set(ports)) != len(ports):
             # Without this check, one relay binds first and the other backend's
