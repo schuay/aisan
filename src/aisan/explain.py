@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .box import Box
-from .sandbox import Sandbox
+from .sandbox import Sandbox, Seal
 
 
 @dataclass(frozen=True)
@@ -280,12 +280,25 @@ def explain(
         mark = "*" if m.guard else " "
         out.write(f"  [{m.idx:>3}] {_kind_field(m.kind, color)}{mark} {m.path}\n")
 
-    # A seal combines an empty tmpfs with a later read-only remount.
+    # A seal combines an empty tmpfs with a later read-only remount. Report each
+    # seal's holes too: they are the only sources allowed to republish its
+    # contents, so they bound the guarantee the seal otherwise makes.
     sealed = [m for m in prof.mounts if m.kind == "seal-ro"]
     if sealed:
-        section("sealed directories (empty in the box; nothing creatable)")
+        section(
+            "sealed directories (empty in the box, nothing creatable, no alias elsewhere)"
+        )
+        holes = {str(b.path): b.allow for b in sandbox.binds if isinstance(b, Seal)}
         for m in sealed:
+            allow = holes.get(m.path, ())
             out.write(f"  {m.path}\n")
+            for hole in allow:
+                out.write(f"    hole {hole}\n")
+
+    if box.spec.confidential:
+        section("confidential host paths (no mount may publish them)")
+        for path in box.spec.confidential:
+            out.write(f"  {path}\n")
 
     if not shared_egress:
         section("environment (the box's complete environment; --clearenv first)")

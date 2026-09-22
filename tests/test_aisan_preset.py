@@ -87,7 +87,7 @@ def test_git_binds_is_the_policy_read_top_to_bottom(tmp_path):
         Bind(git / "objects" / "info", RW),
         Bind(git / "objects" / "info" / "alternates", RO),
         Bind(git / "hooks", RO),
-        Seal(git / "worktrees"),
+        Seal(git / "worktrees", allow=(git / "worktrees" / "wt",)),
         Bind(git / "worktrees" / "wt", RW),
         Bind(git / "worktrees" / "wt" / "commondir", RO),
         Bind(git / "worktrees" / "wt" / "config.worktree", RO),
@@ -114,7 +114,8 @@ def test_a_sibling_needs_no_pin_because_the_seal_removes_it(tmp_path):
     (other / "commondir").write_text("../..\n")
     paths = [b.path for b in git_binds(wt)]
     assert not any("other" in p.name for p in paths)
-    assert Seal(main / ".git" / "worktrees") in git_binds(wt)
+    wts = main / ".git" / "worktrees"
+    assert Seal(wts, allow=(wts / "wt",)) in git_binds(wt)
 
 
 def test_a_sibling_pruned_mid_scan_cannot_break_assembly(tmp_path):

@@ -38,9 +38,11 @@
   [..] seal-ro * <AISAN PRIVATE>
   [..] seal-ro * <MAIN>/.git/worktrees
 
-== sealed directories (empty in the box; nothing creatable) ==
+== sealed directories (empty in the box, nothing creatable, no alias elsewhere) ==
   <AISAN PRIVATE>
+    hole <AISAN PRIVATE>/proxy-16a0eeb0791b6c92
   <MAIN>/.git/worktrees
+    hole <MAIN>/.git/worktrees/wt
 
 == environment (the box's complete environment; --clearenv first) ==
   AISAN_PRIVATE_ROOT=<AISAN NESTED ROOT>

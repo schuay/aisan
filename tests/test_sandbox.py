@@ -342,7 +342,7 @@ def _sealed_box(tmp_path, use_cgroup=False):
         private,
         Sandbox(
             root=root,
-            binds=(Bind(gitdir, RW), Seal(wts), Bind(private, RW)),
+            binds=(Bind(gitdir, RW), Seal(wts, allow=(private,)), Bind(private, RW)),
             tmpfs=(("/tmp", 1 << 20),),
             env=(("HOME", str(tmp_path)),),
             use_cgroup=use_cgroup,
@@ -404,7 +404,7 @@ async def test_a_pin_inside_a_hole_holds_in_either_written_order(tmp_path):
         binds=(
             Bind(private / "commondir", RO),
             Bind(gitdir, RW),
-            Seal(wts),
+            Seal(wts, allow=(private,)),
             Bind(private, RW),
             Bind(private / "config.worktree", RO),
         ),
@@ -420,6 +420,12 @@ async def test_a_pin_inside_a_hole_holds_in_either_written_order(tmp_path):
     )
     assert "wrote_lock" in out
     assert out.count("Read-only file system") >= 2
+
+
+def test_a_seal_hole_must_lie_inside_the_seal(tmp_path):
+    """An outside hole would exempt data the seal never covered."""
+    with pytest.raises(ValueError, match="outside itself"):
+        Seal(tmp_path / "wts", allow=(Path("/"),))
 
 
 def test_a_plain_bind_below_a_seal_is_refused(tmp_path):

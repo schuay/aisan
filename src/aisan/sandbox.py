@@ -161,6 +161,11 @@ class Seal:
 
     A seal is always a guard: only guards may be mounted below it.
 
+    A seal also declares the host data confidential, not merely the pathname:
+    `sealed_exposure` refuses the profile when any other mount publishes that
+    data under a second name. Sealing one destination cannot hide an alias,
+    because a bind resolves its source and publishes an independent view.
+
     bwrap cannot create a mount point inside an already read-only tmpfs. The
     read-only remount therefore runs after the complete bind list. This behavior
     was verified with bwrap 0.11.2.
@@ -171,6 +176,21 @@ class Seal:
     # create them through a writable host bind. Reserved internal paths opt in
     # because they must be hidden before their first use.
     allow_missing: bool = False
+    # Sources at or below these paths are the seal's intentional holes: the
+    # current worktree's private directory, this box's runtime directory. A
+    # hole must be named here as well as mounted, because the guard permits any
+    # guard below the seal and the sealed tree's siblings are what the seal
+    # protects. An ancestor publishing protected siblings is still refused.
+    allow: tuple[Path, ...] = ()
+
+    def __post_init__(self) -> None:
+        # A hole outside the sealed tree exempts data the seal never covered.
+        # `/` would exempt everything and silently disable the check.
+        outside = [p for p in self.allow if not p.is_relative_to(self.path)]
+        if outside:
+            raise ValueError(
+                f"seal {self.path} allows sources outside itself: {outside}"
+            )
 
 
 BindSpec = Bind | BindOver | Overlay | Seal
@@ -801,10 +821,37 @@ class Sandbox:
                 return source, path
         return None
 
+    def sealed_exposure(self) -> tuple[Path, Path] | None:
+        """Return the first mount source republishing a sealed directory.
+
+        A `Seal` empties one destination. Any other mount whose source resolves
+        into the sealed host directory carries the same data to a second name,
+        where the seal does not reach. Check every seal against the assembled
+        mount list so the guarantee is about the host data, not the pathname.
+
+        Each seal's own `allow` list names the holes it intends. Everything else
+        reaching the data is refused, including a source that is lexically
+        unrelated to the sealed path.
+        """
+        for spec in self.binds:
+            if not isinstance(spec, Seal):
+                continue
+            hit = self.exposed_path((spec.path,), allowed_sources=spec.allow)
+            if hit is not None:
+                return hit
+        return None
+
     def wrapper(self) -> list[str]:
         """Return the systemd and bwrap argv prefix for a command."""
         if not self.root.is_dir():
             raise FileNotFoundError(f"sandbox root missing: {self.root}")
+        hit = self.sealed_exposure()
+        if hit is not None:
+            src, path = hit
+            raise ValueError(
+                f"mount {src} would republish the sealed directory {path} under"
+                " a second name, where the seal does not reach"
+            )
         mounts = self.resolve()
         argv = list(self._cgroup_args())
         argv += ["bwrap", *_SYSTEM_ARGS]

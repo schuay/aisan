@@ -131,6 +131,12 @@ class BoxSpec:
     # Empty host paths to create before bind resolution and remove afterward if
     # this box created them. See `EnsurePath` for the .git guard use case.
     ensure: tuple[EnsurePath, ...] = ()
+    # Host paths this box must not be able to read under any name. Use this for
+    # data kept out by subtraction, which has no mount to seal: the box refuses
+    # to start if the assembled mount list publishes any of them. A path that is
+    # present in the box but emptied belongs in a `Seal`, which carries the same
+    # guarantee for its own contents.
+    confidential: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         # Shared networking requires authenticated, kernel-assigned loopback

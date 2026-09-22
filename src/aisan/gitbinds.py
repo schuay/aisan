@@ -136,7 +136,8 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
     writable. The seal hides all siblings and prevents new entries. A guarded
     writable bind below it restores this worktree's private directory so Git
     can create `index.lock`, and the pins below that hole hold its steering
-    files.
+    files. That hole is the seal's only `allow` entry, so no other mount may
+    carry a sibling's steering files into the box under a different name.
 
     A plain checkout has an in-tree `.git` directory. It needs the same pins,
     minus the linked-worktree pointers, plus a self-bind:
@@ -199,7 +200,9 @@ def git_binds(worktree: Path, *, pin_packs: bool = False) -> list[BindSpec]:
     binds = [Bind(main_git, RW), Bind(gitfile, RO), *_steering_pins(main_git)]
     wts = main_git / "worktrees"
     if wts.is_dir():
-        binds.append(Seal(wts))
+        # The seal keeps every sibling worktree's steering files out of the box
+        # under any name; this worktree's own directory is its only hole.
+        binds.append(Seal(wts, allow=(private,)))
     # Restore this worktree's private directory through the seal, then pin its
     # steering files. `commondir` must already exist; fabricating an empty one
     # would make Git interpret the filesystem root as the common directory.

@@ -292,7 +292,13 @@ class Box:
         ]
         # Hide the shared host-control namespace, then expose only this box's
         # runtime directory. The root may not exist before the first box.
-        binds.append(Seal(private_root(), allow_missing=True))
+        binds.append(
+            Seal(
+                private_root(),
+                allow_missing=True,
+                allow=(self.runtime_dir,) if self.spec.egress else (),
+            )
+        )
         if self.spec.egress:
             binds.append(runtime_bind(self.box_id))
             for backend in self.spec.egress:
@@ -310,31 +316,37 @@ class Box:
             unshare_net=self.spec.unshare_net,
         )
 
-        # Protect credential children and every other box's runtime sockets and
-        # shared-network tokens. Only this box's runtime directory may remain
-        # visible below the private root. Checking resolved mounts also catches
-        # aliases created by bind-over operations.
-        allowed = (self.runtime_dir,) if self.spec.egress else ()
-        hit = sandbox.exposed_path((private_root(),), allowed_sources=allowed)
+        # Every seal states that its contents stay out of the box, so an alias
+        # to a sealed directory is refused here rather than at `wrapper`. This
+        # covers the private host-control root -- other boxes' runtime sockets
+        # and shared-network tokens -- along with the spec's own seals, and
+        # catches aliases created by bind-over operations.
+        hit = sandbox.sealed_exposure()
         if hit is not None:
             src, path = hit
             raise ValueError(
-                f"box {self.box_id}: mount {src} would expose aisan's private"
-                f" host-control root at {path}"
+                f"box {self.box_id}: mount {src} would republish the sealed"
+                f" directory {path} under a second name, where the seal does"
+                " not reach"
             )
 
-        # Check credentials against the finished mount list, including the fixed
-        # system surface and library-added binds. This runs after composition
-        # because backends own the protected paths.
-        for backend in self.spec.egress:
-            hit = sandbox.exposed_path(backend.credentials)
+        # Check paths kept out by subtraction against the finished mount list,
+        # including the fixed system surface and library-added binds. This runs
+        # after composition because backends own their credential paths.
+        protected = [("path declared confidential", p) for p in self.spec.confidential]
+        protected += [
+            (f"{b.name} backend's credential", c)
+            for b in self.spec.egress
+            for c in b.credentials
+        ]
+        for what, path in protected:
+            hit = sandbox.exposed_path((path,))
             if hit is not None:
-                src, cred = hit
+                src, target = hit
                 raise ValueError(
-                    f"box {self.box_id}: mount {src} would expose the"
-                    f" {backend.name} backend's credential at {cred} -- the"
-                    " credential stays out of the box by subtraction, and this"
-                    " mount undoes that"
+                    f"box {self.box_id}: mount {src} would expose the {what}"
+                    f" at {target} -- it stays out of the box by subtraction,"
+                    " and this mount undoes that"
                 )
         return sandbox
 

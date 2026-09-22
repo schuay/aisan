@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import shutil
 import socket as _socket
 import subprocess
@@ -57,6 +58,7 @@ def _spec(root: Path, *, egress=(), **kw) -> BoxSpec:
         unshare_net=kw.get("unshare_net", bool(egress)),
         limits=kw.get("limits", Limits(use_cgroup=False)),
         ensure=kw.get("ensure", ()),
+        confidential=kw.get("confidential", ()),
     )
 
 
@@ -625,7 +627,7 @@ def test_private_root_alias_is_refused_even_when_own_runtime_is_allowed(
     )
     box = Box(spec, box_id="private-alias")
 
-    with box.staged(), pytest.raises(ValueError, match="private host-control root"):
+    with box.staged(), pytest.raises(ValueError, match=re.escape(str(private))):
         box.wrapper()
 
 
@@ -649,7 +651,7 @@ def test_a_spec_bind_at_the_private_root_conflicts_with_the_seal(tmp_path, monke
     ("guard", "refusal", "message"),
     [
         (False, GuardViolation, "below"),
-        (True, ValueError, "private host-control root"),
+        (True, ValueError, "republish the sealed directory"),
     ],
     ids=["plain", "guard"],
 )
@@ -719,34 +721,102 @@ async def test_backend_binds_and_launcher_binds_do_not_trip_the_guard(tmp_path):
         box.command(["true"])
 
 
-def test_a_launcher_alias_cannot_republish_sealed_credentials(tmp_path, monkeypatch):
-    from aisan.launch import launcher_binds
-
+def _alias_layout(tmp_path) -> tuple[Path, Path, Path]:
+    """An installation, a secret below it, and a directory symlink to it."""
     base = tmp_path / "versioned"
     (base / "bin").mkdir(parents=True)
-    python = base / "bin/python"
-    python.touch()
-    credentials = base / "credentials"
-    credentials.mkdir()
-    (credentials / "token").write_text("secret")
+    (base / "bin" / "python").touch()
+    secret = base / "credentials"
+    secret.mkdir()
+    (secret / "token").write_text("secret")
     alias = tmp_path / "minor"
     alias.symlink_to(base)
-    binds = launcher_binds(python, (base, base), home=alias / "bin")
-    backend = _FakeBackend()
-    backend.credentials = (credentials,)
+    return base, secret, alias
+
+
+def test_a_launcher_alias_cannot_republish_a_sealed_directory(tmp_path, monkeypatch):
+    """A seal protects its contents, not only the pathname it empties.
+
+    The alias passes the launcher's prefix check and mounts the installation
+    again, under a name the seal does not reach. No credential registration is
+    involved: the seal alone must refuse the profile.
+    """
+    from aisan.launch import launcher_binds
+
+    base, secret, alias = _alias_layout(tmp_path)
+    binds = launcher_binds(base / "bin" / "python", (base, base), home=alias / "bin")
     work = tmp_path / "work"
     work.mkdir()
-    box = Box(
-        _spec(work, binds=(Seal(credentials),), egress=(backend,)),
-        box_id=str(tmp_path / "alias-credentials"),
-    )
-    # The canonical publication is sealed; the alias publishes a separate view.
+    box = Box(_spec(work, binds=(Seal(secret),)), box_id=str(tmp_path / "alias"))
+
     _launcher(monkeypatch, *(b for b in binds if b.path != alias))
-    with box.staged():
+    box.wrapper()
+    _launcher(monkeypatch, *binds)
+    with pytest.raises(ValueError, match="republish the sealed directory"):
         box.wrapper()
-        _launcher(monkeypatch, *binds)
-        with pytest.raises(ValueError, match="backend's credential"):
-            box.wrapper()
+
+
+def test_a_confidential_path_is_refused_under_any_mount(tmp_path, monkeypatch):
+    """`confidential` covers data kept out by subtraction, which has no seal."""
+    _launcher(monkeypatch)
+    outside = tmp_path / "outside"
+    secret = outside / "store" / "token"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("secret")
+    work = tmp_path / "work"
+    work.mkdir()
+    spec = _spec(work, confidential=(secret.parent,))
+    Box(spec, box_id=str(tmp_path / "clean")).wrapper()
+
+    # An ancestor publishes the store as surely as a bind of the store itself.
+    leaky = Box(
+        _spec(work, confidential=(secret.parent,), binds=(Bind(outside, RO),)),
+        box_id=str(tmp_path / "leaky"),
+    )
+    with pytest.raises(ValueError, match="path declared confidential"):
+        leaky.wrapper()
+
+
+@needs_bwrap
+def test_an_alias_bind_publishes_what_the_canonical_seal_hides(tmp_path):
+    """The hazard behind the seal check, observed in a real box.
+
+    A bind resolves its source, so the alias carries the installation's
+    contents to a pathname the seal does not name. Sealing one destination
+    cannot reach the other, which is why the profile is refused instead.
+    """
+    _base, secret, alias = _alias_layout(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def readable(path: Path) -> bool:
+        sandbox = sandbox_mod.Sandbox(
+            root=work,
+            binds=(Bind(alias, RO),),
+            env=(("PATH", "/usr/bin"),),
+            use_cgroup=False,
+        )
+        return (
+            subprocess.run(
+                [*sandbox.wrapper(), "cat", str(path)],
+                capture_output=True,
+                timeout=30,
+                check=False,
+            ).returncode
+            == 0
+        )
+
+    assert readable(alias / "credentials" / "token")
+    assert not readable(secret / "token")
+
+    sealed = sandbox_mod.Sandbox(
+        root=work,
+        binds=(Bind(alias, RO), Seal(secret)),
+        env=(("PATH", "/usr/bin"),),
+        use_cgroup=False,
+    )
+    with pytest.raises(ValueError, match="republish the sealed directory"):
+        sealed.wrapper()
 
 
 async def test_refused_surfaces_the_first_backend_refusal(tmp_path):
