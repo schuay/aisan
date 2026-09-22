@@ -79,7 +79,8 @@ def interpreter_chain_dirs(python: Path) -> list[Path]:
 
     Directory symlinks in intermediate components need no entry of their own: a
     bind resolves its source, so the hop's directory carries the target's
-    contents to the path the chain names.
+    contents to the path the chain names. This preserves executable lookup,
+    not stdlib lookup relative to the venv home; `launcher_binds` handles that.
     """
     dirs: list[Path] = []
     seen: set[Path] = set()
@@ -120,6 +121,8 @@ def _in_site_packages(path: Path) -> bool:
 def launcher_binds(
     python: Path | None = None,
     prefixes: tuple[Path, Path] | None = None,
+    *,
+    home: Path | None = None,
 ) -> list[BindSpec]:
     """Return read-only binds for the in-box aisan launcher.
 
@@ -134,9 +137,9 @@ def launcher_binds(
       exist in the box. `interpreter_chain_dirs` supplies those directories.
     * CPython locates its stdlib, ``pyvenv.cfg``, and site-packages under
       ``sys.prefix`` and ``sys.base_prefix``. Read both from the interpreter
-      rather than inferring a root from path depth: the same computation runs
-      again in the box, and it keeps an unresolved intermediate path that a
-      resolved target would drop.
+      rather than inferring a root from path depth. The venv's configured home
+      can use an alias absent from those prefixes; include its parent only
+      when it resolves to the reported base prefix.
 
     Omit a path the fixed system surface already mounts. Re-declaring one adds
     no mount, so leaving it in would misreport the policy. A path under one of
@@ -148,18 +151,27 @@ def launcher_binds(
     is readable: a later tmpfs can mask a bound ancestor. One nested read-only
     bind costs less than a predicate that cannot be right.
 
-    `prefixes` overrides the interpreter's own report so a test can describe a
-    layout without installing one. Production reads `sys`.
+    `prefixes` and `home` override the interpreter's own report so tests can
+    describe another layout. Production reads `sys`, including the venv home
+    recorded by CPython's site initialization in `sys._home`.
     """
     exe = python or Path(sys.executable)
     prefix, base = prefixes or (Path(sys.prefix), Path(sys.base_prefix))
+    configured_home = home or getattr(sys, "_home", None)
+    roots = [prefix, base]
+    if configured_home:
+        alias = Path(configured_home).parent
+        # A bin-only bind loses the alias's adjacent stdlib. Path depth alone
+        # cannot prove a prefix: a personal ~/bin would select the whole home.
+        if alias.resolve(strict=True) == base.resolve(strict=True):
+            roots.append(alias)
     system = system_ro_roots()
     binds: list[BindSpec] = []
     seen: set[Path] = set()
-    for hop in (prefix, base, *interpreter_chain_dirs(exe)):
+    for hop in (*roots, *interpreter_chain_dirs(exe)):
         path = through_system_symlink(hop)
-        # Match by resolved path, as `Sandbox` does when it drops the same binds.
-        if path in seen or path.resolve() in system:
+        # An alias is a separate publication, even when its source is /usr.
+        if path in seen or path in system:
             continue
         seen.add(path)
         binds.append(Bind(path, RO))

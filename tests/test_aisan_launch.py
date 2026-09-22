@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import socket
@@ -29,7 +30,7 @@ from aisan.runtime import (
     write_client_env,
     write_manifest,
 )
-from aisan.sandbox import RO
+from aisan.sandbox import RO, Sandbox
 
 
 def _launch(runtime_dir: Path, cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -131,10 +132,95 @@ def test_launcher_binds_do_not_claim_the_home_directory_as_a_prefix(tmp_path):
     py = farm / "python3"
     py.write_text("")
     binds = [
-        Path(str(b.path)) for b in launcher_binds(py, (Path("/usr"), Path("/usr")))
+        Path(str(b.path))
+        for b in launcher_binds(py, (Path("/usr"), Path("/usr")), home=farm)
     ]
     assert tmp_path not in binds
     assert farm in binds
+
+
+@pytest.mark.parametrize("system", [False, True])
+def test_launcher_binds_preserve_a_verified_home_alias(tmp_path, monkeypatch, system):
+    base = tmp_path / "versioned"
+    (base / "bin").mkdir(parents=True)
+    (base / "bin" / "python").touch()
+    alias = tmp_path / "minor"
+    alias.symlink_to(base.name)
+    monkeypatch.setattr(launch_mod.sys, "_home", str(alias / "bin"))
+    monkeypatch.setattr(
+        launch_mod, "system_ro_roots", lambda: frozenset({base} if system else ())
+    )
+    paths = [b.path for b in launcher_binds(alias / "bin/python", (base, base))]
+    assert paths.count(alias) == 1
+    assert (base in paths) is not system
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap not installed")
+@pytest.mark.parametrize("copies", [False, True], ids=["symlinks", "copies"])
+def test_a_venv_home_alias_finds_the_stdlib_inside_a_real_box(tmp_path, copies):
+    alias = tmp_path / "minor"
+    alias.symlink_to(Path(sys.base_prefix).resolve())
+    base_python = alias / "bin" / Path(sys._base_executable).name
+    venv = tmp_path / "venv"
+    subprocess.run(
+        [
+            str(base_python),
+            "-I",
+            "-m",
+            "venv",
+            "--without-pip",
+            "--copies" if copies else "--symlinks",
+            str(venv),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    python = venv / "bin/python"
+    report = subprocess.run(
+        [
+            str(python),
+            "-I",
+            "-c",
+            (
+                "import json, sys; print(json.dumps(dict("
+                "prefix=sys.prefix, base=sys.base_prefix, home=sys._home)))"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    info = json.loads(report.stdout)
+    assert Path(info["home"]) == alias / "bin"
+    binds = launcher_binds(
+        python, (Path(info["prefix"]), Path(info["base"])), home=Path(info["home"])
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    sandbox = Sandbox(
+        root=work,
+        binds=tuple(binds),
+        tmpfs=((str(Path.home()), 64 << 20), (str(tmp_path), 64 << 20)),
+        use_cgroup=False,
+    )
+    result = subprocess.run(
+        [
+            *sandbox.wrapper(),
+            str(python),
+            "-I",
+            "-c",
+            "import encodings, _ssl, sys; print(sys.prefix)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(venv)
 
 
 def test_launcher_binds_carry_this_package_and_no_other_editable_tree():

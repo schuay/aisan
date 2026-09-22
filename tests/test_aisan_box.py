@@ -37,6 +37,7 @@ from aisan.sandbox import (
     GuardViolation,
     Mount,
     MountConflict,
+    Seal,
 )
 from aisan.spec import BoxSpec, Limits
 
@@ -716,6 +717,36 @@ async def test_backend_binds_and_launcher_binds_do_not_trip_the_guard(tmp_path):
     box = Box(_spec(wt, egress=(b,)), box_id=str(tmp_path / "j"))
     async with box:
         box.command(["true"])
+
+
+def test_a_launcher_alias_cannot_republish_sealed_credentials(tmp_path, monkeypatch):
+    from aisan.launch import launcher_binds
+
+    base = tmp_path / "versioned"
+    (base / "bin").mkdir(parents=True)
+    python = base / "bin/python"
+    python.touch()
+    credentials = base / "credentials"
+    credentials.mkdir()
+    (credentials / "token").write_text("secret")
+    alias = tmp_path / "minor"
+    alias.symlink_to(base)
+    binds = launcher_binds(python, (base, base), home=alias / "bin")
+    backend = _FakeBackend()
+    backend.credentials = (credentials,)
+    work = tmp_path / "work"
+    work.mkdir()
+    box = Box(
+        _spec(work, binds=(Seal(credentials),), egress=(backend,)),
+        box_id=str(tmp_path / "alias-credentials"),
+    )
+    # The canonical publication is sealed; the alias publishes a separate view.
+    _launcher(monkeypatch, *(b for b in binds if b.path != alias))
+    with box.staged():
+        box.wrapper()
+        _launcher(monkeypatch, *binds)
+        with pytest.raises(ValueError, match="backend's credential"):
+            box.wrapper()
 
 
 async def test_refused_surfaces_the_first_backend_refusal(tmp_path):
