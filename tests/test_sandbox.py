@@ -422,10 +422,12 @@ async def test_a_pin_inside_a_hole_holds_in_either_written_order(tmp_path):
     assert out.count("Read-only file system") >= 2
 
 
-def test_a_seal_hole_must_lie_inside_the_seal(tmp_path):
-    """An outside hole would exempt data the seal never covered."""
-    with pytest.raises(ValueError, match="outside itself"):
-        Seal(tmp_path / "wts", allow=(Path("/"),))
+@pytest.mark.parametrize("hole", ["/", "."], ids=["ancestor", "the-seal-itself"])
+def test_a_seal_hole_must_lie_strictly_inside_the_seal(tmp_path, hole):
+    """A hole at or above the seal exempts data the seal is there to cover."""
+    wts = tmp_path / "wts"
+    with pytest.raises(ValueError, match="does not strictly contain"):
+        Seal(wts, allow=(wts if hole == "." else Path(hole),))
 
 
 def test_a_plain_bind_below_a_seal_is_refused(tmp_path):

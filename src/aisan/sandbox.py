@@ -186,10 +186,13 @@ class Seal:
     def __post_init__(self) -> None:
         # A hole outside the sealed tree exempts data the seal never covered.
         # `/` would exempt everything and silently disable the check.
-        outside = [p for p in self.allow if not p.is_relative_to(self.path)]
+        outside = [
+            p for p in self.allow if p == self.path or not p.is_relative_to(self.path)
+        ]
         if outside:
             raise ValueError(
-                f"seal {self.path} allows sources outside itself: {outside}"
+                f"seal {self.path} allows sources it does not strictly contain:"
+                f" {outside}"
             )
 
 
@@ -507,6 +510,22 @@ def _reachable_through(mounts: list[Mount], path: Path) -> tuple[Path, ...]:
     return tuple(visible.values())
 
 
+def _first_exposure(
+    mounts: list[Mount],
+    paths: Iterable[Path],
+    allowed_sources: Iterable[Path],
+) -> tuple[Path, Path] | None:
+    """Return the first of `paths` readable through a source outside `allowed`."""
+    allowed = tuple(_resolved(p) for p in allowed_sources)
+    for path in paths:
+        for source in _reachable_through(mounts, path):
+            resolved_source = _resolved(source)
+            if any(resolved_source.is_relative_to(p) for p in allowed):
+                continue
+            return source, path
+    return None
+
+
 def _validate_destination(path: Path) -> None:
     """Require a box path whose kernel meaning matches its written shape.
 
@@ -811,15 +830,14 @@ class Sandbox:
 
         The final mount list decides whether to refuse the box.
         """
-        mounts = [*_system_mounts(), *self.resolve()]
-        allowed = tuple(_resolved(p) for p in allowed_sources)
-        for path in paths:
-            for source in _reachable_through(mounts, path):
-                resolved_source = _resolved(source)
-                if any(resolved_source.is_relative_to(p) for p in allowed):
-                    continue
-                return source, path
-        return None
+        paths = tuple(paths)
+        if not paths:
+            return None
+        return _first_exposure(self._published(), paths, allowed_sources)
+
+    def _published(self) -> list[Mount]:
+        """The ordered mounts a payload sees, implicit surface included."""
+        return [*_system_mounts(), *self.resolve()]
 
     def sealed_exposure(self) -> tuple[Path, Path] | None:
         """Return the first mount source republishing a sealed directory.
@@ -832,11 +850,16 @@ class Sandbox:
         Each seal's own `allow` list names the holes it intends. Everything else
         reaching the data is refused, including a source that is lexically
         unrelated to the sealed path.
+
+        Seals differ in what they allow, so each needs its own pass, but they
+        share one mount list.
         """
-        for spec in self.binds:
-            if not isinstance(spec, Seal):
-                continue
-            hit = self.exposed_path((spec.path,), allowed_sources=spec.allow)
+        seals = [b for b in self.binds if isinstance(b, Seal)]
+        if not seals:
+            return None
+        mounts = self._published()
+        for seal in seals:
+            hit = _first_exposure(mounts, (seal.path,), seal.allow)
             if hit is not None:
                 return hit
         return None

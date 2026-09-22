@@ -332,15 +332,14 @@ class Box:
 
         # Check paths kept out by subtraction against the finished mount list,
         # including the fixed system surface and library-added binds. This runs
-        # after composition because backends own their credential paths.
-        protected = [("path declared confidential", p) for p in self.spec.confidential]
-        protected += [
-            (f"{b.name} backend's credential", c)
-            for b in self.spec.egress
-            for c in b.credentials
-        ]
-        for what, path in protected:
-            hit = sandbox.exposed_path((path,))
+        # after composition because backends own their credential paths. One
+        # call per group walks the mount list once for all of that group's
+        # paths and still names the one it found.
+        egress = self.spec.egress
+        groups = [("path declared confidential", self.spec.confidential)]
+        groups += [(f"{b.name} backend's credential", b.credentials) for b in egress]
+        for what, paths in groups:
+            hit = sandbox.exposed_path(paths)
             if hit is not None:
                 src, target = hit
                 raise ValueError(

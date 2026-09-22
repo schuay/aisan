@@ -404,3 +404,38 @@ def test_explain_cli_routes_a_bad_egress_or_binds_to_a_clean_refusal(tmp_path, c
     )
     assert rc == 2
     assert "cannot read" in capsys.readouterr().err
+
+
+def test_a_hole_is_reported_only_where_every_seal_at_that_path_allows_it(tmp_path):
+    """Two seals may share a destination, and each refuses on its own list.
+
+    The report is the audit, so it must show the holes that survive both.
+    """
+    from aisan import Box
+    from aisan.explain import explain
+    from aisan.spec import BoxSpec, Limits
+
+    root = tmp_path / "wt"
+    root.mkdir()
+    sealed = tmp_path / "worktrees"
+    mine, theirs = sealed / "mine", sealed / "theirs"
+    mine.mkdir(parents=True)
+    theirs.mkdir()
+    spec = BoxSpec(
+        root=root,
+        binds=(
+            # The wider list comes last, so taking the last one would report
+            # a hole the narrower seal refuses.
+            Seal(sealed, allow=(mine,)),
+            Seal(sealed, allow=(mine, theirs)),
+            Bind(mine, RW),
+        ),
+        tmpfs=(),
+        env=(),
+        egress=(),
+        unshare_net=False,
+        limits=Limits(use_cgroup=False),
+    )
+    report = explain(Box(spec, box_id="holes"), argv=False)
+    assert f"    hole {mine}\n" in report
+    assert "theirs" not in report

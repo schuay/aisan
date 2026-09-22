@@ -288,7 +288,16 @@ def explain(
         section(
             "sealed directories (empty in the box, nothing creatable, no alias elsewhere)"
         )
-        holes = {str(b.path): b.allow for b in sandbox.binds if isinstance(b, Seal)}
+        holes: dict[str, tuple[Path, ...]] = {}
+        for b in sandbox.binds:
+            if not isinstance(b, Seal):
+                continue
+            prior = holes.get(str(b.path))
+            # Two seals may share a destination, and each refuses on its own
+            # list. A hole is effective only where every one of them allows it.
+            holes[str(b.path)] = (
+                b.allow if prior is None else tuple(h for h in prior if h in b.allow)
+            )
         for m in sealed:
             allow = holes.get(m.path, ())
             out.write(f"  {m.path}\n")
