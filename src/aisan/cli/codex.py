@@ -64,13 +64,14 @@ def seed_user_memory(state: Path, source: Path) -> None:
     mirror_user_memory(source, state / "AGENTS.md")
 
 
-def preserved_trust(path: Path) -> dict[str, object]:
-    """Read folder-trust entries that must survive a profile rewrite.
+def preserved_settings(path: Path) -> dict[str, object]:
+    """Read the settings Codex saved to its profile file.
 
-    Codex 0.153.4 stores trust in the active profile file. Preserve only each
-    project's ``trust_level``; other settings belong to ``config.toml`` in that
-    version. ``read_sealed_text`` rejects symlinks planted in the box-writable
-    state directory.
+    Codex 0.155 writes the TUI's choices (status line, model, reasoning
+    effort, folder trust) to the active profile file, so every top-level
+    table except ``mcp_servers`` carries over a rewrite. ``read_sealed_text``
+    rejects symlinks planted in the box-writable state directory; a missing
+    or unparsable file yields nothing.
     """
     text = read_sealed_text(path)
     if text is None:
@@ -79,21 +80,16 @@ def preserved_trust(path: Path) -> dict[str, object]:
         parsed = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         return {}
-    projects = parsed.get("projects")
-    if not isinstance(projects, dict):
-        return {}
-    # Keep every path because Codex keys trust by its startup directory.
-    kept = {
-        name: {"trust_level": entry["trust_level"]}
-        for name, entry in projects.items()
-        if isinstance(entry, dict) and isinstance(entry.get("trust_level"), str)
-    }
-    return {"projects": kept} if kept else {}
+    return {key: value for key, value in parsed.items() if key != "mcp_servers"}
 
 
 def write_host_mcp(mcp: SessionMCP, path: Path) -> None:
-    """Write imported MCP servers while preserving Codex folder trust."""
-    replace(mcp, document={**mcp.document, **preserved_trust(path)}).write(path)
+    """Write imported MCP servers while keeping Codex's own profile settings.
+
+    The host import owns ``mcp_servers`` outright, so a stale or planted
+    server is replaced rather than merged.
+    """
+    replace(mcp, document={**preserved_settings(path), **mcp.document}).write(path)
 
 
 def parse_args(argv: list[str]):

