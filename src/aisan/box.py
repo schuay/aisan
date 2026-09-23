@@ -42,9 +42,10 @@ from .spec import BoxSpec
 def _rw_grant_covers(path: Path, spec: BoxSpec) -> bool:
     """Return whether the spec already grants `path` writable.
 
-    The writable root or a mandatory writable ancestor provides the visibility
-    required by the launcher. Optional binds do not count because resolution may
-    omit them along with that visibility.
+    The host-bound writable root or a mandatory writable ancestor provides the
+    visibility required by the launcher. Optional binds do not count because
+    resolution may omit them along with that visibility, and a tmpfs root hides
+    the host directory it is mounted over.
 
     This predicate suppresses only the library's default launcher binds. It does
     not alter read-only pins explicitly ordered by the caller.
@@ -55,7 +56,7 @@ def _rw_grant_covers(path: Path, spec: BoxSpec) -> bool:
         # host directory while remaining distinct paths required inside the box.
         return p.absolute().is_relative_to(ancestor.absolute())
 
-    if within(path, spec.root):
+    if not spec.root_tmpfs and within(path, spec.root):
         return True
     return any(
         isinstance(b, Bind) and b.mode is RW and not b.optional and within(path, b.path)
@@ -314,6 +315,7 @@ class Box:
             slice_unit=self.spec.limits.slice_unit,
             use_cgroup=self.spec.limits.use_cgroup,
             unshare_net=self.spec.unshare_net,
+            root_tmpfs=self.spec.root_tmpfs,
         )
 
         # Every seal states that its contents stay out of the box, so an alias

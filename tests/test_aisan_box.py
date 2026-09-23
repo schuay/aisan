@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import re
 import shutil
@@ -20,6 +21,7 @@ from aisan import private as private_mod
 from aisan import sandbox as sandbox_mod
 from aisan.egress.base import Backend, BackendActivation
 from aisan.hostproc import neutral_child
+from aisan.launch import own_source_root
 from aisan.runtime import (
     CLIENT_ENV_NAME,
     MANIFEST_NAME,
@@ -1015,3 +1017,28 @@ def test_a_relative_confidential_path_is_refused(tmp_path):
     """It would resolve against the launcher cwd, protecting who knows what."""
     with pytest.raises(ValueError, match="must be absolute"):
         _spec(tmp_path, confidential=(Path("store"),))
+
+
+def test_a_tmpfs_root_over_a_credential_does_not_expose_it(tmp_path):
+
+    b = _FakeBackend()
+    b.credentials = (tmp_path / "home" / ".secret" / "key.json",)
+    root = tmp_path / "home"
+    root.mkdir()
+    spec = dataclasses.replace(_spec(root, egress=(b,)), root_tmpfs=1 << 20)
+    box = Box(spec, box_id=str(tmp_path / "j"))
+    with box.staged():
+        box.wrapper()
+
+
+def test_a_tmpfs_root_does_not_stand_in_for_the_launcher_binds(tmp_path):
+
+    source = own_source_root()
+    assert source is not None
+    hosted = Box(_spec(source.parent), box_id=str(tmp_path / "hosted"))
+    tmpfs = Box(
+        dataclasses.replace(_spec(source.parent), root_tmpfs=1 << 20),
+        box_id=str(tmp_path / "tmpfs"),
+    )
+    assert Mount("ro", source, source, guard=True) not in hosted.mounts()
+    assert Mount("ro", source, source, guard=True) in tmpfs.mounts()

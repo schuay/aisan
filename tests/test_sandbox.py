@@ -1193,3 +1193,48 @@ def test_bwrap_follows_a_relative_symlink_destination(tmp_path):
     result = subprocess.run(argv, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     assert result.stdout == "mine\n"
+
+
+def test_a_tmpfs_root_replaces_the_host_bind(tmp_path):
+
+    root = tmp_path / "absent"
+    argv = Sandbox(root=root, root_tmpfs=1 << 20, use_cgroup=False).wrapper()
+    at = _dest_at(argv, "--tmpfs", str(root))
+    assert argv[at - 2 : at] == ["--size", str(1 << 20)]
+    assert str(root) not in [argv[i + 2] for i, a in enumerate(argv) if a == "--bind"]
+    assert argv[argv.index("--chdir") + 1] == str(root)
+    assert not root.exists()
+
+
+def test_a_negative_root_tmpfs_is_refused(tmp_path):
+
+    with pytest.raises(ValueError, match="root_tmpfs"):
+        Sandbox(root=tmp_path, root_tmpfs=-1)
+
+
+@needs_bwrap
+async def test_a_tmpfs_root_caps_writes_and_keeps_them_off_the_host(tmp_path):
+    root = tmp_path / "cwd"
+    root.mkdir()
+    (root / "host-only").write_text("host")
+    source = tmp_path / "input.txt"
+    source.write_text("INPUT")
+    boxed = Sandbox(
+        root=root,
+        binds=(BindOver(source, root / "input.txt"),),
+        env=(("PATH", "/usr/bin:/bin"),),
+        use_cgroup=False,
+        root_tmpfs=1 << 20,
+    )
+    out = await run_boxed(
+        "pwd; ls; cat input.txt; echo; echo x > new && echo WROTE;"
+        " head -c 2000000 /dev/zero > big; touch input.txt",
+        sandbox=boxed,
+    )
+    assert out.splitlines()[0] == str(root)
+    assert "host-only" not in out
+    assert "INPUT" in out
+    assert "WROTE" in out
+    assert "No space left on device" in out
+    assert "cannot touch 'input.txt': Read-only file system" in out
+    assert sorted(p.name for p in root.iterdir()) == ["host-only"]

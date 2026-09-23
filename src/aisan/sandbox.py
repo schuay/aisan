@@ -743,6 +743,15 @@ class Sandbox:
     # an in-box TCP relay connected to a bind-mounted Unix socket; omitting that
     # relay disables their service.
     unshare_net: bool = False
+    # Size in bytes of a tmpfs mounted at `root` in place of the host directory.
+    # The payload's writes then stay in memory, capped by this size, and vanish
+    # with the box; binds below `root` supply its inputs. Zero binds the host
+    # directory.
+    root_tmpfs: int = 0
+
+    def __post_init__(self) -> None:
+        if self.root_tmpfs < 0:
+            raise ValueError(f"root_tmpfs must not be negative: {self.root_tmpfs}")
 
     def entries(self) -> list[Entry]:
         """Return every declared mount as a tree entry, system surface included.
@@ -755,7 +764,10 @@ class Sandbox:
         out += [
             Entry(Path(m), Op.TMPFS, fixed=True, size=size) for m, size in self.tmpfs
         ]
-        out.append(Entry(self.root, Op.RW, self.root, fixed=True))
+        if self.root_tmpfs:
+            out.append(Entry(self.root, Op.TMPFS, fixed=True, size=self.root_tmpfs))
+        else:
+            out.append(Entry(self.root, Op.RW, self.root, fixed=True))
         out += [_entry(spec) for spec in self.binds]
         return out
 
@@ -866,7 +878,7 @@ class Sandbox:
 
     def wrapper(self) -> list[str]:
         """Return the systemd and bwrap argv prefix for a command."""
-        if not self.root.is_dir():
+        if not self.root_tmpfs and not self.root.is_dir():
             raise FileNotFoundError(f"sandbox root missing: {self.root}")
         hit = self.sealed_exposure()
         if hit is not None:

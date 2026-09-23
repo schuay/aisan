@@ -113,7 +113,8 @@ class BoxSpec:
     and leaves one printable value describing the box.
     """
 
-    # The writable root, bound at its absolute host path and used as the cwd.
+    # The writable root and cwd: the host directory bound at its absolute path,
+    # or a fresh tmpfs there when `root_tmpfs` is set.
     root: Path
     # All other mounts. Order carries no meaning; overlaps resolve by depth,
     # strictness, and guards as described in `sandbox`.
@@ -137,8 +138,14 @@ class BoxSpec:
     # present in the box but emptied belongs in a `Seal`, which carries the same
     # guarantee for its own contents.
     confidential: tuple[Path, ...] = ()
+    # Size in bytes of a tmpfs mounted at `root` instead of the host directory,
+    # for payloads whose writes must neither reach the host disk nor outlive the
+    # box. Zero binds the host directory. See `Sandbox.root_tmpfs`.
+    root_tmpfs: int = 0
 
     def __post_init__(self) -> None:
+        if self.root_tmpfs < 0:
+            raise ValueError(f"root_tmpfs must not be negative: {self.root_tmpfs}")
         # Shared networking requires authenticated, kernel-assigned loopback
         # endpoints. A fixed relay port could collide with another box or expose
         # an unauthenticated credential capability on the host.
