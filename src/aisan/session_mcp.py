@@ -140,20 +140,27 @@ class SessionMCP:
         return bool(self.commands)
 
     def write(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
         if self.kind == "toml":
-            text = _toml_document(self.document)
-        else:
-            text = json.dumps(self.document, indent=2) + "\n"
+            write_toml_document(path, self.document)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
         # Prevent a symlink planted in the writable state directory from
         # redirecting this host-side write and chmod.
-        write_sealed(path, text)
+        write_sealed(path, json.dumps(self.document, indent=2) + "\n")
+
+
+def write_toml_document(path: Path, document: dict[str, object]) -> None:
+    """Write a TOML document into the box-writable state directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Prevent a symlink planted in the writable state directory from
+    # redirecting this host-side write and chmod.
+    write_sealed(path, _toml_document(document))
 
 
 def codex_host_mcp(
     path: Path | None = None, *, allow: MCPAllowlist = DENY_ALL
 ) -> SessionMCP:
-    source = path or _codex_home() / "config.toml"
+    source = path or codex_config_file()
     data = _read_toml(source)
     servers = _table(data.get("mcp_servers"), source, "mcp_servers")
     local = {
@@ -333,6 +340,11 @@ def _launcher_binds(command: str, search_path: str) -> list[Path]:
 
 def _codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+
+
+def codex_config_file() -> Path:
+    """Return the host ``config.toml`` path, honoring ``CODEX_HOME``."""
+    return _codex_home() / "config.toml"
 
 
 def claude_config_file() -> Path:
