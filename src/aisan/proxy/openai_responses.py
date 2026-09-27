@@ -42,6 +42,10 @@ from .openai_compat import parse_json_object
 
 USAGE_PATH = "/api/codex/usage"
 ALLOWED_PATHS = (("POST", "/responses"), ("GET", USAGE_PATH))
+QUIET_REFUSALS = (
+    ("GET", "/models"),
+    ("GET", "/api/codex/settings/user"),
+)
 EMPTY_BODY_ROUTES = frozenset({("GET", USAGE_PATH)})
 CLIENT_TOOL_TYPES = frozenset({"custom", "function"})
 CLIENT_TOOL_CONTAINERS = frozenset({"namespace"})
@@ -159,6 +163,7 @@ ALLOWED_INPUT_TYPES = (
 @dataclass(frozen=True)
 class PathAllowlist(_PathAllowlist):
     routes: tuple[tuple[str, str], ...] = ALLOWED_PATHS
+    quiet_refusals: tuple[tuple[str, str], ...] = QUIET_REFUSALS
 
 
 @dataclass(frozen=True)

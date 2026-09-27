@@ -13,6 +13,7 @@ from aisan.cli.claude import seed_settings, seed_state
 from aisan.session import mirror_user_memory
 from aisan.session_mcp import SessionMCP
 from aisan.statedir import (
+    planted_credentials,
     prepare_state_dir,
     read_sealed_object,
     read_sealed_text,
@@ -49,6 +50,29 @@ def test_prepare_state_dir_refuses_a_symlinked_path(tmp_path):
     link.symlink_to(tmp_path / "real")
     with pytest.raises(RuntimeError, match="not a directory"):
         prepare_state_dir(link)
+
+
+def test_empty_codex_auth_mountpoint_is_not_a_planted_credential(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    auth = state / "auth.json"
+    auth.touch()
+
+    assert planted_credentials(state, "codex") == []
+
+    auth.write_text('{"tokens": {"access_token": "planted"}}')
+    assert planted_credentials(state, "codex") == [auth]
+
+
+def test_empty_credential_symlink_is_still_planted(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    victim = tmp_path / "empty"
+    victim.touch()
+    auth = state / "auth.json"
+    auth.symlink_to(victim)
+
+    assert planted_credentials(state, "codex") == [auth]
 
 
 def test_write_sealed_does_not_follow_a_planted_symlink(tmp_path):

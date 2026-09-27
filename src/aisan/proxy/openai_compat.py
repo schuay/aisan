@@ -76,9 +76,13 @@ class PathAllowlist:
     """
 
     routes: tuple[tuple[str, str], ...] = ALLOWED_PATHS
+    quiet_refusals: tuple[tuple[str, str], ...] = ()
 
     def permits(self, method: str, path: str) -> bool:
         return (method.upper(), path) in self.routes
+
+    def warns_on_refusal(self, method: str, path: str) -> bool:
+        return (method.upper(), path) not in self.quiet_refusals
 
 
 # ``function`` tools execute in the box. Other tool types may make the upstream
@@ -296,9 +300,10 @@ def make_app(
             lambda: path_allow.permits(request.method, path),
             subject=f"{request.method} {path}",
         ):
-            warn.warning(
-                log, "openai-compat proxy: refused %s %s", request.method, path
-            )
+            if path_allow.warns_on_refusal(request.method, path):
+                warn.warning(
+                    log, "openai-compat proxy: refused %s %s", request.method, path
+                )
             return _error(
                 403, "invalid_request_error", "path not permitted by the sandbox proxy"
             )

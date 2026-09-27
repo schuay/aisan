@@ -420,6 +420,37 @@ async def test_subscription_credential_is_absent_inside_a_real_box(tmp_path):
     assert f"client_key={PLACEHOLDER_KEY}" in result.stdout
 
 
+async def test_box_auth_bind_leaves_only_an_empty_mountpoint(tmp_path):
+    upstream, runner = await _upstream_server(_hello)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    credential = _auth(tmp_path / "host" / "auth.json")
+    backend = CodexBackend(
+        upstream=upstream,
+        credentials=credential,
+        codex_home=state,
+    )
+    base = codex(worktree, state=state, egress=(backend,))
+    spec = dataclasses.replace(
+        base, limits=dataclasses.replace(base.limits, use_cgroup=False)
+    )
+    script = (
+        "import json, os\n"
+        "auth = json.load(open(os.path.join(os.environ['CODEX_HOME'], 'auth.json')))\n"
+        "print(auth['tokens']['access_token'])\n"
+    )
+    try:
+        result = await _run_in_box(spec, script)
+    finally:
+        await runner.cleanup()
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == PLACEHOLDER_KEY
+    assert (state / "auth.json").read_bytes() == b""
+
+
 @pytest.mark.live
 @pytest.mark.skipif(codex_binary() is None, reason="codex is not installed")
 async def test_real_codex_reads_subscription_usage_through_the_box(tmp_path):

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 from aiohttp import ClientSession, UnixConnector, web
@@ -896,6 +897,37 @@ async def test_usage_request_refuses_a_body(tmp_path):
         await upstream_runner.cleanup()
 
     assert reached == []
+
+
+async def test_expected_codex_read_probes_are_refused_without_tui_warnings(
+    tmp_path, caplog
+):
+    reached = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        reached.append(request.path)
+        return web.json_response({})
+
+    upstream_url, upstream_runner = await _upstream_server(upstream)
+    socket = tmp_path / "read-probes.sock"
+    proxy_runner = await serve(
+        socket, make_app(credential=_credential, upstream=upstream_url)
+    )
+    session = ClientSession(connector=UnixConnector(path=str(socket)))
+    try:
+        with caplog.at_level(logging.WARNING):
+            for path in ("/models", "/api/codex/settings/user", "/unexpected"):
+                async with session.get(f"http://codex.invalid{path}") as response:
+                    assert response.status == 403
+    finally:
+        await session.close()
+        await proxy_runner.cleanup()
+        await upstream_runner.cleanup()
+
+    assert reached == []
+    assert "refused GET /models" not in caplog.text
+    assert "refused GET /api/codex/settings/user" not in caplog.text
+    assert "refused GET /unexpected" in caplog.text
 
 
 async def test_responses_lite_headers_are_reconstructed_not_forwarded(tmp_path):

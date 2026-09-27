@@ -52,6 +52,13 @@ BOXED_CREDENTIALS: dict[str, tuple[str, ...]] = {
     "opencode": ("opencode/auth.json",),
 }
 
+# Bubblewrap creates this bind-over destination as an empty regular file in the
+# persistent state directory. The generated placeholder credential is mounted
+# over it from the protected runtime directory and never persists here.
+EMPTY_CREDENTIAL_MOUNTPOINTS: dict[str, tuple[str, ...]] = {
+    "codex": ("auth.json",),
+}
+
 
 def planted_credentials(state: Path, client: str) -> list[Path]:
     """Find credentials left in client state by an earlier boxed session.
@@ -61,13 +68,21 @@ def planted_credentials(state: Path, client: str) -> list[Path]:
     token to later sessions without adding a credential mount.
 
     ``lstat`` counts symlinks because an occupied credential path is sufficient.
+    Codex's empty regular bind-over mountpoint is the one exception; it contains
+    no credential and the runtime placeholder hides it inside the box.
     """
     found: list[Path] = []
     for name in BOXED_CREDENTIALS.get(client, ()):
         path = state / name
         try:
-            os.lstat(path)
+            info = os.lstat(path)
         except OSError:
+            continue
+        if (
+            name in EMPTY_CREDENTIAL_MOUNTPOINTS.get(client, ())
+            and stat.S_ISREG(info.st_mode)
+            and info.st_size == 0
+        ):
             continue
         found.append(path)
     return found
