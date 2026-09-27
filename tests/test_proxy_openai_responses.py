@@ -916,7 +916,15 @@ async def test_expected_codex_read_probes_are_refused_without_tui_warnings(
     session = ClientSession(connector=UnixConnector(path=str(socket)))
     try:
         with caplog.at_level(logging.WARNING):
-            for path in ("/models", "/api/codex/settings/user", "/unexpected"):
+            for path in (
+                "/models",
+                "/api/codex/settings/user",
+                "/ps/plugins/suggested/codex",
+                "/plugins/featured",
+                "/ps/plugins/installed",
+                "/ps/plugins/list",
+                "/unexpected",
+            ):
                 async with session.get(f"http://codex.invalid{path}") as response:
                     assert response.status == 403
     finally:
@@ -927,6 +935,10 @@ async def test_expected_codex_read_probes_are_refused_without_tui_warnings(
     assert reached == []
     assert "refused GET /models" not in caplog.text
     assert "refused GET /api/codex/settings/user" not in caplog.text
+    assert "refused GET /ps/plugins/suggested/codex" not in caplog.text
+    assert "refused GET /plugins/featured" not in caplog.text
+    assert "refused GET /ps/plugins/installed" not in caplog.text
+    assert "refused GET /ps/plugins/list" not in caplog.text
     assert "refused GET /unexpected" in caplog.text
 
 

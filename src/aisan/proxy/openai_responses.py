@@ -45,6 +45,10 @@ ALLOWED_PATHS = (("POST", "/responses"), ("GET", USAGE_PATH))
 QUIET_REFUSALS = (
     ("GET", "/models"),
     ("GET", "/api/codex/settings/user"),
+    ("GET", "/ps/plugins/suggested/codex"),
+    ("GET", "/plugins/featured"),
+    ("GET", "/ps/plugins/installed"),
+    ("GET", "/ps/plugins/list"),
 )
 EMPTY_BODY_ROUTES = frozenset({("GET", USAGE_PATH)})
 CLIENT_TOOL_TYPES = frozenset({"custom", "function"})
