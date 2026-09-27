@@ -93,7 +93,7 @@ def test_cli_config_pins_the_measured_route_and_disables_other_egress(tmp_path):
         f'model_providers.aisan.base_url="http://127.0.0.1:{PORT}"',
         f'model_providers.aisan.env_key="{CLIENT_KEY_ENV}"',
         'model_providers.aisan.wire_api="responses"',
-        "model_providers.aisan.requires_openai_auth=false",
+        "model_providers.aisan.requires_openai_auth=true",
         "model_providers.aisan.supports_websockets=false",
         "model_providers.aisan.supports_standalone_web_search=false",
         'model="gpt-test"',
@@ -500,24 +500,30 @@ async def test_real_codex_reads_subscription_usage_through_the_box(tmp_path):
                 },
                 {"method": "initialized", "params": {}},
                 {
-                    "method": "account/rateLimits/read",
+                    "method": "account/read",
                     "id": 1,
+                    "params": {"refreshToken": False},
+                },
+                {
+                    "method": "account/rateLimits/read",
+                    "id": 2,
                     "params": {
                         "supportsLunaReserve": True,
                         "excludeResetCreditDetails": True,
                     },
                 },
             )
+            responses = {}
             try:
                 for request in requests:
                     process.stdin.write((json.dumps(request) + "\n").encode())
                 await process.stdin.drain()
-                while True:
+                while len(responses) < 2:
                     response = json.loads(
                         await asyncio.wait_for(process.stdout.readline(), timeout=60)
                     )
-                    if response.get("id") == 1:
-                        break
+                    if response.get("id") in {1, 2}:
+                        responses[response["id"]] = response
             finally:
                 process.stdin.close()
                 process.terminate()
@@ -525,9 +531,14 @@ async def test_real_codex_reads_subscription_usage_through_the_box(tmp_path):
     finally:
         await runner.cleanup()
 
-    assert "error" not in response, response
-    assert response["result"]["rateLimits"]["primary"]["usedPercent"] == 4
-    assert response["result"]["rateLimits"]["secondary"]["usedPercent"] == 7
+    account_response = responses[1]
+    assert "error" not in account_response, account_response
+    assert account_response["result"]["requiresOpenaiAuth"] is True
+    assert account_response["result"]["account"]["type"] == "chatgpt"
+    usage_response = responses[2]
+    assert "error" not in usage_response, usage_response
+    assert usage_response["result"]["rateLimits"]["primary"]["usedPercent"] == 4
+    assert usage_response["result"]["rateLimits"]["secondary"]["usedPercent"] == 7
     assert seen == [
         (
             "GET",

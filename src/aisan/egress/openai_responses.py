@@ -151,7 +151,7 @@ class CodexBackend(Backend):
             ),
             (f"model_providers.{PROVIDER}.env_key", CLIENT_KEY_ENV),
             (f"model_providers.{PROVIDER}.wire_api", "responses"),
-            (f"model_providers.{PROVIDER}.requires_openai_auth", False),
+            (f"model_providers.{PROVIDER}.requires_openai_auth", True),
             (f"model_providers.{PROVIDER}.supports_websockets", False),
             (f"model_providers.{PROVIDER}.supports_standalone_web_search", False),
         ]
