@@ -12,8 +12,9 @@ backend asks ``codex app-server`` to refresh it and rereads ``auth.json``.
 
 Command-line overrides disable non-model egress and point the provider at
 loopback. They outrank writable repository configuration, so the agent can't
-change the route. The host proxy adds the real ChatGPT path and exposes only
-``/responses``.
+change the route. The host proxy adds the real ChatGPT path and exposes the
+Responses call plus the read-only account usage call used by Codex's status
+line.
 """
 
 from __future__ import annotations
@@ -28,12 +29,16 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from ..hostproc import HostChild, neutral_child
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
-from ..proxy.openai_responses import make_app
+from ..proxy.openai_responses import PathAllowlist, make_app
+from ..sandbox import BindOver, BindSpec
+from ..statedir import write_sealed
 from .base import (
     PLACEHOLDER_KEY,
     SHARED_TOKEN_MARKER,
@@ -49,6 +54,9 @@ PORT = 8715
 PROVIDER = "aisan"
 CLIENT_KEY_ENV = "AISAN_CODEX_API_KEY"
 DEFAULT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
+_RESPONSES_PATHS = (("POST", "/responses"),)
+_BOX_AUTH_NAME = "codex-auth.json"
+_BOX_ACCOUNT_ID = "aisan-placeholder-account"
 
 
 def default_credentials() -> Path:
@@ -82,13 +90,17 @@ class CodexBackend(Backend):
         model: str = "",
         upstream: str = DEFAULT_UPSTREAM,
         credentials: Path | None = None,
+        codex_home: Path | None = None,
+        usage_upstream: str | None = None,
         codex_command: tuple[str, ...] = ("codex",),
         rpm: int = 120,
         port: int = PORT,
     ) -> None:
         self._model = model
         self._upstream = upstream
+        self._usage_upstream = usage_upstream or _usage_upstream(upstream)
         self._credentials = credentials or default_credentials()
+        self._codex_home = codex_home
         self._codex_command = codex_command
         self.credentials = (self._credentials,)
         self._rpm = rpm
@@ -99,6 +111,29 @@ class CodexBackend(Backend):
 
     def shared_client_env_description(self) -> dict[str, str]:
         return {CLIENT_KEY_ENV: SHARED_TOKEN_MARKER}
+
+    def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+        if self._codex_home is None:
+            return []
+        return [BindOver(runtime_dir / _BOX_AUTH_NAME, self._codex_home / "auth.json")]
+
+    def prepare(self, runtime_dir: Path) -> None:
+        if self._codex_home is not None:
+            self._write_box_auth(runtime_dir, PLACEHOLDER_KEY)
+
+    def _write_box_auth(self, runtime_dir: Path, access_token: str) -> None:
+        auth = {
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": None,
+            "tokens": {
+                "id_token": _placeholder_id_token(),
+                "access_token": access_token,
+                "refresh_token": PLACEHOLDER_KEY,
+                "account_id": _BOX_ACCOUNT_ID,
+            },
+            "last_refresh": datetime.now(UTC).isoformat(),
+        }
+        write_sealed(runtime_dir / _BOX_AUTH_NAME, json.dumps(auth))
 
     def config_overrides(self, *, port: int | None = None) -> tuple[str, ...]:
         """Highest-precedence Codex settings for this confined transport."""
@@ -120,6 +155,13 @@ class CodexBackend(Backend):
             (f"model_providers.{PROVIDER}.supports_websockets", False),
             (f"model_providers.{PROVIDER}.supports_standalone_web_search", False),
         ]
+        if self._codex_home is not None:
+            values.append(
+                (
+                    "chatgpt_base_url",
+                    f"http://127.0.0.1:{self.port if port is None else port}",
+                )
+            )
         if self._model:
             values.append(("model", self._model))
         return tuple(f"{key}={json.dumps(value)}" for key, value in values)
@@ -185,6 +227,8 @@ class CodexBackend(Backend):
         app = make_app(
             credential=self._credential,
             upstream=self._upstream,
+            usage_upstream=self._usage_upstream,
+            paths=self._paths(),
             rate=RateLimit(per_minute=self._rpm),
         )
         runner = await serve_proxy(sock, app)
@@ -202,9 +246,13 @@ class CodexBackend(Backend):
     @asynccontextmanager
     async def serve_shared(self, runtime_dir: Path) -> AsyncIterator[BackendActivation]:
         client_token = shared_proxy_token()
+        if self._codex_home is not None:
+            self._write_box_auth(runtime_dir, client_token)
         app = make_app(
             credential=self._credential,
             upstream=self._upstream,
+            usage_upstream=self._usage_upstream,
+            paths=self._paths(),
             rate=RateLimit(per_minute=self._rpm),
             client_token=client_token,
         )
@@ -214,6 +262,30 @@ class CodexBackend(Backend):
             yield BackendActivation(port, {CLIENT_KEY_ENV: client_token})
         finally:
             await runner.cleanup()
+
+    def _paths(self) -> PathAllowlist:
+        return (
+            PathAllowlist()
+            if self._codex_home is not None
+            else PathAllowlist(_RESPONSES_PATHS)
+        )
+
+
+def _usage_upstream(upstream: str) -> str:
+    parts = urlsplit(upstream)
+    path = parts.path.rstrip("/").removesuffix("/codex")
+    path += "/wham/usage"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
+def _placeholder_id_token() -> str:
+    def part(value: dict[str, object]) -> str:
+        return (
+            base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+        )
+
+    claims = {"https://api.openai.com/auth": {"chatgpt_plan_type": "pro"}}
+    return f"{part({'alg': 'none', 'typ': 'JWT'})}.{part(claims)}.signature"
 
 
 def _read_chatgpt_credential(path: Path) -> _ChatGPTCredential:

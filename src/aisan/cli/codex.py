@@ -189,7 +189,7 @@ async def _main(argv: list[str]) -> int:
     repo = Path(args.repo).resolve()
     state = state_dir("codex", repo)
     mcp_config = state / "aisan-host-mcp.config.toml"
-    backend = CodexBackend(model=args.model, upstream=args.upstream)
+    backend = CodexBackend(model=args.model, upstream=args.upstream, codex_home=state)
     try:
         flags = resolve_launcher_flags(
             repo,

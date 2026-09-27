@@ -31,7 +31,7 @@ lifecycle. This module contains protocol and policy rules for chat completions.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
@@ -276,6 +276,8 @@ def make_app(
     rate: RateLimit | None = None,
     headers: HeaderSource | None = None,
     client_token: str | None = None,
+    empty_body_routes: frozenset[tuple[str, str]] = frozenset(),
+    upstream_urls: Mapping[tuple[str, str], str] | None = None,
 ) -> web.Application:
     if (token is None) == (authorization is None):
         raise ValueError("provide exactly one of token or authorization")
@@ -309,10 +311,13 @@ def make_app(
         if len(body) > MAX_BODY_BYTES:
             return _error(413, "invalid_request_error", "request body too large")
 
-        # Check policy before reading the host credential.
-        reason = policy_refusal(
-            lambda: body_policy.refuse(body), subject=f"body of {request.path}"
-        )
+        route = (request.method.upper(), path)
+        if route in empty_body_routes:
+            reason = "request body must be empty" if body else None
+        else:
+            reason = policy_refusal(
+                lambda: body_policy.refuse(body), subject=f"body of {request.path}"
+            )
         if reason is not None:
             warn.warning(log, "openai-compat proxy: refused body: %s", reason)
             return _error(403, "invalid_request_error", reason)
@@ -343,7 +348,7 @@ def make_app(
         )
 
         session = request.app[_SESSION]
-        url = f"{base}{request.path_qs}"
+        url = (upstream_urls or {}).get(route, f"{base}{request.path_qs}")
         try:
             async with session.request(
                 request.method,

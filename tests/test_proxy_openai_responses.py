@@ -17,6 +17,7 @@ from aisan.proxy.openai_responses import (
     PART_KEYS,
     TAG_SETTLED_INPUT_TYPES,
     TOOL_ENVELOPE_INPUT_TYPE,
+    USAGE_PATH,
     BodyPolicy,
     PathAllowlist,
     make_app,
@@ -79,11 +80,15 @@ def test_body_policy_refuses_unsafe_or_malformed_output_formats(change):
     assert BodyPolicy().refuse(json.dumps(body).encode()) is not None
 
 
-def test_path_allowlist_is_the_one_measured_codex_route():
+def test_path_allowlist_is_the_two_measured_codex_routes():
     paths = PathAllowlist()
     assert paths.permits("POST", "/responses")
+    assert paths.permits("GET", USAGE_PATH)
     for method, path in [
         ("GET", "/responses"),
+        ("POST", USAGE_PATH),
+        ("GET", "/wham/usage"),
+        ("GET", "/api/codex/rate-limit-reset-credits"),
         ("POST", "/responses/compact"),
         ("POST", "/v1/responses"),
         ("POST", "/chat/completions"),
@@ -805,6 +810,92 @@ async def test_valid_response_request_reaches_the_prefixed_upstream(
     assert reached == [
         ("POST", "/v1/responses", "Bearer real-key", "real-account", body)
     ]
+
+
+async def test_usage_request_reaches_only_the_mapped_read_route(tmp_path):
+    reached = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        reached.append(
+            (
+                request.method,
+                request.path_qs,
+                request.headers["authorization"],
+                request.headers["chatgpt-account-id"],
+                request.headers["x-openai-codex-luna-reserve"],
+                await request.read(),
+            )
+        )
+        return web.json_response({"plan_type": "pro"})
+
+    upstream_url, upstream_runner = await _upstream_server(upstream)
+    socket = tmp_path / "usage.sock"
+    proxy_runner = await serve(
+        socket,
+        make_app(
+            credential=_credential,
+            upstream=upstream_url,
+            usage_upstream=f"{upstream_url}/measured-usage",
+        ),
+    )
+    session = ClientSession(connector=UnixConnector(path=str(socket)))
+    try:
+        async with session.get(
+            f"http://codex.invalid{USAGE_PATH}?box=ignored",
+            headers={
+                "Authorization": "Bearer box-token",
+                "ChatGPT-Account-Id": "box-account",
+                "X-OpenAI-Codex-Luna-Reserve": "box-value",
+            },
+        ) as response:
+            assert response.status == 200
+            assert await response.json() == {"plan_type": "pro"}
+    finally:
+        await session.close()
+        await proxy_runner.cleanup()
+        await upstream_runner.cleanup()
+
+    assert reached == [
+        (
+            "GET",
+            "/v1/measured-usage",
+            "Bearer real-key",
+            "real-account",
+            "1",
+            b"",
+        )
+    ]
+
+
+async def test_usage_request_refuses_a_body(tmp_path):
+    reached = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        reached.append(request.path)
+        return web.json_response({})
+
+    upstream_url, upstream_runner = await _upstream_server(upstream)
+    socket = tmp_path / "usage-body.sock"
+    proxy_runner = await serve(
+        socket,
+        make_app(
+            credential=_credential,
+            upstream=upstream_url,
+            usage_upstream=f"{upstream_url}/measured-usage",
+        ),
+    )
+    session = ClientSession(connector=UnixConnector(path=str(socket)))
+    try:
+        async with session.request(
+            "GET", f"http://codex.invalid{USAGE_PATH}", data=b"not empty"
+        ) as response:
+            assert response.status == 403
+    finally:
+        await session.close()
+        await proxy_runner.cleanup()
+        await upstream_runner.cleanup()
+
+    assert reached == []
 
 
 async def test_responses_lite_headers_are_reconstructed_not_forwarded(tmp_path):

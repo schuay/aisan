@@ -22,8 +22,8 @@ only the observed string form because its object variants can select hosted
 capabilities. ``client_metadata`` is limited to Codex's identifier fields.
 
 The OpenAI-compatible proxy handles forwarding, credential replacement, limits,
-errors, and streaming. This module supplies the Responses route, body policy,
-and host-generated protocol headers.
+errors, and streaming. This module supplies the Responses route and the
+read-only account usage route, body policy, and host-generated protocol headers.
 """
 
 from __future__ import annotations
@@ -40,7 +40,9 @@ from .openai_compat import PathAllowlist as _PathAllowlist
 from .openai_compat import make_app as _make_app
 from .openai_compat import parse_json_object
 
-ALLOWED_PATHS = (("POST", "/responses"),)
+USAGE_PATH = "/api/codex/usage"
+ALLOWED_PATHS = (("POST", "/responses"), ("GET", USAGE_PATH))
+EMPTY_BODY_ROUTES = frozenset({("GET", USAGE_PATH)})
 CLIENT_TOOL_TYPES = frozenset({"custom", "function"})
 CLIENT_TOOL_CONTAINERS = frozenset({"namespace"})
 ALLOWED_KEYS = frozenset(
@@ -379,6 +381,7 @@ def make_app(
     body: BodyPolicy | None = None,
     rate: RateLimit | None = None,
     client_token: str | None = None,
+    usage_upstream: str | None = None,
 ) -> web.Application:
     async def authorization() -> dict[str, str]:
         token, account_id = await credential()
@@ -395,11 +398,17 @@ def make_app(
         rate=rate,
         headers=_protocol_headers,
         client_token=client_token,
+        empty_body_routes=EMPTY_BODY_ROUTES,
+        upstream_urls=(
+            {("GET", USAGE_PATH): usage_upstream} if usage_upstream is not None else {}
+        ),
     )
 
 
 def _protocol_headers(body: bytes) -> dict[str, str]:
     """Reconstruct measured protocol headers, never forwarding box input."""
+    if not body:
+        return {"X-OpenAI-Codex-Luna-Reserve": "1"}
     payload = parse_json_object(body)
     headers = {
         "Originator": "codex_cli_rs",

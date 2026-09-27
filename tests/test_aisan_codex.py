@@ -27,7 +27,7 @@ from aisan.egress.openai_responses import (
 )
 from aisan.presets import PRESETS
 from aisan.presets.codex import codex, codex_argv, codex_binary, codex_default
-from aisan.sandbox import RO, RW
+from aisan.sandbox import RO, RW, BindOver
 
 FAKE_ACCOUNT = "fake-chatgpt-account-for-tests"
 
@@ -100,6 +100,32 @@ def test_cli_config_pins_the_measured_route_and_disables_other_egress(tmp_path):
     )
     assert backend.box_binds(tmp_path / "runtime") == []
     assert backend.client_env() == {CLIENT_KEY_ENV: PLACEHOLDER_KEY}
+
+
+def test_cli_config_routes_account_usage_through_the_proxy(tmp_path):
+    state = tmp_path / "state"
+    backend = _backend(
+        tmp_path,
+        upstream="https://example.test/backend-api/codex",
+        codex_home=state,
+    )
+
+    assert 'chatgpt_base_url="http://127.0.0.1:8715"' in backend.config_overrides()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    backend.prepare(runtime)
+
+    assert backend.box_binds(runtime) == [
+        BindOver(runtime / "codex-auth.json", state / "auth.json")
+    ]
+    auth = json.loads((runtime / "codex-auth.json").read_text())
+    assert auth["auth_mode"] == "chatgpt"
+    assert auth["tokens"]["access_token"] == PLACEHOLDER_KEY
+    assert auth["tokens"]["refresh_token"] == PLACEHOLDER_KEY
+    assert auth["tokens"]["account_id"] == "aisan-placeholder-account"
+    assert (
+        "host-refresh-token-for-tests" not in (runtime / "codex-auth.json").read_text()
+    )
 
 
 async def test_api_key_login_is_refused(tmp_path):
@@ -249,28 +275,35 @@ async def test_shared_backend_serves_the_activated_tcp_endpoint(tmp_path):
 
     async def upstream(request: web.Request) -> web.Response:
         reached.append(request.path)
+        if request.path.endswith("/wham/usage"):
+            return web.json_response({"plan_type": "pro"})
         return web.Response(body=b"data: [DONE]\n\n", content_type="text/event-stream")
 
     upstream_url, upstream_runner = await _upstream_server(upstream)
-    backend = _backend(tmp_path, upstream=upstream_url)
+    backend = _backend(tmp_path, upstream=upstream_url, codex_home=tmp_path / "state")
     body = json.dumps(
         {"input": [], "tools": [], "store": False, "stream": True}
     ).encode()
     try:
         async with backend.serve_shared(tmp_path) as activation:
             client_token = activation.client_env[CLIENT_KEY_ENV]
-            async with (
-                ClientSession() as session,
-                session.post(
+            boxed_auth = json.loads((tmp_path / "codex-auth.json").read_text())
+            assert boxed_auth["tokens"]["access_token"] == client_token
+            async with ClientSession() as session:
+                async with session.post(
                     f"http://127.0.0.1:{activation.port}/responses",
                     data=body,
                     headers={"Authorization": f"Bearer {client_token}"},
-                ) as response,
-            ):
-                assert response.status == 200
+                ) as response:
+                    assert response.status == 200
+                async with session.get(
+                    f"http://127.0.0.1:{activation.port}/api/codex/usage",
+                    headers={"Authorization": f"Bearer {client_token}"},
+                ) as response:
+                    assert response.status == 200
     finally:
         await upstream_runner.cleanup()
-    assert reached == ["/v1/responses"]
+    assert reached == ["/v1/responses", "/v1/wham/usage"]
 
 
 def test_codex_preset_is_registered_and_uses_isolated_state(tmp_path):
@@ -385,6 +418,125 @@ async def test_subscription_credential_is_absent_inside_a_real_box(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "credential=False" in result.stdout
     assert f"client_key={PLACEHOLDER_KEY}" in result.stdout
+
+
+@pytest.mark.live
+@pytest.mark.skipif(codex_binary() is None, reason="codex is not installed")
+async def test_real_codex_reads_subscription_usage_through_the_box(tmp_path):
+    seen = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        if request.path.endswith("/wham/usage"):
+            seen.append(
+                (
+                    request.method,
+                    request.path,
+                    request.headers["authorization"],
+                    request.headers["chatgpt-account-id"],
+                    request.headers["x-openai-codex-luna-reserve"],
+                )
+            )
+            return web.json_response(
+                {
+                    "plan_type": "pro",
+                    "rate_limit": {
+                        "allowed": True,
+                        "limit_reached": False,
+                        "primary_window": {
+                            "used_percent": 4,
+                            "limit_window_seconds": 18_000,
+                            "reset_after_seconds": 300,
+                            "reset_at": 2_000_000_000,
+                        },
+                        "secondary_window": {
+                            "used_percent": 7,
+                            "limit_window_seconds": 604_800,
+                            "reset_after_seconds": 600,
+                            "reset_at": 2_000_000_000,
+                        },
+                    },
+                    "rate_limit_reset_credits": {"available_count": 0},
+                }
+            )
+        return web.json_response({"ok": True})
+
+    upstream_url, runner = await _upstream_server(upstream)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    credential = _auth(tmp_path / "host" / "auth.json")
+    backend = CodexBackend(
+        upstream=upstream_url,
+        credentials=credential,
+        codex_home=state,
+    )
+    base = codex(worktree, state=state, egress=(backend,))
+    spec = dataclasses.replace(
+        base, limits=dataclasses.replace(base.limits, use_cgroup=False)
+    )
+    box = Box(spec, box_id="codex-usage")
+    try:
+        async with box:
+            process = await asyncio.create_subprocess_exec(
+                *box.command(
+                    codex_argv(
+                        ("app-server", "--stdio"),
+                        overrides=backend.config_overrides(),
+                    )
+                ),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, **box.env},
+            )
+            assert process.stdin is not None
+            assert process.stdout is not None
+            requests = (
+                {
+                    "method": "initialize",
+                    "id": 0,
+                    "params": {"clientInfo": {"name": "aisan-test", "version": "1"}},
+                },
+                {"method": "initialized", "params": {}},
+                {
+                    "method": "account/rateLimits/read",
+                    "id": 1,
+                    "params": {
+                        "supportsLunaReserve": True,
+                        "excludeResetCreditDetails": True,
+                    },
+                },
+            )
+            try:
+                for request in requests:
+                    process.stdin.write((json.dumps(request) + "\n").encode())
+                await process.stdin.drain()
+                while True:
+                    response = json.loads(
+                        await asyncio.wait_for(process.stdout.readline(), timeout=60)
+                    )
+                    if response.get("id") == 1:
+                        break
+            finally:
+                process.stdin.close()
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=5)
+    finally:
+        await runner.cleanup()
+
+    assert "error" not in response, response
+    assert response["result"]["rateLimits"]["primary"]["usedPercent"] == 4
+    assert response["result"]["rateLimits"]["secondary"]["usedPercent"] == 7
+    assert seen == [
+        (
+            "GET",
+            "/v1/wham/usage",
+            f"Bearer {_jwt(4_102_444_800)}",
+            FAKE_ACCOUNT,
+            "1",
+        )
+    ]
 
 
 @pytest.mark.live
