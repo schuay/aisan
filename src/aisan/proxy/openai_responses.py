@@ -23,25 +23,27 @@ capabilities. ``client_metadata`` is limited to Codex's identifier fields.
 
 The OpenAI-compatible proxy handles forwarding, credential replacement, limits,
 errors, and streaming. This module supplies the Responses route and the
-read-only account usage route, body policy, and host-generated protocol headers.
+read-only account routes, body policy, and host-generated protocol headers.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import MappingProxyType
 
 from aiohttp import web
 
-from .http import RateLimit, quoted_names, serve
+from .http import RateLimit, load_json_unambiguous, quoted_names, serve
 from .openai_compat import BodyPolicy as _BodyPolicy
 from .openai_compat import PathAllowlist as _PathAllowlist
 from .openai_compat import make_app as _make_app
 from .openai_compat import parse_json_object
 
 USAGE_PATH = "/api/codex/usage"
-ALLOWED_PATHS = (("POST", "/responses"), ("GET", USAGE_PATH))
+ACCOUNTS_PATH = "/api/codex/accounts/check"
+ALLOWED_PATHS = (("POST", "/responses"), ("GET", USAGE_PATH), ("GET", ACCOUNTS_PATH))
 QUIET_REFUSALS = (
     ("GET", "/models"),
     ("GET", "/api/codex/settings/user"),
@@ -50,7 +52,7 @@ QUIET_REFUSALS = (
     ("GET", "/ps/plugins/installed"),
     ("GET", "/ps/plugins/list"),
 )
-EMPTY_BODY_ROUTES = frozenset({("GET", USAGE_PATH)})
+EMPTY_BODY_ROUTES = frozenset({("GET", USAGE_PATH), ("GET", ACCOUNTS_PATH)})
 CLIENT_TOOL_TYPES = frozenset({"custom", "function"})
 CLIENT_TOOL_CONTAINERS = frozenset({"namespace"})
 ALLOWED_KEYS = frozenset(
@@ -389,6 +391,33 @@ def _names_a_payload(value: object) -> str | None:
 
 
 CredentialSource = Callable[[], Awaitable[tuple[str, str]]]
+BOX_ACCOUNT_ID = "aisan-placeholder-account"
+
+
+def _selected_account(body: bytes, headers: dict[str, str]) -> bytes:
+    payload = load_json_unambiguous(body)
+    if not isinstance(payload, dict) or not isinstance(payload.get("accounts"), list):
+        raise TypeError("accounts/check has no account list")
+    account_id = headers["ChatGPT-Account-Id"]
+    matches = [
+        account
+        for account in payload["accounts"]
+        if isinstance(account, dict) and account.get("id") == account_id
+    ]
+    if len(matches) != 1:
+        raise ValueError("accounts/check did not identify one selected account")
+    selected = matches[0]
+    account = {"id": BOX_ACCOUNT_ID}
+    for key in ("plan_type", "workspace_backend_origin", "account_routing_override"):
+        if key in selected:
+            account[key] = selected[key]
+    return json.dumps(
+        {
+            "accounts": [account],
+            "account_ordering": [BOX_ACCOUNT_ID],
+            "default_account_id": BOX_ACCOUNT_ID,
+        }
+    ).encode()
 
 
 def make_app(
@@ -400,6 +429,7 @@ def make_app(
     rate: RateLimit | None = None,
     client_token: str | None = None,
     usage_upstream: str | None = None,
+    accounts_upstream: str | None = None,
 ) -> web.Application:
     async def authorization() -> dict[str, str]:
         token, account_id = await credential()
@@ -417,9 +447,19 @@ def make_app(
         headers=_protocol_headers,
         client_token=client_token,
         empty_body_routes=EMPTY_BODY_ROUTES,
-        upstream_urls=(
-            {("GET", USAGE_PATH): usage_upstream} if usage_upstream is not None else {}
-        ),
+        upstream_urls={
+            **(
+                {("GET", USAGE_PATH): usage_upstream}
+                if usage_upstream is not None
+                else {}
+            ),
+            **(
+                {("GET", ACCOUNTS_PATH): accounts_upstream}
+                if accounts_upstream is not None
+                else {}
+            ),
+        },
+        response_transforms={("GET", ACCOUNTS_PATH): _selected_account},
     )
 
 

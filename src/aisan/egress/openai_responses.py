@@ -4,11 +4,9 @@
 """Proxy Codex subscription traffic through the host ChatGPT login.
 
 Boxed Codex uses a custom Responses provider with a placeholder key. The
-provider doesn't use OpenAI authentication, so Codex won't route model requests
-from the synthetic login. That login only lets the status line read rate limits.
-For each request, the host proxy reads the access token and account ID and
-rebuilds the subscription headers. The box never receives the refresh token or
-login file.
+synthetic login lets the status line read rate limits. For each request, the
+host proxy reads the access token and account ID and rebuilds the subscription
+headers. The box never receives the refresh token or login file.
 
 Host Codex remains the sole writer. If the token expires within a day, the
 backend asks ``codex app-server`` to refresh it and rereads ``auth.json``.
@@ -16,8 +14,7 @@ backend asks ``codex app-server`` to refresh it and rereads ``auth.json``.
 Command-line overrides disable non-model egress and point the provider at
 loopback. They outrank writable repository configuration, so the agent can't
 change the route. The host proxy adds the real ChatGPT path and exposes the
-Responses call plus the read-only account usage call used by Codex's status
-line.
+Responses call plus the read-only account calls used by Codex's status line.
 """
 
 from __future__ import annotations
@@ -39,7 +36,7 @@ from urllib.parse import urlsplit, urlunsplit
 from ..hostproc import HostChild, neutral_child
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
-from ..proxy.openai_responses import PathAllowlist, make_app
+from ..proxy.openai_responses import BOX_ACCOUNT_ID, PathAllowlist, make_app
 from ..sandbox import BindOver, BindSpec
 from ..statedir import write_sealed
 from .base import (
@@ -59,7 +56,6 @@ CLIENT_KEY_ENV = "AISAN_CODEX_API_KEY"
 DEFAULT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
 _RESPONSES_PATHS = (("POST", "/responses"),)
 _BOX_AUTH_NAME = "codex-auth.json"
-_BOX_ACCOUNT_ID = "aisan-placeholder-account"
 
 
 def default_credentials() -> Path:
@@ -132,7 +128,7 @@ class CodexBackend(Backend):
                 "id_token": _placeholder_id_token(),
                 "access_token": access_token,
                 "refresh_token": PLACEHOLDER_KEY,
-                "account_id": _BOX_ACCOUNT_ID,
+                "account_id": BOX_ACCOUNT_ID,
             },
             "last_refresh": datetime.now(UTC).isoformat(),
         }
@@ -154,7 +150,7 @@ class CodexBackend(Backend):
             ),
             (f"model_providers.{PROVIDER}.env_key", CLIENT_KEY_ENV),
             (f"model_providers.{PROVIDER}.wire_api", "responses"),
-            (f"model_providers.{PROVIDER}.requires_openai_auth", False),
+            (f"model_providers.{PROVIDER}.requires_openai_auth", True),
             (f"model_providers.{PROVIDER}.supports_websockets", False),
             (f"model_providers.{PROVIDER}.supports_standalone_web_search", False),
         ]
@@ -231,6 +227,7 @@ class CodexBackend(Backend):
             credential=self._credential,
             upstream=self._upstream,
             usage_upstream=self._usage_upstream,
+            accounts_upstream=_accounts_upstream(self._upstream),
             paths=self._paths(),
             rate=RateLimit(per_minute=self._rpm),
         )
@@ -255,6 +252,7 @@ class CodexBackend(Backend):
             credential=self._credential,
             upstream=self._upstream,
             usage_upstream=self._usage_upstream,
+            accounts_upstream=_accounts_upstream(self._upstream),
             paths=self._paths(),
             rate=RateLimit(per_minute=self._rpm),
             client_token=client_token,
@@ -275,9 +273,17 @@ class CodexBackend(Backend):
 
 
 def _usage_upstream(upstream: str) -> str:
+    return _chatgpt_upstream(upstream, "/usage")
+
+
+def _accounts_upstream(upstream: str) -> str:
+    return _chatgpt_upstream(upstream, "/accounts/check")
+
+
+def _chatgpt_upstream(upstream: str, endpoint: str) -> str:
     parts = urlsplit(upstream)
     path = parts.path.rstrip("/").removesuffix("/codex")
-    path += "/wham/usage"
+    path += "/wham" + endpoint
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 

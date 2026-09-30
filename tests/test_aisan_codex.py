@@ -93,7 +93,7 @@ def test_cli_config_pins_the_measured_route_and_disables_other_egress(tmp_path):
         f'model_providers.aisan.base_url="http://127.0.0.1:{PORT}"',
         f'model_providers.aisan.env_key="{CLIENT_KEY_ENV}"',
         'model_providers.aisan.wire_api="responses"',
-        "model_providers.aisan.requires_openai_auth=false",
+        "model_providers.aisan.requires_openai_auth=true",
         "model_providers.aisan.supports_websockets=false",
         "model_providers.aisan.supports_standalone_web_search=false",
         'model="gpt-test"',
@@ -457,6 +457,23 @@ async def test_real_codex_reads_subscription_usage_through_the_box(tmp_path):
     seen = []
 
     async def upstream(request: web.Request) -> web.Response:
+        if request.path.endswith("/wham/accounts/check"):
+            seen.append(
+                (request.method, request.path, request.headers["chatgpt-account-id"])
+            )
+            return web.json_response(
+                {
+                    "accounts": [
+                        {
+                            "id": FAKE_ACCOUNT,
+                            "workspace_backend_origin": "https://chatgpt.com",
+                            "account_routing_override": "NO_CONSTRAINT",
+                        },
+                        {"id": "other-account", "name": "Do not expose"},
+                    ],
+                    "default_account_id": "other-account",
+                }
+            )
         if request.path.endswith("/wham/usage"):
             seen.append(
                 (
@@ -564,14 +581,21 @@ async def test_real_codex_reads_subscription_usage_through_the_box(tmp_path):
 
     account_response = responses[1]
     assert "error" not in account_response, account_response
-    assert account_response["result"]["requiresOpenaiAuth"] is False
-    assert account_response["result"]["account"] is None
-    assert account_response["result"]["workspaceRouting"] is None
+    assert account_response["result"]["requiresOpenaiAuth"] is True
+    assert account_response["result"]["account"]["type"] == "chatgpt"
+    assert account_response["result"]["workspaceRouting"]["chatgptAccountId"] == (
+        "aisan-placeholder-account"
+    )
     usage_response = responses[2]
     assert "error" not in usage_response, usage_response
     assert usage_response["result"]["rateLimits"]["primary"]["usedPercent"] == 4
     assert usage_response["result"]["rateLimits"]["secondary"]["usedPercent"] == 7
-    assert seen == [
+    assert (
+        "GET",
+        "/v1/wham/accounts/check",
+        FAKE_ACCOUNT,
+    ) in seen
+    assert [request for request in seen if request[1].endswith("/wham/usage")] == [
         (
             "GET",
             "/v1/wham/usage",

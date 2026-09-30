@@ -11,7 +11,9 @@ import pytest
 from aiohttp import ClientSession, UnixConnector, web
 
 from aisan.proxy.openai_responses import (
+    ACCOUNTS_PATH,
     ALLOWED_INPUT_TYPES,
+    BOX_ACCOUNT_ID,
     CONTAINERS,
     INERT_PART_KEYS,
     INLINE_URL_KEYS,
@@ -81,13 +83,15 @@ def test_body_policy_refuses_unsafe_or_malformed_output_formats(change):
     assert BodyPolicy().refuse(json.dumps(body).encode()) is not None
 
 
-def test_path_allowlist_is_the_two_measured_codex_routes():
+def test_path_allowlist_is_the_measured_codex_routes():
     paths = PathAllowlist()
     assert paths.permits("POST", "/responses")
     assert paths.permits("GET", USAGE_PATH)
+    assert paths.permits("GET", ACCOUNTS_PATH)
     for method, path in [
         ("GET", "/responses"),
         ("POST", USAGE_PATH),
+        ("POST", ACCOUNTS_PATH),
         ("GET", "/wham/usage"),
         ("GET", "/api/codex/rate-limit-reset-credits"),
         ("POST", "/responses/compact"),
@@ -897,6 +901,74 @@ async def test_usage_request_reaches_only_the_mapped_read_route(tmp_path):
             "1",
             b"",
         )
+    ]
+
+
+async def test_accounts_check_exposes_only_the_selected_box_account(tmp_path):
+    reached = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        reached.append(
+            (
+                request.method,
+                request.path_qs,
+                request.headers["authorization"],
+                request.headers["chatgpt-account-id"],
+                await request.read(),
+            )
+        )
+        return web.json_response(
+            {
+                "accounts": [
+                    {"id": "other-account", "name": "private"},
+                    {
+                        "id": "real-account",
+                        "name": "also private",
+                        "plan_type": "pro",
+                        "workspace_backend_origin": "https://chatgpt.com",
+                        "account_routing_override": "NO_CONSTRAINT",
+                    },
+                ],
+                "default_account_id": "other-account",
+            }
+        )
+
+    upstream_url, upstream_runner = await _upstream_server(upstream)
+    socket = tmp_path / "accounts.sock"
+    proxy_runner = await serve(
+        socket,
+        make_app(
+            credential=_credential,
+            upstream=upstream_url,
+            accounts_upstream=f"{upstream_url}/measured-accounts",
+        ),
+    )
+    session = ClientSession(connector=UnixConnector(path=str(socket)))
+    try:
+        async with session.get(
+            f"http://codex.invalid{ACCOUNTS_PATH}?box=ignored",
+            headers={"ChatGPT-Account-Id": "other-account"},
+        ) as response:
+            assert response.status == 200
+            assert await response.json() == {
+                "accounts": [
+                    {
+                        "id": BOX_ACCOUNT_ID,
+                        "plan_type": "pro",
+                        "workspace_backend_origin": "https://chatgpt.com",
+                        "account_routing_override": "NO_CONSTRAINT",
+                    }
+                ],
+                "account_ordering": [BOX_ACCOUNT_ID],
+                "default_account_id": BOX_ACCOUNT_ID,
+            }
+    finally:
+        await session.close()
+        await proxy_runner.cleanup()
+        await upstream_runner.cleanup()
+
+    assert reached == [
+        ("GET", "/v1/measured-accounts", "Bearer real-key", "real-account", b"")
     ]
 
 

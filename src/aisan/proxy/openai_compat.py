@@ -268,6 +268,7 @@ def _error(status: int, kind: str, message: str) -> web.Response:
 TokenSource = Callable[[], Awaitable[str]]
 HeaderSource = Callable[[bytes], dict[str, str]]
 AuthorizationSource = Callable[[], Awaitable[dict[str, str]]]
+ResponseTransform = Callable[[bytes, Mapping[str, str]], bytes]
 
 
 def make_app(
@@ -282,6 +283,7 @@ def make_app(
     client_token: str | None = None,
     empty_body_routes: frozenset[tuple[str, str]] = frozenset(),
     upstream_urls: Mapping[tuple[str, str], str] | None = None,
+    response_transforms: Mapping[tuple[str, str], ResponseTransform] | None = None,
 ) -> web.Application:
     if (token is None) == (authorization is None):
         raise ValueError("provide exactly one of token or authorization")
@@ -373,6 +375,24 @@ def make_app(
                         "api_error",
                         "sandbox proxy does not follow redirects from its upstream",
                     )
+                transform = (response_transforms or {}).get(route)
+                if transform is not None and up.status != 200:
+                    status = up.status if up.status >= 400 else 502
+                    return _error(
+                        status, "api_error", "upstream account request failed"
+                    )
+                if transform is not None:
+                    response_body = await up.content.read(MAX_BODY_BYTES + 1)
+                    if len(response_body) > MAX_BODY_BYTES:
+                        return _error(502, "api_error", "upstream response too large")
+                    try:
+                        filtered = transform(response_body, authorization_headers)
+                    except (TypeError, ValueError) as e:
+                        log.warning(
+                            "openai-compat proxy: invalid upstream response: %s", e
+                        )
+                        return _error(502, "api_error", "invalid upstream response")
+                    return web.Response(body=filtered, content_type="application/json")
                 resp = web.StreamResponse(
                     status=up.status, headers=relayed_response_headers(up.headers)
                 )
