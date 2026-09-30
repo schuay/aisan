@@ -93,7 +93,7 @@ def test_cli_config_pins_the_measured_route_and_disables_other_egress(tmp_path):
         f'model_providers.aisan.base_url="http://127.0.0.1:{PORT}"',
         f'model_providers.aisan.env_key="{CLIENT_KEY_ENV}"',
         'model_providers.aisan.wire_api="responses"',
-        "model_providers.aisan.requires_openai_auth=true",
+        "model_providers.aisan.requires_openai_auth=false",
         "model_providers.aisan.supports_websockets=false",
         "model_providers.aisan.supports_standalone_web_search=false",
         'model="gpt-test"',
@@ -564,8 +564,9 @@ async def test_real_codex_reads_subscription_usage_through_the_box(tmp_path):
 
     account_response = responses[1]
     assert "error" not in account_response, account_response
-    assert account_response["result"]["requiresOpenaiAuth"] is True
-    assert account_response["result"]["account"]["type"] == "chatgpt"
+    assert account_response["result"]["requiresOpenaiAuth"] is False
+    assert account_response["result"]["account"] is None
+    assert account_response["result"]["workspaceRouting"] is None
     usage_response = responses[2]
     assert "error" not in usage_response, usage_response
     assert usage_response["result"]["rateLimits"]["primary"]["usedPercent"] == 4
@@ -693,7 +694,8 @@ async def test_real_codex_reaches_a_stub_only_through_the_responses_backend(
     state = tmp_path / "state"
     state.mkdir()
     (state / "config.toml").write_text(
-        'model_provider = "box-chosen"\n\n'
+        'model_provider = "box-chosen"\n'
+        'service_tier = "flex"\n\n'
         "[model_providers.box-chosen]\n"
         'name = "box-chosen"\n'
         'base_url = "http://127.0.0.1:1"\n'

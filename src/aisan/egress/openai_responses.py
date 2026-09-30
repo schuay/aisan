@@ -3,9 +3,12 @@
 
 """Proxy Codex subscription traffic through the host ChatGPT login.
 
-Boxed Codex uses a custom Responses provider with a placeholder key. For each
-request, the host proxy reads the access token and account ID and rebuilds the
-subscription headers. The box never receives the refresh token or login file.
+Boxed Codex uses a custom Responses provider with a placeholder key. The
+provider doesn't use OpenAI authentication, so Codex won't route model requests
+from the synthetic login. That login only lets the status line read rate limits.
+For each request, the host proxy reads the access token and account ID and
+rebuilds the subscription headers. The box never receives the refresh token or
+login file.
 
 Host Codex remains the sole writer. If the token expires within a day, the
 backend asks ``codex app-server`` to refresh it and rereads ``auth.json``.
@@ -151,7 +154,7 @@ class CodexBackend(Backend):
             ),
             (f"model_providers.{PROVIDER}.env_key", CLIENT_KEY_ENV),
             (f"model_providers.{PROVIDER}.wire_api", "responses"),
-            (f"model_providers.{PROVIDER}.requires_openai_auth", True),
+            (f"model_providers.{PROVIDER}.requires_openai_auth", False),
             (f"model_providers.{PROVIDER}.supports_websockets", False),
             (f"model_providers.{PROVIDER}.supports_standalone_web_search", False),
         ]

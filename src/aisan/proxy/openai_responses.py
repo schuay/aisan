@@ -63,6 +63,7 @@ ALLOWED_KEYS = frozenset(
         "parallel_tool_calls",
         "prompt_cache_key",
         "reasoning",
+        "service_tier",
         "store",
         "stream",
         "text",
@@ -150,6 +151,8 @@ TOOL_ENVELOPE_INPUT_TYPE = "additional_tools"
 
 # Codex sends "auto"; the other string variants select no hosted capability.
 TOOL_CHOICES = frozenset({"auto", "none", "required"})
+# Codex normalizes fast mode to ``priority`` and omits explicit standard mode.
+SERVICE_TIERS = frozenset({"flex", "priority", "ultrafast"})
 
 # Field names that may tell the upstream to fetch a payload. Inside known parts,
 # scheme checks allow inline data. Elsewhere, the name itself causes refusal.
@@ -190,6 +193,12 @@ class BodyPolicy(_BodyPolicy):
             return "`store` must be present and false"
         if payload.get("stream") is not True:
             return "`stream` must be true"
+
+        service_tier = payload.get("service_tier")
+        if "service_tier" in payload and (
+            not isinstance(service_tier, str) or service_tier not in SERVICE_TIERS
+        ):
+            return "`service_tier` must be " + quoted_names(SERVICE_TIERS)
 
         includes = payload.get("include", [])
         if not isinstance(includes, list) or any(

@@ -194,6 +194,32 @@ def test_body_policy_permits_the_measured_tool_choice_and_metadata():
     assert BodyPolicy().refuse(body) is None
 
 
+@pytest.mark.parametrize("service_tier", ["flex", "priority", "ultrafast"])
+def test_body_policy_permits_codex_service_tiers(service_tier):
+    body = json.dumps(
+        {
+            "input": [],
+            "store": False,
+            "stream": True,
+            "service_tier": service_tier,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is None
+
+
+@pytest.mark.parametrize("service_tier", [None, False, {}, "future-tier"])
+def test_body_policy_refuses_unknown_or_malformed_service_tiers(service_tier):
+    body = json.dumps(
+        {
+            "input": [],
+            "store": False,
+            "stream": True,
+            "service_tier": service_tier,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is not None
+
+
 def test_body_policy_permits_measured_functions_and_namespaces():
     body = json.dumps(
         {
@@ -793,7 +819,13 @@ async def test_valid_response_request_reaches_the_prefixed_upstream(
         socket, make_app(credential=_credential, upstream=upstream_url)
     )
     session = ClientSession(connector=UnixConnector(path=str(socket)))
-    payload = {"input": [], "tools": [_function()], "store": False, "stream": True}
+    payload = {
+        "input": [],
+        "tools": [_function()],
+        "service_tier": "priority",
+        "store": False,
+        "stream": True,
+    }
     if structured_output:
         payload["text"] = {"verbosity": "low", "format": _recap_format()}
     body = json.dumps(payload).encode()
