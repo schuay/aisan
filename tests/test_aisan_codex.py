@@ -466,7 +466,7 @@ async def test_real_codex_reads_subscription_usage_through_the_box(tmp_path):
                     "accounts": [
                         {
                             "id": FAKE_ACCOUNT,
-                            "workspace_backend_origin": "https://chatgpt.com",
+                            "workspace_backend_origin": "NO_CONSTRAINT",
                             "account_routing_override": "NO_CONSTRAINT",
                         },
                         {"id": "other-account", "name": "Do not expose"},
@@ -585,6 +585,9 @@ async def test_real_codex_reads_subscription_usage_through_the_box(tmp_path):
     assert account_response["result"]["account"]["type"] == "chatgpt"
     assert account_response["result"]["workspaceRouting"]["chatgptAccountId"] == (
         "aisan-placeholder-account"
+    )
+    assert account_response["result"]["workspaceRouting"]["backendOrigin"] == (
+        "https://aisan.invalid"
     )
     usage_response = responses[2]
     assert "error" not in usage_response, usage_response

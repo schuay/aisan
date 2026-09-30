@@ -14,6 +14,7 @@ from aisan.proxy.openai_responses import (
     ACCOUNTS_PATH,
     ALLOWED_INPUT_TYPES,
     BOX_ACCOUNT_ID,
+    BOX_BACKEND_ORIGIN,
     CONTAINERS,
     INERT_PART_KEYS,
     INLINE_URL_KEYS,
@@ -904,7 +905,10 @@ async def test_usage_request_reaches_only_the_mapped_read_route(tmp_path):
     ]
 
 
-async def test_accounts_check_exposes_only_the_selected_box_account(tmp_path):
+@pytest.mark.parametrize("backend_origin", ["NO_CONSTRAINT", "https://gov.chatgpt.com"])
+async def test_accounts_check_exposes_only_the_selected_box_account(
+    tmp_path, backend_origin
+):
     reached = []
 
     async def upstream(request: web.Request) -> web.Response:
@@ -925,7 +929,7 @@ async def test_accounts_check_exposes_only_the_selected_box_account(tmp_path):
                         "id": "real-account",
                         "name": "also private",
                         "plan_type": "pro",
-                        "workspace_backend_origin": "https://chatgpt.com",
+                        "workspace_backend_origin": backend_origin,
                         "account_routing_override": "NO_CONSTRAINT",
                     },
                 ],
@@ -955,7 +959,7 @@ async def test_accounts_check_exposes_only_the_selected_box_account(tmp_path):
                     {
                         "id": BOX_ACCOUNT_ID,
                         "plan_type": "pro",
-                        "workspace_backend_origin": "https://chatgpt.com",
+                        "workspace_backend_origin": BOX_BACKEND_ORIGIN,
                         "account_routing_override": "NO_CONSTRAINT",
                     }
                 ],

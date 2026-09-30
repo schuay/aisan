@@ -392,6 +392,8 @@ def _names_a_payload(value: object) -> str | None:
 
 CredentialSource = Callable[[], Awaitable[tuple[str, str]]]
 BOX_ACCOUNT_ID = "aisan-placeholder-account"
+# Codex validates this field during account/read, even for a custom provider.
+BOX_BACKEND_ORIGIN = "https://aisan.invalid"
 
 
 def _selected_account(body: bytes, headers: dict[str, str]) -> bytes:
@@ -407,10 +409,13 @@ def _selected_account(body: bytes, headers: dict[str, str]) -> bytes:
     if len(matches) != 1:
         raise ValueError("accounts/check did not identify one selected account")
     selected = matches[0]
-    account = {"id": BOX_ACCOUNT_ID}
-    for key in ("plan_type", "workspace_backend_origin", "account_routing_override"):
-        if key in selected:
-            account[key] = selected[key]
+    account = {
+        "id": BOX_ACCOUNT_ID,
+        "workspace_backend_origin": BOX_BACKEND_ORIGIN,
+        "account_routing_override": "NO_CONSTRAINT",
+    }
+    if "plan_type" in selected:
+        account["plan_type"] = selected["plan_type"]
     return json.dumps(
         {
             "accounts": [account],
