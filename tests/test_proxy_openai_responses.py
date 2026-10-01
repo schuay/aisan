@@ -1027,6 +1027,7 @@ async def test_expected_codex_read_probes_are_refused_without_tui_warnings(
             for path in (
                 "/models",
                 "/api/codex/settings/user",
+                "/api/codex/rate-limit-reset-credits",
                 "/ps/plugins/suggested/codex",
                 "/plugins/featured",
                 "/ps/plugins/installed",
@@ -1043,6 +1044,7 @@ async def test_expected_codex_read_probes_are_refused_without_tui_warnings(
     assert reached == []
     assert "refused GET /models" not in caplog.text
     assert "refused GET /api/codex/settings/user" not in caplog.text
+    assert "refused GET /api/codex/rate-limit-reset-credits" not in caplog.text
     assert "refused GET /ps/plugins/suggested/codex" not in caplog.text
     assert "refused GET /plugins/featured" not in caplog.text
     assert "refused GET /ps/plugins/installed" not in caplog.text

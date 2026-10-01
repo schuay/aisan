@@ -47,6 +47,7 @@ ALLOWED_PATHS = (("POST", "/responses"), ("GET", USAGE_PATH), ("GET", ACCOUNTS_P
 QUIET_REFUSALS = (
     ("GET", "/models"),
     ("GET", "/api/codex/settings/user"),
+    ("GET", "/api/codex/rate-limit-reset-credits"),
     ("GET", "/ps/plugins/suggested/codex"),
     ("GET", "/plugins/featured"),
     ("GET", "/ps/plugins/installed"),
