@@ -18,6 +18,7 @@ from aisan.proxy.openai_responses import (
     CONTAINERS,
     INERT_PART_KEYS,
     INLINE_URL_KEYS,
+    OUTPUT_TEXT_METADATA_KEYS,
     PART_KEYS,
     TAG_SETTLED_INPUT_TYPES,
     TOOL_ENVELOPE_INPUT_TYPE,
@@ -61,6 +62,65 @@ def test_body_policy_permits_codex_structured_output(verbosity):
         text["verbosity"] = verbosity
     body = {"input": [], "store": False, "stream": True, "text": text}
     assert BodyPolicy().refuse(json.dumps(body).encode()) is None
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"annotations": []},
+        {"logprobs": []},
+        {"annotations": [], "logprobs": []},
+        {
+            "annotations": [],
+            "logprobs": [
+                {"token": "I", "logprob": -0.25, "bytes": [73], "top_logprobs": []}
+            ],
+        },
+    ],
+)
+def test_body_policy_permits_codex_output_text_replay(metadata):
+    body = {
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "I checked.", **metadata}],
+            }
+        ],
+        "store": False,
+        "stream": True,
+    }
+    assert BodyPolicy().refuse(json.dumps(body).encode()) is None
+
+
+@pytest.mark.parametrize("field", ["annotations", "logprobs"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "[]",
+        {},
+        False,
+        [{"nested": [{"image_url": "https://evil.test/x"}]}],
+        [{"file_id": "file-123"}],
+    ],
+)
+def test_body_policy_refuses_malformed_or_external_output_text_metadata(field, value):
+    body = {
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "I checked.", field: value}
+                ],
+            }
+        ],
+        "store": False,
+        "stream": True,
+    }
+    assert BodyPolicy().refuse(json.dumps(body).encode()) is not None
 
 
 @pytest.mark.parametrize(
@@ -469,7 +529,10 @@ def test_every_part_a_container_holds_is_pinned_and_url_gated():
         for container in containers:
             assert container.parts <= set(PART_KEYS), container
     for part_kind, keys in PART_KEYS.items():
-        assert keys - INERT_PART_KEYS <= {INLINE_URL_KEYS.get(part_kind)}, part_kind
+        structured = OUTPUT_TEXT_METADATA_KEYS if part_kind == "output_text" else set()
+        assert keys - INERT_PART_KEYS - structured <= {
+            INLINE_URL_KEYS.get(part_kind)
+        }, part_kind
     assert set(INLINE_URL_KEYS) <= set(PART_KEYS)
 
 
@@ -801,8 +864,9 @@ async def _credential() -> tuple[str, str]:
 
 
 @pytest.mark.parametrize("structured_output", [False, True])
+@pytest.mark.parametrize("replayed_output", [False, True])
 async def test_valid_response_request_reaches_the_prefixed_upstream(
-    tmp_path, structured_output
+    tmp_path, structured_output, replayed_output
 ):
     reached = []
 
@@ -833,6 +897,21 @@ async def test_valid_response_request_reaches_the_prefixed_upstream(
     }
     if structured_output:
         payload["text"] = {"verbosity": "low", "format": _recap_format()}
+    if replayed_output:
+        payload["input"] = [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "I checked.",
+                        "annotations": [],
+                        "logprobs": [],
+                    }
+                ],
+            }
+        ]
     body = json.dumps(payload).encode()
     try:
         async with session.post(

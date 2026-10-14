@@ -87,10 +87,11 @@ TAG_SETTLED_INPUT_TYPES = frozenset({"compaction", "custom_tool_call", "function
 # field from naming external data. Recorded sessions matched these sets;
 # ``encrypted_content`` comes from the protocol definition because no
 # ``agent_message`` was captured.
+OUTPUT_TEXT_METADATA_KEYS = frozenset({"annotations", "logprobs"})
 PART_KEYS = MappingProxyType(
     {
         "input_text": frozenset({"type", "text"}),
-        "output_text": frozenset({"type", "text"}),
+        "output_text": frozenset({"type", "text"}) | OUTPUT_TEXT_METADATA_KEYS,
         "encrypted_content": frozenset({"type", "encrypted_content"}),
         "input_image": frozenset({"type", "image_url", "detail"}),
         "input_audio": frozenset({"type", "audio_url"}),
@@ -348,8 +349,16 @@ class BodyPolicy(_BodyPolicy):
                 f"{part_kind} field(s) not permitted by the sandbox proxy:"
                 f" {quoted_names(extra)}"
             )
-        # Observed part values are strings. Reject nested values under allowed keys.
         for key, value in part.items():
+            if part_kind == "output_text" and key in OUTPUT_TEXT_METADATA_KEYS:
+                if not isinstance(value, list):
+                    return f"{part_kind} `{key}` must be an array"
+                if named := _names_a_payload(value):
+                    return (
+                        f"{part_kind} `{key}` names a payload this policy cannot gate:"
+                        f" {named!r}"
+                    )
+                continue
             if not isinstance(value, str):
                 return f"{part_kind} `{key}` must be a string"
         url_key = INLINE_URL_KEYS.get(part_kind)
