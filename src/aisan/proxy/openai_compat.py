@@ -36,6 +36,7 @@ from dataclasses import dataclass
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
+from ..upstream import upstream_origin, validate_upstream
 from .http import (
     MAX_BODY_BYTES,
     LogGate,
@@ -102,6 +103,8 @@ REFUSED_KEYS: tuple[str, ...] = ("web_search_options",)
 ALLOWED_KEYS = frozenset(
     {
         "max_tokens",
+        "max_completion_tokens",
+        "store",
         "messages",
         "model",
         "reasoning_effort",
@@ -156,6 +159,15 @@ class BodyPolicy:
             return (
                 f"field(s) not permitted by the sandbox proxy: {quoted_names(unknown)}"
             )
+
+        if "store" in payload and payload["store"] is not False:
+            return "`store` must be false"
+        if "max_completion_tokens" in payload:
+            count = payload["max_completion_tokens"]
+            if type(count) is not int or count <= 0:
+                return "`max_completion_tokens` must be a positive integer"
+            if "max_tokens" in payload:
+                return "`max_tokens` and `max_completion_tokens` cannot both be present"
 
         reason = self._content_refusal(payload)
         if reason is not None:
@@ -291,7 +303,8 @@ def make_app(
     body_policy = body or BodyPolicy()
     limiter = rate or RateLimit()
     warn = LogGate()
-    base = upstream.rstrip("/")
+    base = validate_upstream(upstream)
+    origin = upstream_origin(base)
 
     async def handle(request: web.Request) -> web.StreamResponse:
         if not token_matches(bearer_token(request), client_token):
@@ -367,7 +380,7 @@ def make_app(
                 if is_redirect(up.status):
                     log.warning(
                         "openai-compat proxy: upstream %s answered %d, not followed",
-                        base,
+                        origin,
                         up.status,
                     )
                     return _error(
@@ -412,10 +425,12 @@ def make_app(
                 return resp
         except ClientError as e:
             # Return a readable failure instead of a retryable disconnect.
-            log.warning("openai-compat proxy: upstream %s unreachable: %s", base, e)
-            return _error(
-                502, "api_error", f"sandbox proxy cannot reach its upstream: {e}"
+            log.warning(
+                "openai-compat proxy: upstream %s unreachable: %s",
+                origin,
+                type(e).__name__,
             )
+            return _error(502, "api_error", "sandbox proxy cannot reach its upstream")
 
     app = web.Application(client_max_size=MAX_BODY_BYTES + 1)
     app.router.add_route("*", "/{tail:.*}", handle)

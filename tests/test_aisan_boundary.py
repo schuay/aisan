@@ -21,6 +21,7 @@ _ALLOWED_IMPORT_ROOTS = {
     "aiohttp",
     "google",
     "h2",
+    "yarl",
 }
 
 

@@ -22,6 +22,7 @@ classifiers = [
 dependencies = [
     # aiohttp serves HTTP proxies; h2 serves the plaintext REAPI transport.
     "aiohttp>=3.9",
+    "yarl>=1.9",
     "h2>=4.1",
 ]
 

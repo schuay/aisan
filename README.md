@@ -196,6 +196,64 @@ aisan codex /path/to/repo --net
 Launcher options come before a literal `--`; arguments after it are passed to
 the underlying client unchanged.
 
+OpenCode custom providers use the selected host `opencode.json` or `.jsonc`:
+
+```sh
+aisan opencode /path/to/repo --provider local --model example-model --no-upstream-auth
+```
+
+The tested custom-provider client is OpenCode v2.0.29. A legacy `provider`
+definition must use `npm: "@ai-sdk/openai-compatible"`, an HTTP(S)
+`options.baseURL`, and an explicit selected model, for example:
+
+```json
+{
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {"baseURL": "http://inference.example:8080/v1"},
+      "models": {
+        "example-model": {
+          "name": "Example Model",
+          "limit": {"context": 16384, "output": 2048}
+        }
+      }
+    }
+  }
+}
+```
+
+Set budgets for the server's loaded context allocation. Architectural context
+capacity can be larger; aisan neither probes nor changes the server allocation.
+An optional model `id` maps the selected key to an upstream model name. Only
+text input/output and client-side tools are supported. Native V2 `providers`
+import and other SDKs are unsupported.
+
+`OPENCODE_CONFIG` selects a host file; otherwise aisan chooses `opencode.json`
+before `opencode.jsonc` under `$XDG_CONFIG_HOME/opencode` (default
+`~/.config/opencode`). It does not merge repository or inline host config into
+upstream routing. `--upstream`, then `AISAN_OPENCODE_UPSTREAM`, overrides the
+host `options.baseURL`; the fetched catalog supplies the final fallback.
+Interpolation, URL userinfo, queries, and fragments are refused. Host keys,
+headers, and arbitrary request options are never imported.
+
+`--no-upstream-auth` skips host credential reads and sends no Authorization
+header upstream. The default still requires a static key in host `auth.json`.
+Shared networking (`--net`) always authenticates clients to the proxy, but also
+allows direct host/LAN connections. Isolated networking confines model traffic
+to the proxy. Custom launches use `--standalone --auto` and select the same
+model for title generation, which can add a concurrent request.
+
+`aisan opencode ... --explain` reads config/catalog files and reports the route
+origin, source, model budgets, ignored fields, and auth mode. It never reads
+`auth.json`, contacts the upstream, or starts OpenCode. Backend construction and
+`client_env()` remain file-free for programmatic callers.
+
+The optional external-server test requires `AISAN_TEST_OLLAMA_URL`,
+`AISAN_TEST_OLLAMA_MODEL`, `AISAN_TEST_OLLAMA_CONTEXT`, and
+`AISAN_TEST_OLLAMA_OUTPUT`. Set them for your deployment; the repository's
+examples and fake-server tests use invented values.
+
 `--grant NAME` adds a named grant: the mounts, PATH entries and environment
 some tree needs inside a box with no network route.
 

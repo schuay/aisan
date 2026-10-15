@@ -8,9 +8,8 @@ worktrees remain hidden. The payload runs in a thread so the host proxy event
 loop can serve model requests. Terminal settings survive the cleared
 environment.
 
-OpenCode 1.18.18 has no first-run network gate. Its TUI also has no model flag,
-so the backend selects the model through inline config. ``--auto`` approves
-tool use because the outer box is the permission boundary.
+Custom providers use OpenCode v2.0.29 standalone mode so the service inherits
+the box configuration. ``--auto`` approves tools within the box boundary.
 
 Usage:
     aisan opencode [repo] [flags] -- [opencode args...]
@@ -27,7 +26,9 @@ import os
 import sys
 from pathlib import Path
 
-from aisan.egress.openai_compat import OpenAICompatBackend
+from aisan.egress.openai_compat import DEFAULT_CATALOG, OpenAICompatBackend
+from aisan.opencode_config import config_file, read_config
+from aisan.opencode_provider import resolve_provider
 from aisan.presets.opencode import opencode, opencode_binary
 from aisan.sandbox import BindOver, BindSpec
 from aisan.session import (
@@ -68,21 +69,26 @@ def parse_args(argv: list[str]):
     parser.add_argument(
         "--provider",
         default=os.environ.get("AISAN_OPENCODE_PROVIDER", "zai-coding-plan"),
-        help="provider id in the opencode catalog"
+        help="provider id in host config or the opencode catalog"
         " (default: $AISAN_OPENCODE_PROVIDER or zai-coding-plan)",
     )
     parser.add_argument(
         "--model",
         default=os.environ.get("AISAN_OPENCODE_MODEL", "glm-5.3"),
-        help="bare model id; rides the backend's inline config, since the"
-        " TUI takes no --model flag (default: $AISAN_OPENCODE_MODEL or"
+        help="bare model key, selected through inline config"
+        " (default: $AISAN_OPENCODE_MODEL or"
         " glm-5.3)",
     )
     parser.add_argument(
         "--upstream",
         default=os.environ.get("AISAN_OPENCODE_UPSTREAM"),
-        help="the provider's full api base URL; default resolves it from the"
-        " host's opencode catalog ($AISAN_OPENCODE_UPSTREAM overrides)",
+        help="full API base URL; overrides host config and catalog"
+        " (default: $AISAN_OPENCODE_UPSTREAM, host baseURL, then catalog)",
+    )
+    parser.add_argument(
+        "--no-upstream-auth",
+        action="store_true",
+        help="send no upstream Authorization header; never read auth.json",
     )
     return parse_interactive_args(parser, argv)
 
@@ -95,8 +101,29 @@ async def _main(argv: list[str]) -> int:
     state = state_dir("opencode", repo)
     mcp_config = state / "aisan-host-mcp.json"
 
+    source = config_file()
+    try:
+        document = read_config(source, strict=True)
+        selected = resolve_provider(
+            args.provider,
+            args.model,
+            source=source,
+            document=document,
+            catalog=DEFAULT_CATALOG,
+            upstream=args.upstream,
+        )
+    except (OSError, ValueError, TypeError) as error:
+        print(error, file=sys.stderr)
+        return 2
+    auth_mode = "none" if args.no_upstream_auth else "api-key"
     backend = OpenAICompatBackend(
-        provider=args.provider, model=args.model, upstream=args.upstream
+        provider=args.provider,
+        model=args.model,
+        resolved=selected,
+        upstream_auth=auth_mode,
+    )
+    print(
+        selected.description(auth_mode), file=sys.stdout if args.explain else sys.stderr
     )
     try:
         flags = resolve_launcher_flags(
@@ -111,7 +138,7 @@ async def _main(argv: list[str]) -> int:
         print(e, file=sys.stderr)
         return e.code
     # The bind specs decide which host declarations this box may start.
-    mcp = opencode_host_mcp(allow=flags.mcp)
+    mcp = opencode_host_mcp(source, allow=flags.mcp, document=document)
     spec = opencode(
         repo,
         state=state,
@@ -138,7 +165,12 @@ async def _main(argv: list[str]) -> int:
         state=state,
         spec=spec,
         # The outer sandbox provides the tool permission boundary.
-        command=lambda _box: ["opencode", "--auto", *payload],
+        command=lambda _box: [
+            "opencode",
+            "--auto",
+            *(["--standalone"] if selected.custom else []),
+            *payload,
+        ],
         binary=opencode_binary,
         flags=flags,
         explain_only=args.explain,

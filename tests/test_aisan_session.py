@@ -65,6 +65,18 @@ def test_staged_directory_removes_only_what_it_created(tmp_path):
     assert not (existing / "client").exists()
 
 
+@pytest.fixture(autouse=True)
+def opencode_catalog(tmp_path, monkeypatch):
+    cache = tmp_path / "catalog-cache"
+    catalog = cache / "opencode" / "models.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text('{"zai-coding-plan":{"api":"https://catalog.example/v1"}}')
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    monkeypatch.delenv("AISAN_OPENCODE_PROVIDER", raising=False)
+    monkeypatch.delenv("AISAN_OPENCODE_MODEL", raising=False)
+    monkeypatch.delenv("AISAN_OPENCODE_UPSTREAM", raising=False)
+
+
 def _cli(tmp_path, argv, host_path=None):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)

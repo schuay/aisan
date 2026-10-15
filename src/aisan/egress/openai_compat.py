@@ -35,10 +35,13 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
+from ..opencode_provider import SDK, SelectedProvider
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
 from ..proxy.openai_compat import make_app
+from ..upstream import upstream_origin, validate_upstream
 from .base import (
     PLACEHOLDER_KEY,
     SHARED_PORT_MARKER,
@@ -99,15 +102,29 @@ class OpenAICompatBackend(Backend):
         model: str = "",
         upstream: str | None = None,
         credentials: Path | None = None,
+        resolved: SelectedProvider | None = None,
+        upstream_auth: Literal["api-key", "none"] = "api-key",
         catalog: Path | None = None,
         rpm: int = 120,
         port: int = PORT,
     ) -> None:
+        if upstream_auth not in {"api-key", "none"}:
+            raise ValueError("upstream_auth must be api-key or none")
+        if resolved is not None and (
+            resolved.provider != provider
+            or resolved.model != model
+            or upstream is not None
+        ):
+            raise ValueError(
+                "resolved provider/model must match; do not also pass upstream"
+            )
+        self._resolved = resolved
+        self._upstream_auth = upstream_auth
         self._provider = provider
         self._model = model
         # The complete API base includes any provider path prefix. Resolve a
         # missing value from OpenCode's catalog.
-        self._upstream = upstream
+        self._upstream = resolved.upstream if resolved else upstream
         self._credentials = credentials or default_credentials()
         # The credential file contains keys for every configured provider.
         self.credentials = (self._credentials,)
@@ -127,7 +144,11 @@ class OpenAICompatBackend(Backend):
         session. Credentials follow a separate per-request path.
         """
         if self._api is None:
-            self._api = self._upstream or _catalog_api(self._catalog, self._provider)
+            self._api = validate_upstream(
+                self._upstream
+                if self._upstream is not None
+                else _catalog_api(self._catalog, self._provider)
+            )
         return self._api
 
     async def _bearer(self) -> str:
@@ -152,16 +173,17 @@ class OpenAICompatBackend(Backend):
                 self.name, f"cannot resolve the route: {e}", _FIX_CATALOG
             ) from e
 
-        try:
-            _read_api_key(self._credentials, self._provider)
-        except CredentialShapeError as e:
-            raise PreflightError(self.name, str(e), _FIX_SHAPE) from e
-        except (OSError, ValueError, KeyError) as e:
-            raise PreflightError(
-                self.name,
-                f"no usable API key for {self._provider} in {self._credentials}: {e}",
-                _FIX_LOGIN,
-            ) from e
+        if self._upstream_auth == "api-key":
+            try:
+                _read_api_key(self._credentials, self._provider)
+            except CredentialShapeError as e:
+                raise PreflightError(self.name, str(e), _FIX_SHAPE) from e
+            except (OSError, ValueError, KeyError) as e:
+                raise PreflightError(
+                    self.name,
+                    f"no usable API key for {self._provider} in {self._credentials}: {e}",
+                    _FIX_LOGIN,
+                ) from e
 
         await self._check_upstream(api)
 
@@ -182,15 +204,23 @@ class OpenAICompatBackend(Backend):
         except ClientError as e:
             raise PreflightError(
                 self.name,
-                f"upstream {api} does not answer: {e}",
+                f"upstream {upstream_origin(api)} does not answer ({type(e).__name__})",
                 "check the network, or point the backend at a different upstream",
             ) from e
         except TimeoutError as e:
             raise PreflightError(
                 self.name,
-                f"upstream {api} timed out",
+                f"upstream {upstream_origin(api)} timed out",
                 "check the network, or point the backend at a different upstream",
             ) from e
+
+    def _authorization(self) -> dict:
+        if self._upstream_auth == "none":
+            return {"authorization": self._no_authorization}
+        return {"token": self._bearer}
+
+    async def _no_authorization(self) -> dict[str, str]:
+        return {}
 
     @asynccontextmanager
     async def serve(self, runtime_dir: Path) -> AsyncIterator[None]:
@@ -199,7 +229,7 @@ class OpenAICompatBackend(Backend):
         # the box-facing loopback URL. ``serve_proxy`` removes stale sockets.
         api = self._resolve_api()
         app = make_app(
-            token=self._bearer,
+            **self._authorization(),
             upstream=api,
             rate=RateLimit(per_minute=self._rpm),
         )
@@ -220,7 +250,7 @@ class OpenAICompatBackend(Backend):
     async def serve_shared(self, runtime_dir: Path) -> AsyncIterator[BackendActivation]:
         client_token = shared_proxy_token()
         app = make_app(
-            token=self._bearer,
+            **self._authorization(),
             upstream=self._resolve_api(),
             rate=RateLimit(per_minute=self._rpm),
             client_token=client_token,
@@ -254,11 +284,18 @@ class OpenAICompatBackend(Backend):
             # Prevent project config from enabling transcript uploads.
             "share": "disabled",
             "provider": {
-                self._provider: {"options": {"baseURL": f"http://127.0.0.1:{port}"}}
+                self._provider: {
+                    "options": {"baseURL": f"http://127.0.0.1:{port}", "apiKey": key}
+                }
             },
         }
         if self._model:
             config["model"] = f"{self._provider}/{self._model}"
+        if self._resolved is not None and self._resolved.custom is not None:
+            config["small_model"] = f"{self._provider}/{self._model}"
+            entry = config["provider"][self._provider]
+            entry["npm"] = SDK
+            entry["models"] = {self._model: self._resolved.custom.config(self._model)}
         return {
             "OPENCODE_AUTH_CONTENT": json.dumps(auth),
             "OPENCODE_CONFIG_CONTENT": json.dumps(config),

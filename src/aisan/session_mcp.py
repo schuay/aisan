@@ -30,6 +30,8 @@ from .egress import known_credential_paths
 from .egress.anthropic import claude_config_dir
 from .egress.base import credential_overlap
 from .launch import interpreter_roots
+from .opencode_config import config_file as _opencode_config_file
+from .opencode_config import read_config as _read_jsonc
 from .statedir import write_sealed
 from .userbinds import WILDCARD
 
@@ -209,10 +211,13 @@ def claude_host_mcp(
 
 
 def opencode_host_mcp(
-    path: Path | None = None, *, allow: MCPAllowlist = DENY_ALL
+    path: Path | None = None,
+    *,
+    allow: MCPAllowlist = DENY_ALL,
+    document: dict[str, object] | None = None,
 ) -> SessionMCP:
     source = path or _opencode_config_file()
-    data = _read_jsonc(source)
+    data = _read_jsonc(source) if document is None else document
     servers = _table(data.get("mcp"), source, "mcp")
     local: dict[str, dict[str, object]] = {}
     commands: dict[str, str] = {}
@@ -352,16 +357,6 @@ def claude_config_file() -> Path:
     return (claude_config_dir() or Path.home()) / ".claude.json"
 
 
-def _opencode_config_file() -> Path:
-    configured = os.environ.get("OPENCODE_CONFIG")
-    if configured:
-        return Path(configured)
-    root = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
-    base = root / "opencode"
-    json_path = base / "opencode.json"
-    return json_path if json_path.exists() else base / "opencode.jsonc"
-
-
 def _read_toml(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -387,18 +382,6 @@ def _read_json(path: Path) -> dict[str, object]:
     return data
 
 
-def _read_jsonc(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(_strip_jsonc(path.read_text()))
-    except json.JSONDecodeError as error:
-        raise ValueError(f"host MCP config {path} is not valid JSONC") from error
-    if not isinstance(data, dict):
-        raise TypeError(f"host MCP config {path} must contain an object")
-    return data
-
-
 def _table(value: object, path: Path, key: str) -> dict[str, dict[str, object]]:
     if value is None:
         return {}
@@ -408,77 +391,6 @@ def _table(value: object, path: Path, key: str) -> dict[str, dict[str, object]]:
     ):
         raise ValueError(f"host MCP config {path}: {key} must be a table of tables")
     return value
-
-
-def _strip_jsonc(text: str) -> str:
-    """Remove JSONC comments and trailing commas without touching strings."""
-    out: list[str] = []
-    index = 0
-    quoted = False
-    escaped = False
-    while index < len(text):
-        char = text[index]
-        if quoted:
-            out.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                quoted = False
-            index += 1
-            continue
-        if char == '"':
-            quoted = True
-            out.append(char)
-            index += 1
-            continue
-        if text.startswith("//", index):
-            index = text.find("\n", index)
-            if index < 0:
-                break
-            out.append("\n")
-            index += 1
-            continue
-        if text.startswith("/*", index):
-            end = text.find("*/", index + 2)
-            if end < 0:
-                # An unterminated block comment consumes the rest of the input.
-                break
-            out.extend("\n" for c in text[index : end + 2] if c == "\n")
-            index = end + 2
-            continue
-        out.append(char)
-        index += 1
-    return _strip_trailing_commas("".join(out))
-
-
-def _strip_trailing_commas(text: str) -> str:
-    out: list[str] = []
-    quoted = False
-    escaped = False
-    for index, char in enumerate(text):
-        if quoted:
-            out.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                quoted = False
-            continue
-        if char == '"':
-            quoted = True
-            out.append(char)
-            continue
-        if char == ",":
-            lookahead = index + 1
-            while lookahead < len(text) and text[lookahead].isspace():
-                lookahead += 1
-            if lookahead < len(text) and text[lookahead] in "]}":
-                continue
-        out.append(char)
-    return "".join(out)
 
 
 def _toml_document(document: dict[str, object]) -> str:

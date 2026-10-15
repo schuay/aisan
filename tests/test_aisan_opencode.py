@@ -567,3 +567,152 @@ async def test_a_real_opencode_turn_through_the_whole_chain(tmp_path):
     await up_runner.cleanup()
     assert r.returncode != 0
     assert marker in r.stdout + r.stderr, f"OUT={r.stdout!r} ERR={r.stderr!r}"
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("auth_mode", ["none", "api-key"])
+async def test_auth_modes_and_refusals_on_both_transports(
+    tmp_path, monkeypatch, shared, auth_mode
+):
+    from aisan.egress import openai_compat
+
+    seen = []
+
+    async def upstream(request):
+        seen.append((request.path, request.headers.get("Authorization")))
+        return web.Response(text="data: [DONE]\n\n", content_type="text/event-stream")
+
+    up, runner = await _upstream_server(upstream)
+    backend = _backend(tmp_path, upstream=up + "/v1", upstream_auth=auth_mode)
+    if auth_mode == "none":
+
+        def forbidden(*args):
+            raise AssertionError("no-auth mode read credentials")
+
+        monkeypatch.setattr(openai_compat, "_read_api_key", forbidden)
+    try:
+        await backend.preflight()
+        assert seen == [("/v1/models", None)]
+        seen.clear()
+        context = backend.serve_shared(tmp_path) if shared else backend.serve(tmp_path)
+        async with context as activation:
+            if shared:
+                config = json.loads(activation.client_env["OPENCODE_CONFIG_CONTENT"])
+                options = config["provider"][PROVIDER]["options"]
+                endpoint, token = options["baseURL"], options["apiKey"]
+                connector = None
+            else:
+                endpoint, token = "http://proxy", PLACEHOLDER_KEY
+                connector = UnixConnector(path=str(backend.socket_path(tmp_path)))
+            async with ClientSession(connector=connector) as session:
+                if shared:
+                    for headers in (
+                        {},
+                        {"Authorization": "Bearer wrong"},
+                        {"Authorization": "Basic wrong"},
+                        [
+                            ("Authorization", f"Bearer {token}"),
+                            ("Authorization", f"Bearer {token}"),
+                        ],
+                    ):
+                        async with session.post(
+                            endpoint + "/chat/completions", json={}, headers=headers
+                        ) as response:
+                            assert response.status == 401
+                    assert seen == []
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "X-Session-Id": "private",
+                }
+                for path, body in (
+                    ("/models", {}),
+                    ("/chat/completions", {"store": True}),
+                    ("/chat/completions", {"max_completion_tokens": True}),
+                    ("/chat/completions", {"unknown": 1}),
+                ):
+                    async with session.post(
+                        endpoint + path, json=body, headers=headers
+                    ) as response:
+                        assert response.status == 403
+                assert seen == []
+                for key in (FAKE_KEY, "rotated-key"):
+                    if auth_mode == "api-key":
+                        _auth(tmp_path / "auth.json", key=key)
+                    async with session.post(
+                        endpoint + "/chat/completions",
+                        json={"store": False, "max_completion_tokens": 4096},
+                        headers=headers,
+                    ) as response:
+                        assert response.status == 200
+                        assert await response.text() == "data: [DONE]\n\n"
+                    assert seen[-1] == (
+                        "/v1/chat/completions",
+                        f"Bearer {key}" if auth_mode == "api-key" else None,
+                    )
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.parametrize("auth_mode", ["none", "api-key"])
+async def test_userinfo_is_refused_before_credentials_or_network(
+    tmp_path, monkeypatch, auth_mode
+):
+    from aisan.egress import openai_compat
+
+    def forbidden(*args):
+        raise AssertionError("credentials or network reached")
+
+    backend = _backend(
+        tmp_path,
+        upstream="http://user:SECRET@localhost/private",
+        upstream_auth=auth_mode,
+    )
+    monkeypatch.setattr(openai_compat, "_read_api_key", forbidden)
+    monkeypatch.setattr(backend, "_check_upstream", forbidden)
+    with pytest.raises(PreflightError) as error:
+        await backend.preflight()
+    assert "SECRET" not in str(error.value)
+    assert "/private" not in str(error.value)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+async def test_redirect_never_reaches_target(tmp_path, shared):
+    target_seen = []
+
+    async def target(request):
+        target_seen.append(request.path)
+        return web.Response()
+
+    target_url, target_runner = await _upstream_server(target)
+
+    async def redirect(request):
+        return web.Response(status=307, headers={"Location": target_url + "/target"})
+
+    up, runner = await _upstream_server(redirect)
+    backend = _backend(tmp_path, upstream=up + "/secret-path", upstream_auth="none")
+    try:
+        await backend.preflight()
+        context = backend.serve_shared(tmp_path) if shared else backend.serve(tmp_path)
+        async with context as activation:
+            if shared:
+                opts = json.loads(activation.client_env["OPENCODE_CONFIG_CONTENT"])[
+                    "provider"
+                ][PROVIDER]["options"]
+                endpoint, token = opts["baseURL"], opts["apiKey"]
+                connector = None
+            else:
+                endpoint, token = "http://proxy", PLACEHOLDER_KEY
+                connector = UnixConnector(path=str(backend.socket_path(tmp_path)))
+            async with (
+                ClientSession(connector=connector) as session,
+                session.post(
+                    endpoint + "/chat/completions",
+                    json={},
+                    headers={"Authorization": f"Bearer {token}"},
+                ) as response,
+            ):
+                assert response.status == 502
+        assert target_seen == []
+    finally:
+        await runner.cleanup()
+        await target_runner.cleanup()

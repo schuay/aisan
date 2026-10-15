@@ -586,3 +586,34 @@ async def test_an_interrupted_turn_is_not_an_upstream_outage(tmp_path, caplog):
     )
 
     assert any("downstream closed" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.parametrize("value", [True, None, 0, 1, "false", [], {}])
+def test_store_must_be_the_boolean_false(value):
+    assert BodyPolicy().refuse(json.dumps({"store": value}).encode()) is not None
+
+
+def test_v2_store_false_and_completion_budget_are_permitted():
+    assert BodyPolicy().refuse(b'{"store":false,"max_completion_tokens":4096}') is None
+
+
+@pytest.mark.parametrize("value", [True, False, None, 0, -1, 1.5, "4096", [], {}])
+def test_completion_budget_must_be_a_positive_integer(value):
+    assert (
+        BodyPolicy().refuse(json.dumps({"max_completion_tokens": value}).encode())
+        is not None
+    )
+
+
+def test_two_completion_budgets_are_ambiguous():
+    assert (
+        BodyPolicy().refuse(b'{"max_tokens":1,"max_completion_tokens":1}') is not None
+    )
+
+
+def test_observed_v2_chat_title_and_tool_replay():
+    from pathlib import Path
+
+    path = Path(__file__).parent / "fixtures/opencode-v2-chat.json"
+    for request in json.loads(path.read_text()):
+        assert BodyPolicy().refuse(json.dumps(request).encode()) is None

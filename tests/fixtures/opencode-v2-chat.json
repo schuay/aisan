@@ -1,0 +1,108 @@
+[
+  {
+    "model": "example-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read probe.txt."
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "max_completion_tokens": 2048,
+    "store": false,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "read",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "model": "example-model",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Generate a short title."
+      },
+      {
+        "role": "user",
+        "content": "Read probe.txt."
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "reasoning_effort": "low",
+    "store": false
+  },
+  {
+    "model": "example-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read probe.txt."
+      },
+      {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_read",
+            "type": "function",
+            "function": {
+              "name": "read",
+              "arguments": "{\"path\":\"/work/probe.txt\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_read",
+        "content": "AISAN_TEST_CONTENT"
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "max_completion_tokens": 2048,
+    "store": false,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "read",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        }
+      }
+    ]
+  }
+]
