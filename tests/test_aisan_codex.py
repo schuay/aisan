@@ -83,19 +83,15 @@ async def _hello(request: web.Request) -> web.Response:
 def test_cli_config_pins_the_measured_route_and_disables_other_egress(tmp_path):
     backend = _backend(tmp_path, model="gpt-test", upstream="https://example.test/v1")
     assert backend.config_overrides() == (
-        'model_provider="aisan"',
+        'model_provider="openai"',
         'web_search="disabled"',
         "check_for_update_on_startup=false",
         "analytics.enabled=false",
         "feedback.enabled=false",
         "features.apps=false",
-        'model_providers.aisan.name="aisan host proxy"',
-        f'model_providers.aisan.base_url="http://127.0.0.1:{PORT}"',
-        f'model_providers.aisan.env_key="{CLIENT_KEY_ENV}"',
-        'model_providers.aisan.wire_api="responses"',
-        "model_providers.aisan.requires_openai_auth=true",
-        "model_providers.aisan.supports_websockets=false",
-        "model_providers.aisan.supports_standalone_web_search=false",
+        "features.cli_daybreak=true",
+        f'openai_base_url="http://127.0.0.1:{PORT}"',
+        "features.enable_request_compression=false",
         'model="gpt-test"',
     )
     assert backend.box_binds(tmp_path / "runtime") == []
@@ -322,11 +318,11 @@ def test_codex_preset_is_registered_and_uses_isolated_state(tmp_path):
         (config, RO),
         (state, RW),
     ]
-    assert codex_argv(("exec", "hello"), overrides=('model_provider="aisan"',)) == [
+    assert codex_argv(("exec", "hello"), overrides=('model_provider="openai"',)) == [
         "codex",
         "--dangerously-bypass-approvals-and-sandbox",
         "--config",
-        'model_provider="aisan"',
+        'model_provider="openai"',
         "exec",
         "hello",
     ]
@@ -398,7 +394,7 @@ async def test_subscription_credential_is_absent_inside_a_real_box(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
     credential = _auth(tmp_path / "host" / "auth.json")
-    backend = CodexBackend(upstream=upstream, credentials=credential)
+    backend = CodexBackend(upstream=upstream, credentials=credential, codex_home=state)
     spec = dataclasses.replace(
         codex(worktree, state=state, egress=(backend,)),
         limits=dataclasses.replace(
@@ -618,7 +614,7 @@ async def test_codex_tui_can_persist_repository_trust(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
     credential = _auth(tmp_path / "host" / "auth.json")
-    backend = CodexBackend(upstream=upstream, credentials=credential)
+    backend = CodexBackend(upstream=upstream, credentials=credential, codex_home=state)
     base = codex(worktree, state=state, egress=(backend,))
     spec = dataclasses.replace(
         base, limits=dataclasses.replace(base.limits, use_cgroup=False)
@@ -729,7 +725,9 @@ async def test_real_codex_reaches_a_stub_only_through_the_responses_backend(
         'wire_api = "responses"\n'
     )
     credential = _auth(tmp_path / "host" / "auth.json")
-    backend = CodexBackend(upstream=upstream_url, credentials=credential)
+    backend = CodexBackend(
+        upstream=upstream_url, credentials=credential, codex_home=state
+    )
     base = codex(worktree, state=state, egress=(backend,))
     spec = dataclasses.replace(
         base, limits=dataclasses.replace(base.limits, use_cgroup=False)
@@ -862,7 +860,9 @@ async def test_codex_profile_settings_survive_a_host_mcp_relaunch(tmp_path):
         SessionMCP(document={"mcp_servers": {}}, commands=(), kind="toml"), profile
     )
     credential = _auth(tmp_path / "host" / "auth.json")
-    backend = CodexBackend(upstream=upstream_url, credentials=credential)
+    backend = CodexBackend(
+        upstream=upstream_url, credentials=credential, codex_home=state
+    )
     base = codex(worktree, state=state, egress=(backend,))
     spec = dataclasses.replace(
         base, limits=dataclasses.replace(base.limits, use_cgroup=False)
@@ -1087,7 +1087,9 @@ async def test_host_model_choice_reaches_codex_in_a_box(tmp_path, with_profile):
     else:
         seed_settings(state, seed)
     credential = _auth(tmp_path / "host" / "auth.json")
-    backend = CodexBackend(upstream=upstream_url, credentials=credential)
+    backend = CodexBackend(
+        upstream=upstream_url, credentials=credential, codex_home=state
+    )
     base = codex(worktree, state=state, egress=(backend,))
     spec = dataclasses.replace(
         base, limits=dataclasses.replace(base.limits, use_cgroup=False)
@@ -1107,3 +1109,399 @@ async def test_host_model_choice_reaches_codex_in_a_box(tmp_path, with_profile):
     assert seen, result.stderr
     assert {body["model"] for body in seen} == {"host-chosen-model"}
     assert {body["reasoning"]["effort"] for body in seen} == {"low"}
+
+
+@pytest.mark.parametrize("value", [True, False, "true", 1, [], {}])
+@pytest.mark.parametrize("with_profile", [True, False])
+def test_daybreak_preference_import_and_persistence(tmp_path, value, with_profile):
+    from aisan.cli.codex import host_settings, seed_settings, write_host_mcp
+    from aisan.session_mcp import SessionMCP, write_toml_document
+
+    host = tmp_path / "host.toml"
+    write_toml_document(host, {"daybreak": value, "unrelated": True})
+    seed = host_settings(host, Path("/repo"))
+    assert seed == ({"daybreak": value} if isinstance(value, bool) else {})
+    state = tmp_path / "state"
+    state.mkdir()
+    config = state / ("profile.config.toml" if with_profile else "config.toml")
+    config.write_text('model = "saved-model"\ndaybreak = true\n')
+    if with_profile:
+        mcp = SessionMCP(document={"mcp_servers": {}}, commands=(), kind="toml")
+        write_host_mcp(mcp, config, seed)
+        write_host_mcp(mcp, config)
+    else:
+        seed_settings(state, seed)
+    saved = tomllib.loads(config.read_text())
+    assert saved["daybreak"] is (value if isinstance(value, bool) else True)
+    assert saved["model"] == "saved-model"
+
+
+def _daybreak_catalog():
+    return json.loads(
+        (Path(__file__).parent / "fixtures" / "codex-daybreak-models.json").read_text()
+    )
+
+
+def _response_events(item, response_id):
+    events = [
+        {"type": "response.output_item.done", "item": item},
+        {
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20},
+            },
+        },
+    ]
+    return web.Response(
+        text="".join(
+            f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events
+        ),
+        content_type="text/event-stream",
+    )
+
+
+@pytest.mark.live
+@pytest.mark.skipif(codex_binary() is None, reason="codex is not installed")
+@pytest.mark.parametrize("shared", [False, True])
+async def test_daybreak_tool_roundtrip_and_compaction_in_box(
+    tmp_path, shared, monkeypatch
+):
+    import aisan.egress.openai_responses as codex_egress
+
+    seen = []
+    proxy_requests = []
+    make_proxy = codex_egress.make_app
+
+    @web.middleware
+    async def observe(request, handler):
+        response = await handler(request)
+        proxy_requests.append(
+            (
+                request.method,
+                request.path,
+                request.headers.get("Authorization"),
+                response.status,
+            )
+        )
+        return response
+
+    def observed_proxy(**kwargs):
+        app = make_proxy(**kwargs)
+        app.middlewares.append(observe)
+        return app
+
+    monkeypatch.setattr(codex_egress, "make_app", observed_proxy)
+
+    async def upstream(request):
+        if request.path.endswith("/models"):
+            return web.json_response(_daybreak_catalog())
+        if request.method != "POST":
+            return web.json_response({})
+        assert "Content-Encoding" not in request.headers
+        assert request.headers["Authorization"] == f"Bearer {_jwt(4_102_444_800)}"
+        assert request.headers["ChatGPT-Account-Id"] == FAKE_ACCOUNT
+        body = await request.json()
+        seen.append(body)
+        if {"type": "compaction_trigger"} in body["input"]:
+            return _response_events(
+                {
+                    "type": "compaction",
+                    "encrypted_content": "synthetic-compaction-summary",
+                },
+                "compact-1",
+            )
+        if len(seen) == 1:
+            return _response_events(
+                {
+                    "type": "function_call",
+                    "call_id": "test-call",
+                    "name": "exec_command",
+                    "arguments": json.dumps(
+                        {"cmd": "printf aisan-daybreak-tool-marker"}
+                    ),
+                },
+                "tool-1",
+            )
+        return _response_events(
+            {
+                "type": "message",
+                "id": "message-1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "aisan-daybreak-answer"}],
+            },
+            "response-1",
+        )
+
+    upstream_url, runner = await _upstream_server(upstream)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "config.toml").write_text(
+        'openai_base_url = "http://127.0.0.1:1"\n'
+        'chatgpt_base_url = "http://127.0.0.1:1"\n'
+        "[features]\nenable_request_compression = true\n"
+    )
+    backend = _backend(tmp_path, upstream=upstream_url, codex_home=state)
+    base = codex(worktree, state=state, egress=(backend,), unshare_net=not shared)
+    spec = dataclasses.replace(
+        base, limits=dataclasses.replace(base.limits, use_cgroup=False)
+    )
+    try:
+        async with Box(spec, box_id="codex-daybreak") as box:
+            process = await asyncio.create_subprocess_exec(
+                *box.command(
+                    codex_argv(
+                        ("app-server", "--stdio"),
+                        overrides=backend.config_overrides(
+                            port=box.activation(backend).port
+                        ),
+                    )
+                ),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, **box.env},
+            )
+
+            async def read_message():
+                line = await asyncio.wait_for(process.stdout.readline(), 30)
+                assert line, (await process.stderr.read()).decode()
+                return json.loads(line)
+
+            async def rpc(request_id, method, params):
+                process.stdin.write(
+                    (
+                        json.dumps(
+                            {"id": request_id, "method": method, "params": params}
+                        )
+                        + "\n"
+                    ).encode()
+                )
+                await process.stdin.drain()
+                while True:
+                    message = await read_message()
+                    if message.get("id") == request_id:
+                        assert "error" not in message, message
+                        return message["result"]
+
+            async def completed():
+                while True:
+                    message = await read_message()
+                    if message.get("method") == "turn/completed":
+                        assert message["params"]["turn"]["status"] == "completed", (
+                            message
+                        )
+                        return
+
+            try:
+                await rpc(
+                    0,
+                    "initialize",
+                    {
+                        "clientInfo": {"name": "aisan-test", "version": "1"},
+                        "capabilities": {"experimentalApi": True},
+                    },
+                )
+                models = await rpc(1, "model/list", {"includeHidden": True})
+                assert any(
+                    m["displayName"] == "Aisan Daybreak Test" for m in models["data"]
+                )
+                thread = await rpc(
+                    2,
+                    "thread/start",
+                    {
+                        "model": "gpt-6-sol",
+                        "cwd": str(worktree),
+                        "approvalPolicy": "never",
+                        "sandbox": "danger-full-access",
+                    },
+                )
+                thread_id = thread["thread"]["id"]
+                await rpc(
+                    3,
+                    "turn/start",
+                    {
+                        "threadId": thread_id,
+                        "input": [{"type": "text", "text": "Run the test tool."}],
+                        "cyberAccessProgram": "daybreakBlue",
+                    },
+                )
+                await completed()
+                assert len(seen) == 2
+                outputs = [
+                    item
+                    for item in seen[1]["input"]
+                    if item["type"] == "function_call_output"
+                ]
+                assert len(outputs) == 1
+                assert "aisan-daybreak-tool-marker" in outputs[0]["output"], seen[0][
+                    "tools"
+                ]
+                assert all(
+                    body["access_programs"] == {"cyber": "daybreak_blue"}
+                    for body in seen
+                )
+                await rpc(4, "thread/compact/start", {"threadId": thread_id})
+                await completed()
+                assert {"type": "compaction_trigger"} in seen[-1]["input"]
+                await rpc(
+                    5,
+                    "turn/start",
+                    {
+                        "threadId": thread_id,
+                        "input": [{"type": "text", "text": "Continue."}],
+                        "cyberAccessProgram": "daybreakBlue",
+                    },
+                )
+                await completed()
+                assert any(
+                    item.get("encrypted_content") == "synthetic-compaction-summary"
+                    for item in seen[-1]["input"]
+                )
+                bearer = f"Bearer {box.activation(backend).client_env[CLIENT_KEY_ENV]}"
+                assert {auth for _, _, auth, _ in proxy_requests} == {bearer}
+                upgrades = [
+                    status
+                    for method, path, _, status in proxy_requests
+                    if (method, path) == ("GET", "/responses")
+                ]
+                assert upgrades == [426]
+
+            finally:
+                process.terminate()
+                await asyncio.wait_for(process.wait(), 5)
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.live
+@pytest.mark.skipif(codex_binary() is None, reason="codex is not installed")
+async def test_daybreak_tui_picker_and_blue_selection(tmp_path):
+    import shlex
+
+    seen = []
+
+    async def upstream(request):
+        if request.path.endswith("/models"):
+            return web.json_response(_daybreak_catalog())
+        if request.path.endswith("/accounts/check"):
+            return web.json_response(
+                {
+                    "accounts": [
+                        {
+                            "id": FAKE_ACCOUNT,
+                            "workspace_backend_origin": "NO_CONSTRAINT",
+                            "account_routing_override": "NO_CONSTRAINT",
+                        }
+                    ],
+                    "default_account_id": FAKE_ACCOUNT,
+                }
+            )
+        if request.method == "POST":
+            seen.append(await request.json())
+            return _response_events(
+                {
+                    "type": "message",
+                    "id": "tui-message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "aisan-tui-answer"}],
+                },
+                "tui-response",
+            )
+        return web.json_response({"plan_type": "pro"})
+
+    upstream_url, runner = await _upstream_server(upstream)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "config.toml").write_text(
+        'model = "gpt-6-sol"\ndaybreak = false\n'
+        f'[projects.{json.dumps(str(worktree))}]\ntrust_level = "trusted"\n'
+    )
+    backend = _backend(tmp_path, upstream=upstream_url, codex_home=state)
+    base = codex(worktree, state=state, egress=(backend,))
+    spec = dataclasses.replace(
+        base, limits=dataclasses.replace(base.limits, use_cgroup=False)
+    )
+    try:
+        async with Box(spec, box_id="codex-daybreak-tui") as box:
+            command = shlex.join(
+                box.command(
+                    codex_argv(
+                        ("--no-alt-screen",), overrides=backend.config_overrides()
+                    )
+                )
+            )
+            process = await asyncio.create_subprocess_exec(
+                "script",
+                "-qefc",
+                "stty rows 40 cols 120; exec " + command,
+                "/dev/null",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env={
+                    **os.environ,
+                    **box.env,
+                    "TERM": "xterm-256color",
+                    "COLUMNS": "120",
+                    "LINES": "40",
+                },
+            )
+            output = bytearray()
+
+            async def expect(text):
+                try:
+                    async with asyncio.timeout(10):
+                        while text.encode() not in output:
+                            chunk = await process.stdout.read(65536)
+                            assert chunk, output.decode(errors="replace")
+                            output.extend(chunk)
+                            if b"\x1b[6n" in chunk:
+                                process.stdin.write(b"\x1b[1;1R")
+                                await process.stdin.drain()
+                except TimeoutError:
+                    pytest.fail(
+                        f"TUI did not display {text!r}: {output.decode(errors='replace')!r}"
+                    )
+
+            async def send(text):
+                output.clear()
+                process.stdin.write(text.encode())
+                await process.stdin.drain()
+
+            try:
+                await expect("Aisan Daybreak Test")
+                await expect("Tip:")
+                await send("/daybreak")
+                await expect("/daybreak")
+                await send("\r")
+                await expect("Applies to new turns.")
+                await send("Run the test.")
+                await expect("Run the test.")
+                await send("\r")
+                await expect("aisan-tui-answer")
+                assert seen
+                assert seen[-1]["access_programs"] == {"cyber": "daybreak_blue"}
+                await send("/model")
+                await expect("/model")
+                await send("\r")
+                await expect("Select Model and Effort")
+                await expect("Synthetic entitled model")
+                assert (
+                    tomllib.loads((state / "config.toml").read_text())["daybreak"]
+                    is True
+                )
+            finally:
+                process.stdin.write(b"\x03\x03")
+                await process.stdin.drain()
+                try:
+                    await asyncio.wait_for(process.wait(), 5)
+                except TimeoutError:
+                    process.terminate()
+                    await process.wait()
+    finally:
+        await runner.cleanup()

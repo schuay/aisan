@@ -296,6 +296,8 @@ def make_app(
     empty_body_routes: frozenset[tuple[str, str]] = frozenset(),
     upstream_urls: Mapping[tuple[str, str], str] | None = None,
     response_transforms: Mapping[tuple[str, str], ResponseTransform] | None = None,
+    query_refusal: Callable[[web.Request], str | None] | None = None,
+    local_refusals: Mapping[tuple[str, str], tuple[int, str]] | None = None,
 ) -> web.Application:
     if (token is None) == (authorization is None):
         raise ValueError("provide exactly one of token or authorization")
@@ -332,6 +334,12 @@ def make_app(
             return _error(413, "invalid_request_error", "request body too large")
 
         route = (request.method.upper(), path)
+        if query_refusal is not None:
+            reason = policy_refusal(
+                lambda: query_refusal(request), subject=f"query of {path}"
+            )
+            if reason is not None:
+                return _error(403, "invalid_request_error", reason)
         if route in empty_body_routes:
             reason = "request body must be empty" if body else None
         else:
@@ -341,6 +349,10 @@ def make_app(
         if reason is not None:
             warn.warning(log, "openai-compat proxy: refused body: %s", reason)
             return _error(403, "invalid_request_error", reason)
+
+        if local := (local_refusals or {}).get(route):
+            status, message = local
+            return _error(status, "invalid_request_error", message)
 
         try:
             if authorization is not None:

@@ -11,9 +11,8 @@ must be logged in with ``codex login``. aisan reads that ChatGPT subscription
 login but leaves token refresh and credential-file writes to host Codex.
 
 The host's ``~/.codex/config.toml`` is not mounted. Its status line, model,
-reasoning effort and this repository's folder trust are copied into the box's
-config on every launch, so a choice made once on the host applies to every
-box.
+reasoning effort, Daybreak preference and this repository's folder trust are
+copied into the box's config on every launch.
 """
 
 from __future__ import annotations
@@ -104,8 +103,8 @@ def host_settings(source: Path, repo: Path) -> dict[str, object]:
     """Copy the host's Codex choices that a box should start from.
 
     The box's ``CODEX_HOME`` never sees the host's, so the picks Codex saves
-    there (status line, model, reasoning effort, and folder trust for this
-    repository) are copied on every launch and win over the box's own. A
+    there (status line, model, reasoning effort, Daybreak, and this repository's
+    folder trust) are copied on every launch and win over the box's own. A
     missing or malformed host file contributes nothing.
     """
     try:
@@ -116,6 +115,8 @@ def host_settings(source: Path, repo: Path) -> dict[str, object]:
     for key in ("model", "model_reasoning_effort"):
         if isinstance(parsed.get(key), str):
             seed[key] = parsed[key]
+    if isinstance(parsed.get("daybreak"), bool):
+        seed["daybreak"] = parsed["daybreak"]
     tui = parsed.get("tui")
     if isinstance(tui, dict):
         line = tui.get("status_line")

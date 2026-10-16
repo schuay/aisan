@@ -3,7 +3,7 @@
 
 """Apply Codex-specific policy to the OpenAI Responses transport.
 
-Codex CLI 0.147.0 used ``POST {base_url}/responses`` for interactive and
+Codex CLI 0.162.1 uses ``POST {base_url}/responses`` for interactive and
 headless turns, local tool calls, and context compaction. A bare loopback URL
 keeps the real upstream path prefix on the host.
 
@@ -23,12 +23,13 @@ capabilities. ``client_metadata`` is limited to Codex's identifier fields.
 
 The OpenAI-compatible proxy handles forwarding, credential replacement, limits,
 errors, and streaming. This module supplies the Responses route and the
-read-only account routes, body policy, and host-generated protocol headers.
+model discovery and account routes, body policy, and host-generated headers.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -43,9 +44,14 @@ from .openai_compat import parse_json_object
 
 USAGE_PATH = "/api/codex/usage"
 ACCOUNTS_PATH = "/api/codex/accounts/check"
-ALLOWED_PATHS = (("POST", "/responses"), ("GET", USAGE_PATH), ("GET", ACCOUNTS_PATH))
-QUIET_REFUSALS = (
+ALLOWED_PATHS = (
+    ("POST", "/responses"),
+    ("GET", "/responses"),
     ("GET", "/models"),
+    ("GET", USAGE_PATH),
+    ("GET", ACCOUNTS_PATH),
+)
+QUIET_REFUSALS = (
     ("GET", "/api/codex/settings/user"),
     ("GET", "/api/codex/rate-limit-reset-credits"),
     ("GET", "/ps/plugins/suggested/codex"),
@@ -53,11 +59,12 @@ QUIET_REFUSALS = (
     ("GET", "/ps/plugins/installed"),
     ("GET", "/ps/plugins/list"),
 )
-EMPTY_BODY_ROUTES = frozenset({("GET", USAGE_PATH), ("GET", ACCOUNTS_PATH)})
+EMPTY_BODY_ROUTES = frozenset(route for route in ALLOWED_PATHS if route[0] == "GET")
 CLIENT_TOOL_TYPES = frozenset({"custom", "function"})
 CLIENT_TOOL_CONTAINERS = frozenset({"namespace"})
 ALLOWED_KEYS = frozenset(
     {
+        "access_programs",
         "client_metadata",
         "include",
         "input",
@@ -77,10 +84,6 @@ ALLOWED_KEYS = frozenset(
 ALLOWED_INCLUDES = frozenset({"reasoning.encrypted_content"})
 # Item types with no external references. Function and custom calls store their
 # input in strings; compaction stores an opaque blob and ID. None contain parts.
-#
-# Boxed clients compact locally, but a session recorded outside the box may
-# contain a ``compaction`` item. Permit replaying that summary. Continue to block
-# ``compaction_trigger``, which asks the upstream to perform new work.
 TAG_SETTLED_INPUT_TYPES = frozenset({"compaction", "custom_tool_call", "function_call"})
 
 # Exact field sets for content parts. A type alone doesn't prevent an extra URL
@@ -167,7 +170,9 @@ PAYLOAD_KEYS = frozenset(
 
 # Derive this set so every allowed type also receives its corresponding checks.
 ALLOWED_INPUT_TYPES = (
-    TAG_SETTLED_INPUT_TYPES | frozenset(CONTAINERS) | {TOOL_ENVELOPE_INPUT_TYPE}
+    TAG_SETTLED_INPUT_TYPES
+    | frozenset(CONTAINERS)
+    | {TOOL_ENVELOPE_INPUT_TYPE, "compaction_trigger"}
 )
 
 
@@ -197,6 +202,22 @@ class BodyPolicy(_BodyPolicy):
             return "`store` must be present and false"
         if payload.get("stream") is not True:
             return "`stream` must be true"
+
+        if "access_programs" in payload:
+            programs = payload["access_programs"]
+            if (
+                not isinstance(programs, dict)
+                or set(programs) - {"cyber"}
+                or (
+                    "cyber" in programs
+                    and (
+                        not isinstance(programs["cyber"], str)
+                        or programs["cyber"]
+                        not in {"standard", "daybreak_blue", "daybreak_red"}
+                    )
+                )
+            ):
+                return "`access_programs` must contain only a known cyber program"
 
         service_tier = payload.get("service_tier")
         if "service_tier" in payload and (
@@ -280,6 +301,10 @@ class BodyPolicy(_BodyPolicy):
         kind = item.get("type")
         if not isinstance(kind, str) or kind not in ALLOWED_INPUT_TYPES:
             return f"Responses input type {kind!r} is not permitted"
+        if kind == "compaction_trigger":
+            if set(item) != {"type"}:
+                return "`compaction_trigger` may only contain `type`"
+            return None
         if kind == TOOL_ENVELOPE_INPUT_TYPE:
             if (
                 not {"type", "role", "tools"} <= set(item)
@@ -402,7 +427,7 @@ def _names_a_payload(value: object) -> str | None:
 
 CredentialSource = Callable[[], Awaitable[tuple[str, str]]]
 BOX_ACCOUNT_ID = "aisan-placeholder-account"
-# Codex validates this field during account/read, even for a custom provider.
+# Codex validates this field during account/read.
 BOX_BACKEND_ORIGIN = "https://aisan.invalid"
 
 
@@ -462,6 +487,10 @@ def make_app(
         headers=_protocol_headers,
         client_token=client_token,
         empty_body_routes=EMPTY_BODY_ROUTES,
+        query_refusal=_query_refusal,
+        local_refusals={
+            ("GET", "/responses"): (426, "use HTTP POST for Responses"),
+        },
         upstream_urls={
             **(
                 {("GET", USAGE_PATH): usage_upstream}
@@ -478,10 +507,22 @@ def make_app(
     )
 
 
+def _query_refusal(request: web.Request) -> str | None:
+    if request.path == "/models":
+        if list(request.query) != ["client_version"]:
+            return "models requires exactly one client_version parameter"
+        version = request.query["client_version"]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}", version):
+            return "invalid client_version"
+    elif request.path == "/responses" and request.query:
+        return "query parameters are not permitted"
+    return None
+
+
 def _protocol_headers(body: bytes) -> dict[str, str]:
     """Reconstruct measured protocol headers, never forwarding box input."""
     if not body:
-        return {"X-OpenAI-Codex-Luna-Reserve": "1"}
+        return {"Originator": "codex_cli_rs", "X-OpenAI-Codex-Luna-Reserve": "1"}
     payload = parse_json_object(body)
     headers = {
         "Originator": "codex_cli_rs",

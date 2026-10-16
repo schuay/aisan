@@ -149,8 +149,10 @@ def test_path_allowlist_is_the_measured_codex_routes():
     assert paths.permits("POST", "/responses")
     assert paths.permits("GET", USAGE_PATH)
     assert paths.permits("GET", ACCOUNTS_PATH)
+    assert paths.permits("GET", "/responses")
+    assert paths.permits("GET", "/models")
     for method, path in [
-        ("GET", "/responses"),
+        ("POST", "/models"),
         ("POST", USAGE_PATH),
         ("POST", ACCOUNTS_PATH),
         ("GET", "/wham/usage"),
@@ -516,7 +518,12 @@ def test_body_policy_permits_the_recorded_compaction_item():
 
 
 def test_every_permitted_input_type_is_sorted_into_exactly_one_bucket():
-    buckets = [TAG_SETTLED_INPUT_TYPES, set(CONTAINERS), {TOOL_ENVELOPE_INPUT_TYPE}]
+    buckets = [
+        TAG_SETTLED_INPUT_TYPES,
+        set(CONTAINERS),
+        {TOOL_ENVELOPE_INPUT_TYPE},
+        {"compaction_trigger"},
+    ]
     assert not any(CONTAINERS.get(kind) for kind in TAG_SETTLED_INPUT_TYPES)
     assert set.union(*(set(b) for b in buckets)) == set(ALLOWED_INPUT_TYPES)
     for i, one in enumerate(buckets):
@@ -1104,7 +1111,6 @@ async def test_expected_codex_read_probes_are_refused_without_tui_warnings(
     try:
         with caplog.at_level(logging.WARNING):
             for path in (
-                "/models",
                 "/api/codex/settings/user",
                 "/api/codex/rate-limit-reset-credits",
                 "/ps/plugins/suggested/codex",
@@ -1181,3 +1187,177 @@ async def test_responses_lite_headers_are_reconstructed_not_forwarded(tmp_path):
     assert reached[0]["chatgpt-account-id"] == "real-account"
     assert reached[0]["originator"] == "codex_cli_rs"
     assert "x-arbitrary" not in reached[0]
+
+
+@pytest.mark.parametrize("program", ["standard", "daybreak_blue", "daybreak_red"])
+def test_access_programs_permits_known_cyber_programs(program):
+    body = {"store": False, "stream": True, "access_programs": {"cyber": program}}
+    assert BodyPolicy().refuse(json.dumps(body).encode()) is None
+
+
+@pytest.mark.parametrize(
+    "programs",
+    [
+        None,
+        [],
+        "daybreak_blue",
+        False,
+        {"cyber": None},
+        {"cyber": []},
+        {"cyber": {}},
+        {"cyber": True},
+        {"cyber": "daybreakBlue"},
+        {"cyber": "unknown"},
+        {"other": "standard"},
+        {"cyber": "standard", "other": "standard"},
+    ],
+)
+def test_access_programs_refuses_unknown_or_malformed_programs(programs):
+    body = {"store": False, "stream": True, "access_programs": programs}
+    assert BodyPolicy().refuse(json.dumps(body).encode()) is not None
+
+
+def test_compaction_trigger_permits_exact_shape():
+    body = {"store": False, "stream": True, "input": [{"type": "compaction_trigger"}]}
+    assert BodyPolicy().refuse(json.dumps(body).encode()) is None
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"id": "x"}, {"tools": []}, {"file_url": "https://evil.test"}, {"content": []}],
+)
+def test_compaction_trigger_refuses_extra_fields(extra):
+    body = {
+        "store": False,
+        "stream": True,
+        "input": [{"type": "compaction_trigger", **extra}],
+    }
+    assert BodyPolicy().refuse(json.dumps(body).encode()) is not None
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        {"tools": [{"type": "web_search"}]},
+        {
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "web_search"}],
+                }
+            ]
+        },
+        {
+            "input": [
+                {
+                    "type": "message",
+                    "content": [
+                        {"type": "input_image", "image_url": "https://evil.test/x"}
+                    ],
+                }
+            ]
+        },
+    ],
+)
+def test_compaction_trigger_keeps_validating_surrounding_input_and_tools(unsafe):
+    body = {"store": False, "stream": True, **unsafe}
+    body["input"] = [{"type": "compaction_trigger"}, *body.get("input", [])]
+    assert BodyPolicy().refuse(json.dumps(body).encode()) is not None
+
+
+@pytest.mark.parametrize("client_token", [None, "session-secret"])
+async def test_discovery_and_upgrade_refusal(tmp_path, client_token):
+    from aisan.proxy.http import RateLimit
+
+    reached = []
+    catalog = {
+        "models": [
+            {
+                "slug": "gpt-test",
+                "visibility": "list",
+                "available_access_programs": {"cyber": ["standard", "daybreak_blue"]},
+                "metadata": {"test": True},
+            }
+        ]
+    }
+
+    async def upstream(request):
+        reached.append((request.path_qs, dict(request.headers), await request.read()))
+        return web.json_response(catalog, headers={"ETag": '"catalog"'})
+
+    upstream_url, upstream_runner = await _upstream_server(upstream)
+    socket = tmp_path / "discovery.sock"
+    limiter = RateLimit(per_minute=100)
+    proxy_runner = await serve(
+        socket,
+        make_app(
+            credential=_credential,
+            upstream=upstream_url,
+            client_token=client_token,
+            rate=limiter,
+        ),
+    )
+    headers = {
+        "Authorization": f"Bearer {client_token or 'placeholder'}",
+        "ChatGPT-Account-Id": "box-account",
+        "Originator": "box-originator",
+        "X-Client-Secret": "never-forward",
+    }
+    try:
+        async with ClientSession(connector=UnixConnector(path=str(socket))) as session:
+            async with session.get(
+                "http://codex.invalid/models?client_version=0.162.1", headers=headers
+            ) as response:
+                assert response.status == 200
+                assert await response.json() == catalog
+                # Keep the existing response-header policy: no conditional cache.
+                assert "ETag" not in response.headers
+            assert len(reached) == 1
+            path, sent, body = reached[0]
+            assert path == "/v1/models?client_version=0.162.1"
+            assert body == b""
+            sent = {k.lower(): v for k, v in sent.items()}
+            assert sent["authorization"] == "Bearer real-key"
+            assert sent["chatgpt-account-id"] == "real-account"
+            assert sent["originator"] == "codex_cli_rs"
+            assert "x-client-secret" not in sent
+            for method, path, data in [
+                ("POST", "/models?client_version=0.162.1", None),
+                ("HEAD", "/models?client_version=0.162.1", None),
+                ("GET", "/models?client_version=0.162.1", b"{}"),
+                ("GET", "/models", None),
+                ("GET", "/models?client_version=1&client_version=2", None),
+                ("GET", "/models?client_version=1&unknown=2", None),
+                ("GET", "/models?client_version=", None),
+                ("GET", "/models?client_version=" + "x" * 129, None),
+                ("GET", "/models?client_version=a%2Fb", None),
+                ("GET", "/responses?other=1", None),
+                ("GET", "/responses", b"{}"),
+                ("GET", "/responses/extra", None),
+            ]:
+                async with session.request(
+                    method, "http://codex.invalid" + path, data=data, headers=headers
+                ) as response:
+                    assert response.status == 403, path
+            for extra in [{}, {"Upgrade": "websocket", "Connection": "Upgrade"}]:
+                async with session.get(
+                    "http://codex.invalid/responses", headers={**headers, **extra}
+                ) as response:
+                    assert response.status == 426
+            if client_token:
+                for auth in [{}, {"Authorization": "Bearer incorrect"}]:
+                    for path in ["/responses", "/models?client_version=1"]:
+                        async with session.get(
+                            "http://codex.invalid" + path, headers=auth
+                        ) as response:
+                            assert response.status == 401
+            limiter._tokens = 0
+            async with session.get(
+                "http://codex.invalid/responses", headers=headers
+            ) as response:
+                assert response.status == 429
+            assert len(reached) == 1
+    finally:
+        await proxy_runner.cleanup()
+        await upstream_runner.cleanup()

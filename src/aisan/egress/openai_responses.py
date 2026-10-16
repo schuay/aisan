@@ -3,7 +3,7 @@
 
 """Proxy Codex subscription traffic through the host ChatGPT login.
 
-Boxed Codex uses a custom Responses provider with a placeholder key. The
+Boxed Codex uses the built-in OpenAI provider with a placeholder login. The
 synthetic login lets the status line read rate limits. For each request, the
 host proxy reads the access token and account ID and rebuilds the subscription
 headers. The box never receives the refresh token or login file.
@@ -14,7 +14,7 @@ backend asks ``codex app-server`` to refresh it and rereads ``auth.json``.
 Command-line overrides disable non-model egress and point the provider at
 loopback. They outrank writable repository configuration, so the agent can't
 change the route. The host proxy adds the real ChatGPT path and exposes the
-Responses call plus the read-only account calls used by Codex's status line.
+Responses call, model discovery, and the read-only account calls.
 """
 
 from __future__ import annotations
@@ -51,10 +51,9 @@ from .base import (
 log = logging.getLogger(__name__)
 
 PORT = 8715
-PROVIDER = "aisan"
 CLIENT_KEY_ENV = "AISAN_CODEX_API_KEY"
 DEFAULT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
-_RESPONSES_PATHS = (("POST", "/responses"),)
+_RESPONSES_PATHS = (("POST", "/responses"), ("GET", "/responses"), ("GET", "/models"))
 _BOX_AUTH_NAME = "codex-auth.json"
 
 
@@ -137,22 +136,18 @@ class CodexBackend(Backend):
     def config_overrides(self, *, port: int | None = None) -> tuple[str, ...]:
         """Highest-precedence Codex settings for this confined transport."""
         values: list[tuple[str, str | bool]] = [
-            ("model_provider", PROVIDER),
+            ("model_provider", "openai"),
             ("web_search", "disabled"),
             ("check_for_update_on_startup", False),
             ("analytics.enabled", False),
             ("feedback.enabled", False),
             ("features.apps", False),
-            (f"model_providers.{PROVIDER}.name", "aisan host proxy"),
+            ("features.cli_daybreak", True),
             (
-                f"model_providers.{PROVIDER}.base_url",
+                "openai_base_url",
                 f"http://127.0.0.1:{self.port if port is None else port}",
             ),
-            (f"model_providers.{PROVIDER}.env_key", CLIENT_KEY_ENV),
-            (f"model_providers.{PROVIDER}.wire_api", "responses"),
-            (f"model_providers.{PROVIDER}.requires_openai_auth", True),
-            (f"model_providers.{PROVIDER}.supports_websockets", False),
-            (f"model_providers.{PROVIDER}.supports_standalone_web_search", False),
+            ("features.enable_request_compression", False),
         ]
         if self._codex_home is not None:
             values.append(

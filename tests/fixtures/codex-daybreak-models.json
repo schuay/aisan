@@ -1,0 +1,24 @@
+{
+  "models": [{
+    "slug": "gpt-6-sol",
+    "display_name": "Aisan Daybreak Test",
+    "description": "Synthetic entitled model for aisan tests",
+    "default_reasoning_level": "low",
+    "supported_reasoning_levels": [{"effort": "low", "description": "Test"}],
+    "shell_type": "shell_command",
+    "visibility": "list",
+    "supported_in_api": true,
+    "priority": 0,
+    "available_access_programs": {"cyber": ["standard", "daybreak_blue"]},
+    "availability_nux": null,
+    "upgrade": null,
+    "support_verbosity": false,
+    "default_verbosity": null,
+    "apply_patch_tool_type": "freeform",
+    "truncation_policy": {"mode": "tokens", "limit": 10000},
+    "context_window": 272000,
+    "experimental_supported_tools": [],
+    "prefer_websockets": true,
+    "model_messages": {"instructions_template": "Follow the user's instructions."}
+  }]
+}

@@ -196,6 +196,12 @@ aisan codex /path/to/repo --net
 Launcher options come before a literal `--`; arguments after it are passed to
 the underlying client unchanged.
 
+Codex uses its built-in OpenAI provider through the host proxy, including model
+discovery and Daybreak controls for entitled accounts. The launcher imports the
+host's boolean `daybreak` preference alongside model and reasoning choices.
+Responses use inspected HTTP JSON/SSE; WebSocket attempts receive HTTP 426, and
+request compression is disabled. Context compaction runs through `/responses`.
+
 OpenCode custom providers use the selected host `opencode.json` or `.jsonc`:
 
 ```sh
