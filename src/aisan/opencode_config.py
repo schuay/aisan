@@ -45,6 +45,44 @@ def read_config(path: Path, *, strict: bool = False) -> dict[str, object]:
     return data
 
 
+def select_model(
+    document: dict[str, object],
+    provider: str | None = None,
+    model: str | None = None,
+) -> tuple[str, str]:
+    if provider and model:
+        return provider, model
+    preferred = document.get("model")
+    if preferred is not None:
+        if not isinstance(preferred, str) or "/" not in preferred:
+            raise ValueError("host OpenCode model must be provider/model")
+        host_provider, host_model = preferred.split("/", 1)
+        if not host_provider or not host_model:
+            raise ValueError("host OpenCode model must be provider/model")
+        if provider is None or provider == host_provider:
+            return provider or host_provider, model or host_model
+
+    root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    path = root / "opencode" / "model.json"
+    state = read_config(path, strict=True) if path.exists() else {}
+    recent = state.get("recent", [])
+    if not isinstance(recent, list):
+        raise TypeError(f"{path}: recent must be a list")
+    for entry in recent:
+        if not isinstance(entry, dict):
+            raise TypeError(f"{path}: recent entries must be objects")
+        host_provider, host_model = entry.get("providerID"), entry.get("modelID")
+        if not isinstance(host_provider, str) or not host_provider:
+            raise ValueError(f"{path}: recent providerID must be a nonempty string")
+        if not isinstance(host_model, str) or not host_model:
+            raise ValueError(f"{path}: recent modelID must be a nonempty string")
+        if provider is None or provider == host_provider:
+            return provider or host_provider, model or host_model
+    raise ValueError(
+        "no preferred OpenCode model; set model in host config or pass --provider and --model"
+    )
+
+
 def _unique(pairs):
     result = {}
     for key, value in pairs:

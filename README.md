@@ -202,7 +202,14 @@ host's boolean `daybreak` preference alongside model and reasoning choices.
 Responses use inspected HTTP JSON/SSE; WebSocket attempts receive HTTP 426, and
 request compression is disabled. Context compaction runs through `/responses`.
 
-OpenCode custom providers use the selected host `opencode.json` or `.jsonc`:
+OpenCode selects `model` from the host config, then the most recent model in
+`$XDG_STATE_HOME/opencode/model.json` (default `~/.local/state/opencode`).
+`--provider` and `--model` override `AISAN_OPENCODE_PROVIDER` and
+`AISAN_OPENCODE_MODEL`, which override that preference. With no preference,
+the launcher requires an explicit selection. All launches use a private server
+(`--standalone`) so they cannot collide with the host background service.
+
+Custom providers use the selected host `opencode.json` or `.jsonc`:
 
 ```sh
 aisan opencode /path/to/repo --provider local --model example-model --no-upstream-auth
@@ -247,7 +254,7 @@ headers, and arbitrary request options are never imported.
 header upstream. The default still requires a static key in host `auth.json`.
 Shared networking (`--net`) always authenticates clients to the proxy, but also
 allows direct host/LAN connections. Isolated networking confines model traffic
-to the proxy. Custom launches use `--standalone --auto` and select the same
+to the proxy. Launches use `--standalone --auto`; custom providers select the same
 model for title generation, which can add a concurrent request.
 
 `aisan opencode ... --explain` reads config/catalog files and reports the route

@@ -72,8 +72,8 @@ def opencode_catalog(tmp_path, monkeypatch):
     catalog.parent.mkdir(parents=True)
     catalog.write_text('{"zai-coding-plan":{"api":"https://catalog.example/v1"}}')
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
-    monkeypatch.delenv("AISAN_OPENCODE_PROVIDER", raising=False)
-    monkeypatch.delenv("AISAN_OPENCODE_MODEL", raising=False)
+    monkeypatch.setenv("AISAN_OPENCODE_PROVIDER", "zai-coding-plan")
+    monkeypatch.setenv("AISAN_OPENCODE_MODEL", "glm-5.3")
     monkeypatch.delenv("AISAN_OPENCODE_UPSTREAM", raising=False)
 
 

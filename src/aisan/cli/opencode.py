@@ -8,15 +8,15 @@ worktrees remain hidden. The payload runs in a thread so the host proxy event
 loop can serve model requests. Terminal settings survive the cleared
 environment.
 
-Custom providers use OpenCode v2.0.29 standalone mode so the service inherits
+Sessions use OpenCode v2.0.29 standalone mode so the service inherits
 the box configuration. ``--auto`` approves tools within the box boundary.
 
 Usage:
     aisan opencode [repo] [flags] -- [opencode args...]
 
-Env: AISAN_OPENCODE_PROVIDER (default zai-coding-plan), AISAN_OPENCODE_MODEL
-(default glm-5.3), AISAN_OPENCODE_UPSTREAM (default: the provider's api base
-from the host's opencode catalog). Flags override env.
+Flags override AISAN_OPENCODE_PROVIDER and AISAN_OPENCODE_MODEL. Otherwise use
+the host config model, then its most recent model. AISAN_OPENCODE_UPSTREAM
+overrides the provider API base.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 from aisan.egress.openai_compat import DEFAULT_CATALOG, OpenAICompatBackend
-from aisan.opencode_config import config_file, read_config
+from aisan.opencode_config import config_file, read_config, select_model
 from aisan.opencode_provider import resolve_provider
 from aisan.presets.opencode import opencode, opencode_binary
 from aisan.sandbox import BindOver, BindSpec
@@ -68,16 +68,15 @@ def parse_args(argv: list[str]):
     parser = interactive_parser("aisan opencode", "opencode")
     parser.add_argument(
         "--provider",
-        default=os.environ.get("AISAN_OPENCODE_PROVIDER", "zai-coding-plan"),
+        default=os.environ.get("AISAN_OPENCODE_PROVIDER"),
         help="provider id in host config or the opencode catalog"
-        " (default: $AISAN_OPENCODE_PROVIDER or zai-coding-plan)",
+        " (default: $AISAN_OPENCODE_PROVIDER or host preference)",
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("AISAN_OPENCODE_MODEL", "glm-5.3"),
+        default=os.environ.get("AISAN_OPENCODE_MODEL"),
         help="bare model key, selected through inline config"
-        " (default: $AISAN_OPENCODE_MODEL or"
-        " glm-5.3)",
+        " (default: $AISAN_OPENCODE_MODEL or host preference)",
     )
     parser.add_argument(
         "--upstream",
@@ -104,6 +103,7 @@ async def _main(argv: list[str]) -> int:
     source = config_file()
     try:
         document = read_config(source, strict=True)
+        args.provider, args.model = select_model(document, args.provider, args.model)
         selected = resolve_provider(
             args.provider,
             args.model,
@@ -168,7 +168,7 @@ async def _main(argv: list[str]) -> int:
         command=lambda _box: [
             "opencode",
             "--auto",
-            *(["--standalone"] if selected.custom else []),
+            "--standalone",
             *payload,
         ],
         binary=opencode_binary,

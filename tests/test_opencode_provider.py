@@ -20,6 +20,7 @@ def host(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     source = tmp_path / "opencode" / "opencode.json"
     source.parent.mkdir()
     document = {
@@ -349,3 +350,93 @@ async def test_cli_freezes_config_and_adds_standalone(host, monkeypatch):
         )
         == 0
     )
+
+
+@pytest.mark.parametrize("custom", [False, True])
+async def test_default_model_and_private_server(host, monkeypatch, custom):
+    import importlib
+
+    cli = importlib.import_module("aisan.cli.opencode")
+    source, catalog, document = host
+    provider, model = ("local", "alias") if custom else ("known", "m")
+    document["model"] = f"{provider}/{model}"
+    source.write_text(json.dumps(document))
+    monkeypatch.delenv("AISAN_OPENCODE_PROVIDER", raising=False)
+    monkeypatch.delenv("AISAN_OPENCODE_MODEL", raising=False)
+    monkeypatch.setattr(cli, "DEFAULT_CATALOG", catalog)
+    monkeypatch.setattr(cli, "state_dir", lambda *_: source.parent / "state")
+
+    async def launch(**kwargs):
+        assert kwargs["command"](None) == ["opencode", "--auto", "--standalone"]
+        config = json.loads(
+            kwargs["spec"].egress[0].client_env()["OPENCODE_CONFIG_CONTENT"]
+        )
+        assert config["model"] == f"{provider}/{model}"
+        return 0
+
+    monkeypatch.setattr(cli, "run_interactive", launch)
+    assert await cli._main([str(source.parent)]) == 0
+
+
+def test_model_preferences_and_overrides(tmp_path, monkeypatch):
+    from aisan.opencode_config import select_model
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    with pytest.raises(ValueError, match="no preferred"):
+        select_model({})
+    state = tmp_path / "opencode/model.json"
+    state.parent.mkdir()
+    state.write_text(
+        json.dumps(
+            {
+                "recent": [
+                    {"providerID": "linke", "modelID": "qwen3.8:27b"},
+                    {"providerID": "other", "modelID": "old"},
+                ]
+            }
+        )
+    )
+    assert select_model({}) == ("linke", "qwen3.8:27b")
+    assert select_model({}, "other") == ("other", "old")
+    config = {"model": "hetzner/Qwen/model"}
+    assert select_model(config) == ("hetzner", "Qwen/model")
+    assert select_model(config, model="new") == ("hetzner", "new")
+    assert select_model(config, "explicit", "chosen") == ("explicit", "chosen")
+    assert select_model(config, "other") == ("other", "old")
+    with pytest.raises(ValueError, match="no preferred"):
+        select_model(config, "absent")
+    with pytest.raises(ValueError, match="provider/model"):
+        select_model({"model": 123})
+    state.write_text("broken")
+    with pytest.raises(ValueError, match="not valid JSONC"):
+        select_model({})
+
+
+@pytest.mark.parametrize(
+    "recent", [None, {}, [1], [{}], [{"providerID": "p", "modelID": 2}]]
+)
+def test_invalid_recent_model_state(tmp_path, monkeypatch, recent):
+    from aisan.opencode_config import select_model
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    path = tmp_path / "opencode/model.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"recent": recent}))
+    with pytest.raises((TypeError, ValueError), match=str(path)):
+        select_model({})
+    assert select_model({}, "explicit", "model") == ("explicit", "model")
+    assert select_model({"model": "configured/model"}) == ("configured", "model")
+
+
+def test_model_flag_and_env_precedence(monkeypatch):
+    from aisan.cli.opencode import parse_args
+
+    monkeypatch.setenv("AISAN_OPENCODE_PROVIDER", "env-provider")
+    monkeypatch.setenv("AISAN_OPENCODE_MODEL", "env-model")
+    args, payload = parse_args(
+        ["--provider", "flag-provider", "--model", "flag-model", "--", "--prompt", "hi"]
+    )
+    assert (args.provider, args.model) == ("flag-provider", "flag-model")
+    assert payload == ["--prompt", "hi"]
+    args, _ = parse_args([])
+    assert (args.provider, args.model) == ("env-provider", "env-model")
