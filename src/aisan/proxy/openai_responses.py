@@ -529,9 +529,10 @@ def make_app(
 
 def _query_refusal(request: web.Request) -> str | None:
     if request.path == "/models":
-        if list(request.query) != ["client_version"]:
+        versions = request.query.getall("client_version", [])
+        if set(request.query) != {"client_version"} or len(versions) != 1:
             return "models requires exactly one client_version parameter"
-        version = request.query["client_version"]
+        version = versions[0]
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}", version):
             return "invalid client_version"
     elif request.path == "/responses" and request.query:

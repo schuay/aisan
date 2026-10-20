@@ -272,9 +272,11 @@ async def test_a_path_allowlist_that_raises_denies(tmp_path, caplog):
     up, up_runner = await _upstream_server(upstream)
     try:
         with caplog.at_level(logging.ERROR):
-            async with _Proxy(tmp_path, token=_token, upstream=up, paths=Boom()) as s:
-                async with s.post(f"{URL}/v1/messages", data=b"{}") as r:
-                    assert r.status == 403
+            async with (
+                _Proxy(tmp_path, token=_token, upstream=up, paths=Boom()) as s,
+                s.post(f"{URL}/v1/messages", data=b"{}") as r,
+            ):
+                assert r.status == 403
     finally:
         await up_runner.cleanup()
     assert "policy check raised" in caplog.text
