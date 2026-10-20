@@ -60,7 +60,7 @@ QUIET_REFUSALS = (
     ("GET", "/ps/plugins/list"),
 )
 EMPTY_BODY_ROUTES = frozenset(route for route in ALLOWED_PATHS if route[0] == "GET")
-CLIENT_TOOL_TYPES = frozenset({"custom", "function"})
+CLIENT_TOOL_TYPES = frozenset({"custom", "function", "tool_search"})
 CLIENT_TOOL_CONTAINERS = frozenset({"namespace"})
 ALLOWED_KEYS = frozenset(
     {
@@ -155,6 +155,7 @@ CONTAINERS = MappingProxyType(
 )
 
 TOOL_ENVELOPE_INPUT_TYPE = "additional_tools"
+TOOL_SEARCH_INPUT_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 
 # Codex sends "auto"; the other string variants select no hosted capability.
 TOOL_CHOICES = frozenset({"auto", "none", "required"})
@@ -172,6 +173,7 @@ PAYLOAD_KEYS = frozenset(
 ALLOWED_INPUT_TYPES = (
     TAG_SETTLED_INPUT_TYPES
     | frozenset(CONTAINERS)
+    | TOOL_SEARCH_INPUT_TYPES
     | {TOOL_ENVELOPE_INPUT_TYPE, "compaction_trigger"}
 )
 
@@ -190,6 +192,11 @@ class BodyPolicy(_BodyPolicy):
     structured_tool_keys: frozenset[str] = frozenset({"parameters", "format", "tools"})
     # The base policy checks unknown top-level fields against this set.
     allowed_keys: frozenset[str] = ALLOWED_KEYS
+
+    def _tool_shape_refusal(self, tool: dict, kind: str) -> str | None:
+        if kind == "tool_search" and tool.get("execution") != "client":
+            return "`tool_search` requires explicit `execution: client`"
+        return super()._tool_shape_refusal(tool, kind)
 
     def refuse(self, body: bytes) -> str | None:
         reason = super().refuse(body)
@@ -317,14 +324,27 @@ class BodyPolicy(_BodyPolicy):
                 if key != "tools" and not isinstance(value, str):
                     return f"`additional_tools` `{key}` must be a string"
             return self.refuse_tools(item["tools"])
-        # Only the additional_tools envelope may declare tools. Other item fields
-        # include upstream IDs and metadata that vary across releases.
-        if "tools" in item:
+        if kind in TOOL_SEARCH_INPUT_TYPES:
+            if item.get("execution") != "client":
+                return f"`{kind}` requires explicit `execution: client`"
+            if not isinstance(item.get("call_id"), str) or not item["call_id"]:
+                return f"`{kind}` requires a nonempty string `call_id`"
+            for field in ("id", "status", "encrypted_content"):
+                if field in item and not isinstance(item[field], str):
+                    return f"`{kind}` `{field}` must be a string"
+            if kind == "tool_search_call":
+                if not isinstance(item.get("arguments"), dict):
+                    return "`tool_search_call` `arguments` must be an object"
+            elif reason := self.refuse_tools(item.get("tools")):
+                return reason
+        if "tools" in item and kind != "tool_search_output":
             return f"{kind} may not declare tools"
 
         containers = CONTAINERS.get(kind, ())
         # Reject part arrays outside the content fields defined for this type.
         walked = {container.field for container in containers}
+        if kind == "tool_search_output":
+            walked.add("tools")
         for key, value in item.items():
             if key in walked:
                 continue

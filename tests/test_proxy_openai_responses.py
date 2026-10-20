@@ -22,6 +22,7 @@ from aisan.proxy.openai_responses import (
     PART_KEYS,
     TAG_SETTLED_INPUT_TYPES,
     TOOL_ENVELOPE_INPUT_TYPE,
+    TOOL_SEARCH_INPUT_TYPES,
     USAGE_PATH,
     BodyPolicy,
     PathAllowlist,
@@ -522,6 +523,7 @@ def test_every_permitted_input_type_is_sorted_into_exactly_one_bucket():
         TAG_SETTLED_INPUT_TYPES,
         set(CONTAINERS),
         {TOOL_ENVELOPE_INPUT_TYPE},
+        TOOL_SEARCH_INPUT_TYPES,
         {"compaction_trigger"},
     ]
     assert not any(CONTAINERS.get(kind) for kind in TAG_SETTLED_INPUT_TYPES)
@@ -1361,3 +1363,240 @@ async def test_discovery_and_upgrade_refusal(tmp_path, client_token):
     finally:
         await proxy_runner.cleanup()
         await upstream_runner.cleanup()
+
+
+def _tool_search():
+    return {
+        "type": "tool_search",
+        "execution": "client",
+        "description": "Search deferred local tools",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+    }
+
+
+def _tool_search_item(kind):
+    item = {
+        "type": kind,
+        "execution": "client",
+        "call_id": "search-1",
+        "status": "completed",
+    }
+    if kind == "tool_search_call":
+        item["arguments"] = {"query": "local tools", "limit": 2}
+    else:
+        item["tools"] = [_function(), {"type": "custom", "name": "apply_patch"}]
+    return item
+
+
+@pytest.mark.parametrize("kind", ["tool_search_call", "tool_search_output"])
+def test_tool_search_minimal_input(kind):
+    item = _tool_search_item(kind)
+    del item["status"]
+    if kind == "tool_search_output":
+        item["tools"] = []
+    body = {"store": False, "stream": True, "input": [item]}
+    assert BodyPolicy().refuse(json.dumps(body).encode()) is None
+
+
+def test_tool_search_call_cannot_declare_tools():
+    item = {**_tool_search_item("tool_search_call"), "tools": [_function()]}
+    body = {"store": False, "stream": True, "input": [item]}
+    assert BodyPolicy().refuse(json.dumps(body).encode()) is not None
+
+
+@pytest.mark.parametrize(
+    "location", ["tools", "namespace", "additional_tools", "tool_search_output"]
+)
+@pytest.mark.parametrize(
+    "execution", ["client", "missing", None, "server", "unknown", [], {}]
+)
+def test_tool_search_execution(location, execution):
+    tool = _tool_search()
+    if execution == "missing":
+        del tool["execution"]
+    else:
+        tool["execution"] = execution
+    body = {"store": False, "stream": True}
+    if location == "tools":
+        body["tools"] = [tool]
+    elif location == "namespace":
+        body["tools"] = [{"type": "namespace", "name": "n", "tools": [tool]}]
+    elif location == "additional_tools":
+        body["input"] = [{"type": location, "role": "developer", "tools": [tool]}]
+    else:
+        body["input"] = [{**_tool_search_item(location), "tools": [tool]}]
+    assert (BodyPolicy().refuse(json.dumps(body).encode()) is None) == (
+        execution == "client"
+    )
+
+
+@pytest.mark.parametrize("kind", ["tool_search_call", "tool_search_output"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {},
+        {"execution": None},
+        {"execution": "server"},
+        {"execution": "unknown"},
+        {"execution": []},
+        {"execution": {}},
+        {"call_id": None},
+        {"call_id": ""},
+        {"call_id": 1},
+        {"status": []},
+        {"id": {}},
+        {"attachment": {"file_url": "https://evil.test/x"}},
+        {"extra": [{"type": "web_search"}]},
+    ],
+)
+def test_tool_search_input_shapes(kind, change):
+    item = {**_tool_search_item(kind), **change}
+    body = {"store": False, "stream": True, "input": [item]}
+    assert (BodyPolicy().refuse(json.dumps(body).encode()) is None) == (not change)
+
+
+@pytest.mark.parametrize(
+    "kind,field",
+    [
+        ("tool_search_call", "execution"),
+        ("tool_search_output", "execution"),
+        ("tool_search_call", "call_id"),
+        ("tool_search_output", "call_id"),
+        ("tool_search_call", "arguments"),
+        ("tool_search_output", "tools"),
+    ],
+)
+def test_tool_search_missing_fields(kind, field):
+    item = _tool_search_item(kind)
+    del item[field]
+    assert (
+        BodyPolicy().refuse(
+            json.dumps({"store": False, "stream": True, "input": [item]}).encode()
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize(
+    "arguments", [None, [], "{}", 1, {"nested": {"file_id": "file-x"}}]
+)
+def test_tool_search_bad_arguments(arguments):
+    item = {**_tool_search_item("tool_search_call"), "arguments": arguments}
+    assert (
+        BodyPolicy().refuse(
+            json.dumps({"store": False, "stream": True, "input": [item]}).encode()
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        None,
+        {},
+        "[]",
+        [None],
+        [{}],
+        [{"type": "namespace"}],
+        [{"type": "function", "container": {"type": "web_search"}}],
+        *[
+            [{"type": kind}]
+            for kind in [
+                "web_search",
+                "file_search",
+                "code_interpreter",
+                "mcp",
+                "unknown",
+            ]
+        ],
+    ],
+)
+@pytest.mark.parametrize("depth", [0, 2])
+def test_tool_search_output_reuses_tool_policy(tools, depth):
+    for _ in range(depth):
+        tools = [{"type": "namespace", "name": "n", "tools": tools}]
+    item = {**_tool_search_item("tool_search_output"), "tools": tools}
+    reason = BodyPolicy().refuse(
+        json.dumps({"store": False, "stream": True, "input": [item]}).encode()
+    )
+    assert reason == BodyPolicy().refuse_tools(tools)
+    assert reason is not None
+
+
+async def test_tool_search_full_round_trip(tmp_path):
+    call = _tool_search_item("tool_search_call")
+    call.update(
+        id="tsc_1",
+        encrypted_content="opaque",
+        internal_chat_message_metadata_passthrough={"turn_id": "t"},
+    )
+    output = _tool_search_item("tool_search_output")
+    output["tools"] = [
+        {
+            "type": "namespace",
+            "name": "outer",
+            "tools": [{"type": "namespace", "name": "inner", "tools": output["tools"]}],
+        }
+    ]
+    function_call = {
+        "type": "function_call",
+        "name": "exec_command",
+        "call_id": "exec-1",
+        "arguments": "{}",
+    }
+    function_output = {
+        "type": "function_call_output",
+        "call_id": "exec-1",
+        "output": "done",
+    }
+    replies = [
+        call,
+        function_call,
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "done"}],
+        },
+    ]
+    reached = []
+
+    async def upstream(request):
+        reached.append(await request.json())
+        event = {"type": "response.output_item.done", "item": replies[len(reached) - 1]}
+        return web.Response(
+            text=f"data: {json.dumps(event)}\n\n", content_type="text/event-stream"
+        )
+
+    upstream_url, upstream_runner = await _upstream_server(upstream)
+    socket = tmp_path / "tool-search.sock"
+    proxy_runner = await serve(
+        socket, make_app(credential=_credential, upstream=upstream_url)
+    )
+    bodies = []
+    try:
+        async with ClientSession(connector=UnixConnector(path=str(socket))) as session:
+            for inputs in [
+                [],
+                [call, output],
+                [call, output, function_call, function_output],
+            ]:
+                body = {
+                    "store": False,
+                    "stream": True,
+                    "tools": [_tool_search()],
+                    "input": inputs,
+                }
+                bodies.append(body)
+                async with session.post(
+                    "http://codex.invalid/responses", json=body
+                ) as response:
+                    assert response.status == 200, await response.text()
+                    assert (
+                        await response.text()
+                        == f"data: {json.dumps({'type': 'response.output_item.done', 'item': replies[len(bodies) - 1]})}\n\n"
+                    )
+    finally:
+        await proxy_runner.cleanup()
+        await upstream_runner.cleanup()
+    assert reached == bodies
