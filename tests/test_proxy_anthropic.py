@@ -1016,3 +1016,59 @@ def test_the_shared_network_policy_relaxes_two_tags_and_no_others(patch, needle)
     reason = BodyPolicy.for_shared_network().refuse(body)
     assert reason is not None
     assert needle in reason
+
+
+def _tool_search_result(*blocks):
+    return {
+        "tools": [
+            {
+                "name": "WebSearch",
+                "description": "Search the web",
+                "input_schema": {"type": "object"},
+                "defer_loading": True,
+            }
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_01DYLmtHXa8W5y6mBvT45ZPD",
+                        "content": list(blocks),
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_body_policy_permits_a_tool_search_result():
+    ref = {"type": "tool_reference", "tool_name": "WebSearch"}
+    body = json.dumps(_tool_search_result(ref)).encode()
+    for policy in (BodyPolicy(), BodyPolicy.for_shared_network()):
+        assert policy.refuse(body) is None
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        {"type": "tool_reference"},
+        {"type": "tool_reference", "tool_name": None},
+        {"type": "tool_reference", "tool_name": ["WebSearch"]},
+        {"type": "tool_reference", "tool_name": "WebSearch", "url": "https://x.test"},
+    ],
+)
+def test_body_policy_refuses_an_unmeasured_tool_reference(ref):
+    body = json.dumps(_tool_search_result(ref)).encode()
+    assert BodyPolicy().refuse(body) is not None
+
+
+def test_a_tool_reference_is_permitted_only_inside_a_tool_result():
+    ref = {"type": "tool_reference", "tool_name": "WebSearch"}
+    top = json.dumps({"messages": [{"role": "user", "content": [ref]}]}).encode()
+    in_system = json.dumps({"system": [ref], "messages": []}).encode()
+    for body in (top, in_system):
+        reason = BodyPolicy().refuse(body)
+        assert reason is not None
+        assert "tool_reference" in reason

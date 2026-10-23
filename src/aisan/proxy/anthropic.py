@@ -165,6 +165,11 @@ INLINE_SOURCE_KEYS = frozenset({"type", "media_type", "data"})
 # Derive the union so every sourced type also passes through the source check.
 ALLOWED_CONTENT_TYPES = INERT_CONTENT_TYPES | SOURCED_CONTENT_TYPES
 
+# Claude Code 2.1.309's ToolSearch result; names a tool from ``tools``.
+TOOL_REFERENCE_TYPE = "tool_reference"
+TOOL_REFERENCE_KEYS = frozenset({"type", "tool_name"})
+TOOL_RESULT_CONTENT_TYPES = ALLOWED_CONTENT_TYPES | {TOOL_REFERENCE_TYPE}
+
 # Extra fields allowed when the box shares the host network.
 #
 # ``web_search_20250305`` makes Anthropic issue a box-controlled query. Claude
@@ -209,6 +214,7 @@ class BodyPolicy:
     sourced_types: frozenset[str] = SOURCED_CONTENT_TYPES
     inline_sources: frozenset[str] = INLINE_SOURCE_TYPES
     inline_source_keys: frozenset[str] = INLINE_SOURCE_KEYS
+    tool_result_types: frozenset[str] = TOOL_RESULT_CONTENT_TYPES
 
     @classmethod
     def for_shared_network(cls) -> BodyPolicy:
@@ -288,12 +294,16 @@ class BodyPolicy:
                     return reason
         return self._blocks_refusal(payload.get("system"))
 
-    def _blocks_refusal(self, content: object) -> str | None:
+    def _blocks_refusal(
+        self, content: object, allowed: frozenset[str] | None = None
+    ) -> str | None:
         """One content value: absent, a plain string, or allowlisted blocks.
 
         A ``tool_result`` nests another content value of the same shape, which
         recurses through the same allowlist.
         """
+        if allowed is None:
+            allowed = self.content_types
         if content is None or isinstance(content, str):
             return None
         if not isinstance(content, list):
@@ -302,14 +312,24 @@ class BodyPolicy:
             if not isinstance(block, dict):
                 return "every content block must be a JSON object"
             kind = block.get("type")
-            if not isinstance(kind, str) or kind not in self.content_types:
+            if not isinstance(kind, str) or kind not in allowed:
                 return f"content type {kind!r} is not permitted by the sandbox proxy"
+            if kind == TOOL_REFERENCE_TYPE:
+                if extra := set(block) - TOOL_REFERENCE_KEYS:
+                    return (
+                        "tool_reference field(s) not permitted by the sandbox"
+                        f" proxy: {quoted_names(extra)}"
+                    )
+                if not isinstance(block.get("tool_name"), str):
+                    return "tool_reference requires a string `tool_name`"
             if kind in self.sourced_types:
                 reason = self._source_refusal(kind, block.get("source"))
                 if reason is not None:
                     return reason
             if kind == "tool_result":
-                reason = self._blocks_refusal(block.get("content"))
+                reason = self._blocks_refusal(
+                    block.get("content"), self.tool_result_types
+                )
                 if reason is not None:
                     return reason
         return None
