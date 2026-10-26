@@ -30,7 +30,7 @@ from aisan.runtime import (
     write_client_env,
     write_manifest,
 )
-from aisan.sandbox import RO, Sandbox
+from aisan.sandbox import RO, Sandbox, system_ro_roots
 
 
 def _launch(runtime_dir: Path, cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -73,7 +73,13 @@ def test_launcher_binds_cover_both_interpreter_prefixes_and_the_link_chain():
     binds = launcher_binds()
     paths = [Path(str(b.path)) for b in binds]
     assert Path(sys.prefix) in paths
-    assert Path(sys.base_prefix) in paths
+    # A system interpreter reports /usr as its base prefix, which the fixed
+    # system surface already mounts and launcher_binds therefore omits.
+    base = Path(sys.base_prefix)
+    if base in system_ro_roots():
+        assert base not in paths
+    else:
+        assert base in paths
     assert all(b.mode is RO for b in binds)
     for hop in interpreter_chain_dirs(Path(sys.executable)):
         assert hop in paths
