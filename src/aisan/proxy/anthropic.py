@@ -119,8 +119,11 @@ CLIENT_TOOL_TYPES = frozenset({"custom"})
 REFUSED_KEYS = ("mcp_servers", "container")
 
 # Top-level fields observed during a complete tool round trip with Claude Code
-# 2.1.246. Unknown fields are refused because server-side behavior doesn't have
-# to be declared as a tool.
+# 2.1.246, plus ``tool_choice``, which langchain-anthropic 1.7.6 sends as
+# ``{"type": "auto"}`` when a caller binds it. It only selects among the tools
+# the ``tools`` check already admitted, so it opens no route of its own.
+# Unknown fields are refused because server-side behavior doesn't have to be
+# declared as a tool.
 ALLOWED_KEYS = frozenset(
     {
         "context_management",
@@ -133,6 +136,7 @@ ALLOWED_KEYS = frozenset(
         "system",
         "temperature",
         "thinking",
+        "tool_choice",
         "tools",
     }
 )
@@ -170,17 +174,17 @@ TOOL_REFERENCE_TYPE = "tool_reference"
 TOOL_REFERENCE_KEYS = frozenset({"type", "tool_name"})
 TOOL_RESULT_CONTENT_TYPES = ALLOWED_CONTENT_TYPES | {TOOL_REFERENCE_TYPE}
 
-# Extra fields allowed when the box shares the host network.
+# Extra tool types allowed when the box shares the host network.
 #
 # ``web_search_20250305`` makes Anthropic issue a box-controlled query. Claude
-# Code 2.1.246 sent it in a dedicated request with ``tool_choice`` and returned
-# the result as an ordinary ``tool_result``.
+# Code 2.1.246 sent it in a dedicated request that forced it through
+# ``tool_choice`` and returned the result as an ordinary ``tool_result``.
 #
 # Claude Code's WebFetch isn't included because the box fetches the URL itself
 # and sends text to the model. Add other server-side tools only after measuring
 # their request shapes.
 SHARED_NET_TOOL_TYPES = CLIENT_TOOL_TYPES | {"web_search_20250305"}
-SHARED_NET_KEYS = ALLOWED_KEYS | {"tool_choice"}
+SHARED_NET_KEYS = ALLOWED_KEYS
 
 
 @dataclass(frozen=True)

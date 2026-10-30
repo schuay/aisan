@@ -487,6 +487,28 @@ def test_body_policy_permits_a_real_claude_code_body():
     assert BodyPolicy().refuse(body) is None
 
 
+def test_body_policy_permits_a_measured_langchain_anthropic_body():
+    """What langchain-anthropic 1.7.6 sends for an agent turn with tools bound
+    ``tool_choice="auto"``, adaptive thinking and an effort level, captured
+    against a local upstream. The SDK client is the other box occupant this
+    policy has to admit; forced choices never reach the wire from it (the
+    adapter drops them while thinking is on), so ``auto`` is the only form."""
+    body = json.dumps(
+        {
+            "model": "claude-haiku-5-5",
+            "max_tokens": 32000,
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": "sys",
+            "tools": [{"name": "grep", "description": "Search.", "input_schema": {}}],
+            "tool_choice": {"type": "auto"},
+            "thinking": {"type": "adaptive", "display": "omitted"},
+            "output_config": {"effort": "low"},
+            "stream": True,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is None
+
+
 @pytest.mark.parametrize(
     ("kind", "why"),
     [
@@ -972,13 +994,14 @@ _WEB_SEARCH_BODY = {
 
 
 def test_the_isolated_policy_still_refuses_the_web_search_request():
+    """The tool type is what the isolated policy refuses. The forced
+    ``tool_choice`` beside it is permitted on its own: it can only name a tool
+    the ``tools`` check admitted."""
     reason = BodyPolicy().refuse(json.dumps(_WEB_SEARCH_BODY).encode())
     assert reason is not None
-    assert "tool_choice" in reason
-    tools_only = {k: v for k, v in _WEB_SEARCH_BODY.items() if k != "tool_choice"}
-    reason = BodyPolicy().refuse(json.dumps(tools_only).encode())
-    assert reason is not None
     assert "web_search_20250305" in reason
+    without_tool = {k: v for k, v in _WEB_SEARCH_BODY.items() if k != "tools"}
+    assert BodyPolicy().refuse(json.dumps(without_tool).encode()) is None
 
 
 def test_the_shared_network_policy_permits_the_web_search_request():
@@ -1011,7 +1034,9 @@ def test_the_shared_network_policy_permits_the_web_search_request():
         ({"unmeasured_key": 1}, "unmeasured_key"),
     ],
 )
-def test_the_shared_network_policy_relaxes_two_tags_and_no_others(patch, needle):
+def test_the_shared_network_policy_relaxes_the_search_tool_and_nothing_else(
+    patch, needle
+):
     body = json.dumps({**_WEB_SEARCH_BODY, **patch}).encode()
     reason = BodyPolicy.for_shared_network().refuse(body)
     assert reason is not None

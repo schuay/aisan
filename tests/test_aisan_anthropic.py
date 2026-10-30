@@ -473,7 +473,7 @@ async def test_the_transport_decides_the_body_policy(tmp_path):
                 ) as response,
             ):
                 assert response.status == 403
-                assert "tool_choice" in (await response.json())["error"]["message"]
+                assert "web_search" in (await response.json())["error"]["message"]
     finally:
         await up_runner.cleanup()
 
