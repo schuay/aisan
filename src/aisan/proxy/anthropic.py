@@ -119,13 +119,16 @@ CLIENT_TOOL_TYPES = frozenset({"custom"})
 REFUSED_KEYS = ("mcp_servers", "container")
 
 # Top-level fields observed during a complete tool round trip with Claude Code
-# 2.1.246, plus ``tool_choice``, which langchain-anthropic 1.7.6 sends as
-# ``{"type": "auto"}`` when a caller binds it. It only selects among the tools
-# the ``tools`` check already admitted, so it opens no route of its own.
-# Unknown fields are refused because server-side behavior doesn't have to be
-# declared as a tool.
+# 2.1.246, plus two langchain-anthropic 1.7.6 sends: ``tool_choice`` as
+# ``{"type": "auto"}`` when a caller binds it, which only selects among the
+# tools the ``tools`` check already admitted, and ``cache_control`` from its
+# prompt-caching middleware, which asks the upstream to put a breakpoint on
+# the last cacheable block. Neither opens a route of its own. Unknown fields
+# are refused because server-side behavior doesn't have to be declared as a
+# tool.
 ALLOWED_KEYS = frozenset(
     {
+        "cache_control",
         "context_management",
         "max_tokens",
         "messages",
@@ -140,6 +143,14 @@ ALLOWED_KEYS = frozenset(
         "tools",
     }
 )
+
+# The measured shape of a top-level ``cache_control``: an ephemeral breakpoint
+# with an optional TTL. The same object appears on content blocks, which this
+# policy doesn't inspect; at the top level the value is checked so the field
+# can't carry anything but a cache lifetime.
+CACHE_CONTROL_KEYS = frozenset({"type", "ttl"})
+CACHE_CONTROL_TYPES = frozenset({"ephemeral"})
+CACHE_CONTROL_TTLS = frozenset({"5m", "1h"})
 
 # Content block types that don't reference external data. These were observed in
 # the same tool round trip; ``redacted_thinking`` is Anthropic's transformation
@@ -268,10 +279,29 @@ class BodyPolicy:
             if not isinstance(model, str) or model not in self.models:
                 return f"model {model!r} is not permitted by the sandbox proxy"
 
+        reason = self._cache_control_refusal(payload.get("cache_control"))
+        if reason is not None:
+            return reason
         reason = self._tools_refusal(payload.get("tools"))
         if reason is not None:
             return reason
         return self._content_refusal(payload)
+
+    def _cache_control_refusal(self, value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            return "`cache_control` must be a JSON object"
+        if extra := set(value) - CACHE_CONTROL_KEYS:
+            return (
+                "cache_control field(s) not permitted by the sandbox proxy:"
+                f" {quoted_names(extra)}"
+            )
+        if value.get("type") not in CACHE_CONTROL_TYPES:
+            return f"cache_control type {value.get('type')!r} is not permitted"
+        if "ttl" in value and value["ttl"] not in CACHE_CONTROL_TTLS:
+            return f"cache_control ttl {value['ttl']!r} is not permitted"
+        return None
 
     def _tools_refusal(self, tools: object) -> str | None:
         if tools is None:

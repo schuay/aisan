@@ -509,6 +509,48 @@ def test_body_policy_permits_a_measured_langchain_anthropic_body():
     assert BodyPolicy().refuse(body) is None
 
 
+def test_body_policy_permits_the_measured_prompt_caching_body():
+    """What langchain-anthropic 1.7.6's prompt-caching middleware adds to a turn
+    against the direct API, captured against a local upstream: a top-level
+    ``cache_control`` beside the block-level mark on the system prompt."""
+    mark = {"type": "ephemeral", "ttl": "5m"}
+    body = json.dumps(
+        {
+            "model": "claude-haiku-5-5",
+            "max_tokens": 32000,
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": [{"type": "text", "text": "sys", "cache_control": mark}],
+            "tools": [{**_REAL_TOOL, "cache_control": mark}],
+            "thinking": {"type": "adaptive", "display": "omitted"},
+            "cache_control": mark,
+        }
+    ).encode()
+    assert BodyPolicy().refuse(body) is None
+    assert (
+        BodyPolicy().refuse(
+            json.dumps({"cache_control": {"type": "ephemeral"}}).encode()
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ephemeral",
+        {"type": "persistent"},
+        {"type": "ephemeral", "ttl": "7d"},
+        {"type": "ephemeral", "scope": "global"},
+        {},
+    ],
+)
+def test_body_policy_refuses_cache_control_off_the_measured_shape(value):
+    body = json.dumps({"model": "m", "cache_control": value}).encode()
+    reason = BodyPolicy().refuse(body)
+    assert reason is not None
+    assert "cache_control" in reason
+
+
 @pytest.mark.parametrize(
     ("kind", "why"),
     [
