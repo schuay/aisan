@@ -209,7 +209,7 @@ def test_the_claude_credential_follows_the_hosts_config_redirect(tmp_path, monke
     from pathlib import Path
 
     from aisan.egress import known_credential_paths
-    from aisan.egress.anthropic import default_credentials
+    from aisan.egress.claude_plan import default_credentials
     from aisan.session_mcp import claude_config_file
 
     configured = tmp_path / "elsewhere"

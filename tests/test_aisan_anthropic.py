@@ -142,7 +142,7 @@ async def test_a_missing_credential_refuses_with_the_login_command(tmp_path):
 async def test_preflight_refreshes_an_expired_token_with_host_claude(
     tmp_path, monkeypatch
 ):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
     calls = []
@@ -172,7 +172,7 @@ async def test_preflight_refreshes_an_expired_token_with_host_claude(
 
 
 async def test_a_token_expiring_inside_the_margin_is_refreshed(tmp_path, monkeypatch):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     credentials = _credentials(tmp_path / "c.json", ttl_s=60)
 
@@ -200,7 +200,7 @@ async def test_a_dead_upstream_says_start_it_not_log_in(tmp_path):
 
 
 async def test_no_route_is_reported_as_the_route_not_the_login(tmp_path, monkeypatch):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     async def refresh(command, config_dir):
         return
@@ -519,7 +519,7 @@ async def test_a_model_allowlist_is_enforced_on_both_transports(tmp_path):
 
 
 async def test_a_token_that_expires_mid_session_is_refreshed(tmp_path, monkeypatch):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     reached = []
 
@@ -571,7 +571,7 @@ async def test_a_token_that_expires_mid_session_is_refreshed(tmp_path, monkeypat
 
 
 async def test_concurrent_requests_launch_one_refresh(tmp_path, monkeypatch):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
     calls = 0
@@ -591,7 +591,7 @@ async def test_concurrent_requests_launch_one_refresh(tmp_path, monkeypatch):
 
 
 async def test_a_still_valid_token_survives_a_failed_refresh(tmp_path, monkeypatch):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     credentials = _credentials(tmp_path / "c.json", token="still-good", ttl_s=240)
 
@@ -607,7 +607,7 @@ async def test_a_still_valid_token_survives_a_failed_refresh(tmp_path, monkeypat
 async def test_an_expired_token_is_still_refused_when_refresh_fails(
     tmp_path, monkeypatch
 ):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
 
@@ -622,7 +622,7 @@ async def test_an_expired_token_is_still_refused_when_refresh_fails(
 
 
 async def test_preflight_still_demands_the_whole_margin(tmp_path, monkeypatch):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     credentials = _credentials(tmp_path / "c.json", token="short", ttl_s=240)
 
@@ -639,7 +639,7 @@ async def test_preflight_still_demands_the_whole_margin(tmp_path, monkeypatch):
 async def test_a_refresh_that_wrote_the_token_then_timed_out_counts(
     tmp_path, monkeypatch
 ):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
 
@@ -656,7 +656,7 @@ async def test_a_refresh_that_wrote_the_token_then_timed_out_counts(
 
 
 async def test_a_failing_refresh_is_shared_by_the_whole_wave(tmp_path, monkeypatch):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     credentials = _credentials(tmp_path / "c.json", token="still-good", ttl_s=240)
     calls = 0
@@ -678,7 +678,7 @@ async def test_a_failing_refresh_is_shared_by_the_whole_wave(tmp_path, monkeypat
 async def test_a_refresh_that_changed_nothing_does_not_blame_the_login(
     tmp_path, monkeypatch
 ):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     credentials = _credentials(tmp_path / "c.json", ttl_s=-60)
 
@@ -694,7 +694,7 @@ async def test_a_refresh_that_changed_nothing_does_not_blame_the_login(
 
 
 def test_proxy_bypass_keeps_both_spellings_of_no_proxy():
-    from aisan.egress.anthropic import _merge_proxy_bypass
+    from aisan.egress.claude_plan import _merge_proxy_bypass
 
     assert _merge_proxy_bypass("", "corp.example,10.0.0.1", "127.0.0.1") == [
         "corp.example",
@@ -847,7 +847,7 @@ async def test_missing_claude_executable_has_a_host_login_fix(tmp_path):
 
 
 async def test_claude_refresh_timeout_has_a_host_login_fix(tmp_path, monkeypatch):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     monkeypatch.setattr(backend_module, "_REFRESH_TIMEOUT_S", 0.01)
     up, runner = await _upstream_server(_hello)
@@ -871,7 +871,7 @@ async def test_claude_refresh_timeout_has_a_host_login_fix(tmp_path, monkeypatch
 async def test_one_request_reads_the_credential_file_exactly_once(
     tmp_path, monkeypatch
 ):
-    import aisan.egress.anthropic as backend_module
+    import aisan.egress.claude_plan as backend_module
 
     reads = []
     real = backend_module._read_oauth

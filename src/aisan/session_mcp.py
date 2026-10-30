@@ -27,8 +27,8 @@ from pathlib import Path
 from typing import Literal
 
 from .egress import known_credential_paths
-from .egress.anthropic import claude_config_dir
 from .egress.base import credential_overlap
+from .egress.claude_plan import claude_config_dir
 from .launch import interpreter_roots
 from .opencode_config import config_file as _opencode_config_file
 from .opencode_config import read_config as _read_jsonc
