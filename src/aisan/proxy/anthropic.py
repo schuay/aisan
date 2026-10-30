@@ -219,15 +219,24 @@ class BodyPolicy:
     inline_sources: frozenset[str] = INLINE_SOURCE_TYPES
     inline_source_keys: frozenset[str] = INLINE_SOURCE_KEYS
     tool_result_types: frozenset[str] = TOOL_RESULT_CONTENT_TYPES
+    # Model names the box may address; ``None`` leaves the choice to the box.
+    # A credential serves every model its account can reach, so a deployment
+    # that runs one configured model keeps a box from spending on another.
+    models: frozenset[str] | None = None
 
     @classmethod
-    def for_shared_network(cls) -> BodyPolicy:
+    def for_shared_network(cls, *, models: frozenset[str] | None = None) -> BodyPolicy:
         """Return the policy for a box that shares the host network.
 
-        This adds only the two fields observed for web search. MCP, containers,
-        other server-side tools, and URL-backed content remain blocked.
+        This adds only the web search tool type. MCP, containers, other
+        server-side tools, and URL-backed content remain blocked, and a model
+        allowlist applies as it does on the isolated transport.
         """
-        return cls(client_types=SHARED_NET_TOOL_TYPES, allowed_keys=SHARED_NET_KEYS)
+        return cls(
+            client_types=SHARED_NET_TOOL_TYPES,
+            allowed_keys=SHARED_NET_KEYS,
+            models=models,
+        )
 
     def refuse(self, body: bytes) -> str | None:
         """Return a refusal reason, or ``None`` if the body is allowed.
@@ -254,6 +263,10 @@ class BodyPolicy:
             return (
                 f"field(s) not permitted by the sandbox proxy: {quoted_names(unknown)}"
             )
+        if self.models is not None:
+            model = payload.get("model")
+            if not isinstance(model, str) or model not in self.models:
+                return f"model {model!r} is not permitted by the sandbox proxy"
 
         reason = self._tools_refusal(payload.get("tools"))
         if reason is not None:

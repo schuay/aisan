@@ -298,12 +298,16 @@ class AnthropicBackend(Backend):
         upstream: str = DEFAULT_UPSTREAM,
         claude_command: tuple[str, ...] = ("claude",),
         rpm: int = 120,
+        models: tuple[str, ...] = (),
     ) -> None:
         """Use the subscription credential unless an API key is supplied.
 
         The box must be configured for the selected credential type because the
         client sends different beta flags for subscriptions and API keys. Reject
         both arguments together instead of giving one implicit precedence.
+
+        ``models`` restricts requests to the named model ids; empty leaves the
+        choice to the box, which is what an interactive session wants.
         """
         if api_key is not None and credentials is not None:
             raise ValueError("provide at most one of credentials or api_key")
@@ -318,6 +322,7 @@ class AnthropicBackend(Backend):
         self.credentials = self._credential.files
         self._upstream = upstream
         self._rpm = rpm
+        self._models = frozenset(models) or None
 
     def client_env(self) -> dict[str, str]:
         """Return the relay location and placeholder credential for the box.
@@ -395,6 +400,7 @@ class AnthropicBackend(Backend):
         app = make_app(
             authorization=self._upstream_auth,
             upstream=self._upstream,
+            body=BodyPolicy(models=self._models),
             rate=RateLimit(per_minute=self._rpm),
         )
         runner = await serve_proxy(sock, app)
@@ -413,7 +419,7 @@ class AnthropicBackend(Backend):
         app = make_app(
             authorization=self._upstream_auth,
             upstream=self._upstream,
-            body=BodyPolicy.for_shared_network(),
+            body=BodyPolicy.for_shared_network(models=self._models),
             rate=RateLimit(per_minute=self._rpm),
             client_token=client_token,
         )

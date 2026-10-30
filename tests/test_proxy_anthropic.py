@@ -993,6 +993,31 @@ _WEB_SEARCH_BODY = {
 }
 
 
+def test_a_model_allowlist_refuses_every_other_model_on_both_transports():
+    """A key serves every model its account can reach; a deployment that
+    configured one model must not have a box address another. Absent allowlist
+    leaves the choice to the box, which an interactive session relies on."""
+    listed = frozenset({"claude-haiku-5-5"})
+
+    def body(model) -> bytes:
+        payload = {"max_tokens": 1, "messages": []}
+        if model is not None:
+            payload["model"] = model
+        return json.dumps(payload).encode()
+
+    for policy in (
+        BodyPolicy(models=listed),
+        BodyPolicy.for_shared_network(models=listed),
+    ):
+        assert policy.refuse(body("claude-haiku-5-5")) is None
+        reason = policy.refuse(body("claude-opus-5-5"))
+        assert reason is not None and "claude-opus-5-5" in reason
+        assert policy.refuse(body(None)) is not None
+        assert policy.refuse(body(["claude-haiku-5-5"])) is not None
+    assert BodyPolicy().refuse(body("anything")) is None
+    assert BodyPolicy.for_shared_network().refuse(body("anything")) is None
+
+
 def test_the_isolated_policy_still_refuses_the_web_search_request():
     """The tool type is what the isolated policy refuses. The forced
     ``tool_choice`` beside it is permitted on its own: it can only name a tool

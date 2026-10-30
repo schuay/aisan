@@ -478,6 +478,46 @@ async def test_the_transport_decides_the_body_policy(tmp_path):
         await up_runner.cleanup()
 
 
+async def test_a_model_allowlist_is_enforced_on_both_transports(tmp_path):
+    up, up_runner = await _upstream_server(_hello)
+    backend = AnthropicBackend(api_key="k", upstream=up, models=("claude-haiku-5-5",))
+    listed = json.dumps({"model": "claude-haiku-5-5", "messages": []}).encode()
+    other = json.dumps({"model": "claude-opus-5-5", "messages": []}).encode()
+    runtime = tmp_path / "rt"
+    runtime.mkdir()
+    try:
+        async with backend.serve_shared(tmp_path) as activation:
+            endpoint = activation.client_env["ANTHROPIC_BASE_URL"]
+            headers = {"x-api-key": activation.client_env[API_KEY_ENV]}
+            async with ClientSession() as session:
+                async with session.post(
+                    f"{endpoint}/v1/messages", data=listed, headers=headers
+                ) as response:
+                    assert response.status == 200
+                async with session.post(
+                    f"{endpoint}/v1/messages", data=other, headers=headers
+                ) as response:
+                    assert response.status == 403
+                    message = (await response.json())["error"]["message"]
+                    assert "claude-opus-5-5" in message
+
+        async with backend.serve(runtime):
+            sock = backend.socket_path(runtime)
+            async with ClientSession(
+                connector=UnixConnector(path=str(sock))
+            ) as session:
+                async with session.post(
+                    "http://anthropic.invalid/v1/messages", data=listed
+                ) as response:
+                    assert response.status == 200
+                async with session.post(
+                    "http://anthropic.invalid/v1/messages/count_tokens", data=other
+                ) as response:
+                    assert response.status == 403
+    finally:
+        await up_runner.cleanup()
+
+
 async def test_a_token_that_expires_mid_session_is_refreshed(tmp_path, monkeypatch):
     import aisan.egress.anthropic as backend_module
 
