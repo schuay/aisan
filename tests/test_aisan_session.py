@@ -22,6 +22,7 @@ from aisan.session import (
     staged_directory,
     state_dir,
 )
+from aisan.upstream import CA_ENV, PROXY_ENV
 
 
 def test_session_commands_are_packaged():
@@ -77,12 +78,20 @@ def opencode_catalog(tmp_path, monkeypatch):
     monkeypatch.delenv("AISAN_OPENCODE_UPSTREAM", raising=False)
 
 
-def _cli(tmp_path, argv, host_path=None):
+def _cli(tmp_path, argv, host_path=None, extra_env=None):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    drop = {"OPENCODE_CONFIG", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
+    drop = {
+        "OPENCODE_CONFIG",
+        "XDG_CONFIG_HOME",
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        PROXY_ENV,
+        CA_ENV,
+    }
     env = {k: v for k, v in os.environ.items() if k not in drop}
     env["HOME"] = str(home)
+    env.update(extra_env or {})
     if host_path is not None:
         env["PATH"] = str(host_path)
     return subprocess.run(
@@ -109,6 +118,29 @@ def test_explain_leaves_no_persistent_session_state(tmp_path, command):
 
     assert result.returncode == 0, result.stderr
     assert not (tmp_path / "home" / ".cache").exists()
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_explain_reports_the_upstream_route_from_the_environment(tmp_path, command):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    ca = tmp_path / "burp.der"
+    env = {PROXY_ENV: "http://127.0.0.1:8080", CA_ENV: str(ca)}
+    result = _cli(tmp_path, [command, "--explain", str(repo)], extra_env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert f"upstream via http://127.0.0.1:8080 trusting {ca}" in result.stdout
+
+
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_a_malformed_upstream_proxy_refuses_the_launch(tmp_path, command):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {PROXY_ENV: "https://127.0.0.1:8080"}
+    result = _cli(tmp_path, [command, "--explain", str(repo)], extra_env=env)
+
+    assert result.returncode == 2
+    assert f"refused: {PROXY_ENV}" in result.stderr
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])

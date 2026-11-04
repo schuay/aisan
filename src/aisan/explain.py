@@ -255,6 +255,8 @@ def explain(
                 out.write(f"  {backend.name:<8} 127.0.0.1:{backend.port} -> {sock}\n")
             else:
                 out.write(f"  {backend.name:<8} 127.0.0.1:(assigned at launch)\n")
+            if (route := backend.transport.describe()) is not None:
+                out.write(f"  {'':<8} upstream {route}\n")
     elif isolated:
         out.write("  (none; the box has no route off the machine)\n")
     else:

@@ -36,7 +36,7 @@ from dataclasses import dataclass
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-from ..upstream import upstream_origin, validate_upstream
+from ..upstream import DIRECT, Transport, upstream_origin, validate_upstream
 from .http import (
     MAX_BODY_BYTES,
     LogGate,
@@ -298,6 +298,7 @@ def make_app(
     response_transforms: Mapping[tuple[str, str], ResponseTransform] | None = None,
     query_refusal: Callable[[web.Request], str | None] | None = None,
     local_refusals: Mapping[tuple[str, str], tuple[int, str]] | None = None,
+    transport: Transport = DIRECT,
 ) -> web.Application:
     if (token is None) == (authorization is None):
         raise ValueError("provide exactly one of token or authorization")
@@ -448,7 +449,7 @@ def make_app(
     app.router.add_route("*", "/{tail:.*}", handle)
 
     async def _open(a: web.Application) -> None:
-        a[_SESSION] = ClientSession(timeout=_TIMEOUT)
+        a[_SESSION] = transport.session(_TIMEOUT)
 
     async def _close(a: web.Application) -> None:
         await a[_SESSION].close()

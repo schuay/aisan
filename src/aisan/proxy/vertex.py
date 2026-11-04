@@ -31,6 +31,8 @@ from dataclasses import dataclass
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
+from ..upstream import DIRECT, Transport
+
 # Reuse the measured Anthropic Messages body policy for Claude on Vertex.
 from . import anthropic
 
@@ -289,6 +291,7 @@ def make_app(
     anthropic_body: anthropic.BodyPolicy | None = None,
     session_header: str | None = None,
     session_id: str | None = None,
+    transport: Transport = DIRECT,
 ) -> web.Application:
     limiter = rate or RateLimit()
     # Session affinity lets later turns reuse cached prefixes. The deployment
@@ -396,7 +399,7 @@ def make_app(
     app.router.add_route("*", "/{tail:.*}", handle)
 
     async def _open(a: web.Application) -> None:
-        a[_SESSION] = ClientSession(timeout=_TIMEOUT)
+        a[_SESSION] = transport.session(_TIMEOUT)
 
     async def _close(a: web.Application) -> None:
         await a[_SESSION].close()

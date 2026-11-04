@@ -41,7 +41,7 @@ from ..opencode_provider import SDK, SelectedProvider
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
 from ..proxy.openai_compat import make_app
-from ..upstream import upstream_origin, validate_upstream
+from ..upstream import DIRECT, Transport, upstream_origin, validate_upstream
 from .base import (
     PLACEHOLDER_KEY,
     SHARED_PORT_MARKER,
@@ -107,6 +107,7 @@ class OpenAICompatBackend(Backend):
         catalog: Path | None = None,
         rpm: int = 120,
         port: int = PORT,
+        transport: Transport = DIRECT,
     ) -> None:
         if upstream_auth not in {"api-key", "none"}:
             raise ValueError("upstream_auth must be api-key or none")
@@ -129,6 +130,7 @@ class OpenAICompatBackend(Backend):
         # The credential file contains keys for every configured provider.
         self.credentials = (self._credentials,)
         self._catalog = catalog or DEFAULT_CATALOG
+        self.transport = transport
         self._rpm = rpm
         # Give each provider a distinct socket name.
         self.name = f"openai-{provider}"
@@ -193,11 +195,11 @@ class OpenAICompatBackend(Backend):
         Query ``/models`` without a key. Any HTTP response proves the connection,
         including a 4xx or redirect. Redirects aren't followed.
         """
-        from aiohttp import ClientError, ClientSession, ClientTimeout
+        from aiohttp import ClientError, ClientTimeout
 
         try:
             async with (
-                ClientSession(timeout=ClientTimeout(total=10)) as session,
+                self.transport.session(ClientTimeout(total=10)) as session,
                 session.get(f"{api.rstrip('/')}/models", allow_redirects=False),
             ):
                 pass
@@ -232,6 +234,7 @@ class OpenAICompatBackend(Backend):
             **self._authorization(),
             upstream=api,
             rate=RateLimit(per_minute=self._rpm),
+            transport=self.transport,
         )
         runner = await serve_proxy(sock, app)
         log.info(
@@ -253,6 +256,7 @@ class OpenAICompatBackend(Backend):
             **self._authorization(),
             upstream=self._resolve_api(),
             rate=RateLimit(per_minute=self._rpm),
+            transport=self.transport,
             client_token=client_token,
         )
         runner, port = await serve_tcp(app)

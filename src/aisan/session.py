@@ -28,6 +28,7 @@ from .sandbox import RO, Bind, BindOver, BindSpec
 from .session_mcp import MCPAllowlist, SessionMCP, mcp_ro_binds
 from .spec import BoxSpec, Grant
 from .statedir import planted_credentials, prepare_state_dir, write_sealed
+from .upstream import Transport
 
 _TERM_PASSTHROUGH = ("TERM", "COLORTERM", "LANG", "LC_ALL")
 
@@ -51,6 +52,14 @@ def mcp_launcher_binds(mcp: SessionMCP | None) -> tuple[Path, ...]:
     try:
         return mcp_ro_binds(mcp)
     except (FileNotFoundError, ValueError) as e:
+        raise LaunchRefused(f"refused: {e}") from e
+
+
+def upstream_transport() -> Transport:
+    """Read the host proxies' upstream route from the host environment."""
+    try:
+        return Transport.from_env()
+    except ValueError as e:
         raise LaunchRefused(f"refused: {e}") from e
 
 

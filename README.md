@@ -110,6 +110,23 @@ unattended box should not gain a channel to the outside because a server was
 added for interactive work.
 [`examples/mcp.toml`](examples/mcp.toml) shows the interactive-only split.
 
+## Inspecting upstream traffic
+
+The host proxies can send model traffic through an intercepting proxy such as
+Burp Suite:
+
+```sh
+AISAN_UPSTREAM_PROXY=http://127.0.0.1:8080 \
+AISAN_UPSTREAM_CA=~/burp-ca.der \
+aisan claude /path/to/repo
+```
+
+`AISAN_UPSTREAM_PROXY` names an HTTP proxy, which tunnels HTTPS with CONNECT.
+`AISAN_UPSTREAM_CA` adds a root certificate, PEM or DER, to the system trust
+store. `--explain` shows the route under each backend. The intercepting proxy
+sees the real credentials the host proxy attaches. Credential refresh and the
+REAPI proxy still connect directly.
+
 ## As a library: unattended API jobs
 
 The same mechanism supports headless workloads. A preset maps arguments to a

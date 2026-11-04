@@ -36,6 +36,7 @@ from types import MappingProxyType
 
 from aiohttp import web
 
+from ..upstream import DIRECT, Transport
 from .http import RateLimit, load_json_unambiguous, quoted_names, serve
 from .openai_compat import BodyPolicy as _BodyPolicy
 from .openai_compat import PathAllowlist as _PathAllowlist
@@ -490,6 +491,7 @@ def make_app(
     client_token: str | None = None,
     usage_upstream: str | None = None,
     accounts_upstream: str | None = None,
+    transport: Transport = DIRECT,
 ) -> web.Application:
     async def authorization() -> dict[str, str]:
         token, account_id = await credential()
@@ -506,6 +508,7 @@ def make_app(
         rate=rate,
         headers=_protocol_headers,
         client_token=client_token,
+        transport=transport,
         empty_body_routes=EMPTY_BODY_ROUTES,
         query_refusal=_query_refusal,
         local_refusals={

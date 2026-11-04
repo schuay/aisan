@@ -39,6 +39,7 @@ from ..proxy.http import serve as serve_proxy
 from ..proxy.openai_responses import BOX_ACCOUNT_ID, PathAllowlist, make_app
 from ..sandbox import BindOver, BindSpec
 from ..statedir import write_sealed
+from ..upstream import DIRECT, Transport
 from .base import (
     PLACEHOLDER_KEY,
     SHARED_TOKEN_MARKER,
@@ -93,6 +94,7 @@ class CodexBackend(Backend):
         codex_command: tuple[str, ...] = ("codex",),
         rpm: int = 120,
         port: int = PORT,
+        transport: Transport = DIRECT,
     ) -> None:
         self._model = model
         self._upstream = upstream
@@ -101,6 +103,7 @@ class CodexBackend(Backend):
         self._codex_home = codex_home
         self._codex_command = codex_command
         self.credentials = (self._credentials,)
+        self.transport = transport
         self._rpm = rpm
         self.port = port
 
@@ -194,11 +197,11 @@ class CodexBackend(Backend):
 
     async def _check_upstream(self) -> None:
         # Any HTTP response proves connectivity. Don't follow redirects.
-        from aiohttp import ClientError, ClientSession, ClientTimeout
+        from aiohttp import ClientError, ClientTimeout
 
         try:
             async with (
-                ClientSession(timeout=ClientTimeout(total=10)) as session,
+                self.transport.session(ClientTimeout(total=10)) as session,
                 session.get(self._upstream, allow_redirects=False),
             ):
                 pass
@@ -225,6 +228,7 @@ class CodexBackend(Backend):
             accounts_upstream=_accounts_upstream(self._upstream),
             paths=self._paths(),
             rate=RateLimit(per_minute=self._rpm),
+            transport=self.transport,
         )
         runner = await serve_proxy(sock, app)
         log.info(
@@ -250,6 +254,7 @@ class CodexBackend(Backend):
             accounts_upstream=_accounts_upstream(self._upstream),
             paths=self._paths(),
             rate=RateLimit(per_minute=self._rpm),
+            transport=self.transport,
             client_token=client_token,
         )
         runner, port = await serve_tcp(app)

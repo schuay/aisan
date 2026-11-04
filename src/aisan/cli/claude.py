@@ -44,6 +44,7 @@ from aisan.session import (
     run_interactive,
     state_dir,
     terminal_env,
+    upstream_transport,
 )
 from aisan.session_mcp import claude_config_file, claude_host_mcp, mcp_search_path
 from aisan.statedir import read_sealed_object, write_sealed
@@ -235,7 +236,9 @@ async def _main(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return 2
-    backend = AnthropicBackend(upstream=args.upstream, api_key=api_key)
+    backend = AnthropicBackend(
+        upstream=args.upstream, api_key=api_key, transport=upstream_transport()
+    )
     try:
         flags = resolve_launcher_flags(
             repo,

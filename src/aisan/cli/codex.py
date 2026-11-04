@@ -40,6 +40,7 @@ from aisan.session import (
     run_interactive,
     state_dir,
     terminal_env,
+    upstream_transport,
 )
 from aisan.session_mcp import (
     SessionMCP,
@@ -190,7 +191,12 @@ async def _main(argv: list[str]) -> int:
     repo = Path(args.repo).resolve()
     state = state_dir("codex", repo)
     mcp_config = state / "aisan-host-mcp.config.toml"
-    backend = CodexBackend(model=args.model, upstream=args.upstream, codex_home=state)
+    backend = CodexBackend(
+        model=args.model,
+        upstream=args.upstream,
+        codex_home=state,
+        transport=upstream_transport(),
+    )
     try:
         flags = resolve_launcher_flags(
             repo,

@@ -21,7 +21,7 @@ classifiers = [
 # Keep the package installable without a sibling checkout.
 dependencies = [
     # aiohttp serves HTTP proxies; h2 serves the plaintext REAPI transport.
-    "aiohttp>=3.9",
+    "aiohttp>=3.11",
     "yarl>=1.9",
     "h2>=4.1",
 ]
@@ -44,7 +44,7 @@ Repository = "https://github.com/schuay/aisan"
 Issues = "https://github.com/schuay/aisan/issues"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.15"]
+dev = ["cryptography>=41", "pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.15"]
 
 [build-system]
 requires = ["hatchling"]

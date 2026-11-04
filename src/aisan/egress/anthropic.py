@@ -30,6 +30,7 @@ from pathlib import Path
 from ..proxy.anthropic import BodyPolicy, make_app
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
+from ..upstream import DIRECT, Transport
 from .base import (
     PLACEHOLDER_KEY,
     SHARED_PORT_MARKER,
@@ -127,6 +128,7 @@ class AnthropicBackend(Backend):
         claude_command: tuple[str, ...] = ("claude",),
         rpm: int = 120,
         models: tuple[str, ...] = (),
+        transport: Transport = DIRECT,
     ) -> None:
         """Use the subscription credential unless an API key is supplied.
 
@@ -149,6 +151,7 @@ class AnthropicBackend(Backend):
         # Box mount checks must keep these host credential files hidden.
         self.credentials = self._credential.files
         self._upstream = upstream
+        self.transport = transport
         self._rpm = rpm
         self._models = frozenset(models) or None
 
@@ -195,11 +198,11 @@ class AnthropicBackend(Backend):
         Any HTTP response proves connectivity, including a 4xx or redirect. Don't
         follow redirects or spend model quota during this check.
         """
-        from aiohttp import ClientError, ClientSession, ClientTimeout
+        from aiohttp import ClientError, ClientTimeout
 
         try:
             async with (
-                ClientSession(timeout=ClientTimeout(total=10)) as session,
+                self.transport.session(ClientTimeout(total=10)) as session,
                 session.get(
                     f"{self._upstream.rstrip('/')}/api/hello",
                     allow_redirects=False,
@@ -230,6 +233,7 @@ class AnthropicBackend(Backend):
             upstream=self._upstream,
             body=BodyPolicy(models=self._models),
             rate=RateLimit(per_minute=self._rpm),
+            transport=self.transport,
         )
         runner = await serve_proxy(sock, app)
         log.info("anthropic proxy: listening on %s for 127.0.0.1:%d", sock, self.port)
@@ -249,6 +253,7 @@ class AnthropicBackend(Backend):
             upstream=self._upstream,
             body=BodyPolicy.for_shared_network(models=self._models),
             rate=RateLimit(per_minute=self._rpm),
+            transport=self.transport,
             client_token=client_token,
         )
         runner, port = await serve_tcp(app)

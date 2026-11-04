@@ -24,6 +24,7 @@ from ..mint import vertex_fetch
 from ..proxy.http import RateLimit
 from ..proxy.http import serve as serve_proxy
 from ..proxy.vertex import Allowlist, make_app
+from ..upstream import DIRECT, Transport
 from .base import Backend, PreflightError
 
 log = logging.getLogger(__name__)
@@ -97,8 +98,10 @@ class VertexBackend(Backend):
         session_header: str | None = None,
         impersonate: str = "",
         fetch=None,
+        transport: Transport = DIRECT,
     ) -> None:
         self._rpm = rpm
+        self.transport = transport
         self._project = project
         self._location = location
         self._models = models
@@ -161,6 +164,7 @@ class VertexBackend(Backend):
             token=self._token,
             location=self._location,
             rate=RateLimit(per_minute=self._rpm),
+            transport=self.transport,
             session_header=self._session_header,
         )
         runner = await serve_proxy(sock, app)

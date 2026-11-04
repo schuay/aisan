@@ -42,6 +42,7 @@ from dataclasses import dataclass
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
+from ..upstream import DIRECT, Transport
 from .http import (
     MAX_BODY_BYTES,
     AmbiguousBody,
@@ -442,6 +443,7 @@ def make_app(
     body: BodyPolicy | None = None,
     rate: RateLimit | None = None,
     client_token: str | None = None,
+    transport: Transport = DIRECT,
 ) -> web.Application:
     if (token is None) == (authorization is None):
         raise ValueError("provide exactly one of token or authorization")
@@ -569,7 +571,7 @@ def make_app(
     app.router.add_route("*", "/{tail:.*}", handle)
 
     async def _open(a: web.Application) -> None:
-        a[_SESSION] = ClientSession(timeout=_TIMEOUT)
+        a[_SESSION] = transport.session(_TIMEOUT)
 
     async def _close(a: web.Application) -> None:
         await a[_SESSION].close()

@@ -41,6 +41,7 @@ from aisan.session import (
     run_interactive,
     state_dir,
     terminal_env,
+    upstream_transport,
 )
 from aisan.session_mcp import mcp_search_path, opencode_host_mcp
 
@@ -121,6 +122,7 @@ async def _main(argv: list[str]) -> int:
         model=args.model,
         resolved=selected,
         upstream_auth=auth_mode,
+        transport=upstream_transport(),
     )
     print(
         selected.description(auth_mode), file=sys.stdout if args.explain else sys.stderr

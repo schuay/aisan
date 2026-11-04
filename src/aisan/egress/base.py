@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..sandbox import BindSpec, paths_overlap
+from ..upstream import DIRECT, Transport
 
 
 class PreflightError(RuntimeError):
@@ -79,6 +80,8 @@ class Backend(abc.ABC):
     credentials: tuple[Path, ...] = ()
     #: Whether this backend implements the authenticated host-loopback path.
     supports_shared_net: bool = False
+    #: How the host service reaches its upstream.
+    transport: Transport = DIRECT
 
     def socket_path(self, runtime_dir: Path) -> Path:
         """Return this backend's socket path in the runtime directory.
