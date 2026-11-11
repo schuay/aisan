@@ -104,6 +104,12 @@ def seed_state(state: Path, host_config_path: Path | None = None) -> None:
     # Without approval, API-key sessions block at the custom-key prompt.
     if PLACEHOLDER_KEY[-20:] not in approved:  # the CLI stores the last 20 chars
         approved.append(PLACEHOLDER_KEY[-20:])
+    # The /model picker's server rows (GET /api/claude_cli/bootstrap) are not
+    # mirrored: a host with a claude.ai login builds its picker from the served
+    # catalog, so its copy of these rows can lag. Claude Code 2.1.322 omits its
+    # compiled-in Fable default when any Fable row is present, so a stale
+    # claude-fable-5-1 row hid claude-fable-5-2. Drop copies seeded earlier.
+    config.pop("additionalModelOptionsCache", None)
     mirror_host_caches(config, host_config_path or host_config())
     write_sealed(path, json.dumps(config, indent=2))
 
@@ -125,8 +131,6 @@ def seed_settings(state: Path) -> None:
 # Claude fetches these values directly from api.anthropic.com, outside the base
 # URL override. Copy them from the host account for an isolated session.
 #
-#   additionalModelOptionsCache -- the /model picker's rows for models outside
-#     the CLI's compiled-in catalog, from GET /api/claude_cli/bootstrap.
 #   cachedGrowthBookFeatures and its three companions -- the feature flags, from
 #     a remote evaluation POSTed to /api/eval-authed. The CLI writes the four as
 #     a unit, so they are copied as one.
@@ -134,7 +138,6 @@ def seed_settings(state: Path) -> None:
 # Feature flags are account-specific. A stale cache caused a disabled
 # ``tengu_saffron_lattice`` dialog to reappear on every model switch.
 MIRRORED_CACHES = (
-    ("additionalModelOptionsCache", list),
     ("cachedGrowthBookFeatures", dict),
     ("cachedGrowthBookFeaturesAt", int),
     ("cachedExperimentFeatures", list),

@@ -188,30 +188,30 @@ def test_seed_state_preserves_unrelated_valid_state(tmp_path):
     assert config["projects"]["/other"] == {"seen": True}
 
 
-def test_seed_state_lends_the_box_the_hosts_model_menu(tmp_path):
+def test_seed_state_withholds_the_hosts_model_menu(tmp_path):
     import json
 
     from aisan.cli.claude import seed_state
 
     state = tmp_path / "state"
     state.mkdir()
-    host = tmp_path / ".claude.json"
-    options = [
-        {"value": "claude-fable-5", "label": "Fable", "description": "Fable 5"},
+    stale = [
         {
-            "value": "claude-mythos-5",
-            "label": "Mythos",
-            "description": "",
-            "disabled": True,
-        },
+            "value": "claude-fable-5-1[1m]",
+            "label": "Fable",
+            "description": "Fable 5.1",
+        }
     ]
-    host.write_text(json.dumps({"additionalModelOptionsCache": options}))
+    (state / ".claude.json").write_text(
+        json.dumps({"additionalModelOptionsCache": stale})
+    )
+    host = tmp_path / ".claude.json"
+    host.write_text(json.dumps({"additionalModelOptionsCache": stale}))
 
     seed_state(state, host)
 
     config = json.loads((state / ".claude.json").read_text())
-
-    assert config["additionalModelOptionsCache"] == options
+    assert "additionalModelOptionsCache" not in config
 
 
 def test_seed_state_lends_the_box_the_hosts_feature_flags(tmp_path):
@@ -265,16 +265,14 @@ def test_seed_state_mirrors_each_cache_on_its_own(tmp_path):
 
     state = tmp_path / "state"
     state.mkdir()
-    kept = [{"value": "claude-fable-5", "label": "Fable", "description": ""}]
-    (state / ".claude.json").write_text(
-        json.dumps({"additionalModelOptionsCache": kept})
-    )
+    kept = ["tengu_copper_fox"]
+    (state / ".claude.json").write_text(json.dumps({"cachedExperimentFeatures": kept}))
     host = tmp_path / ".claude.json"
     features = {"tengu_saffron_lattice": {"enabled": False}}
     host.write_text(
         json.dumps(
             {
-                "additionalModelOptionsCache": "not a menu",
+                "cachedExperimentFeatures": "not a list",
                 "cachedGrowthBookFeatures": features,
                 "cachedGrowthBookFeaturesAt": True,
             }
@@ -284,16 +282,16 @@ def test_seed_state_mirrors_each_cache_on_its_own(tmp_path):
     seed_state(state, host)
 
     config = json.loads((state / ".claude.json").read_text())
-    assert config["additionalModelOptionsCache"] == kept
+    assert config["cachedExperimentFeatures"] == kept
     assert config["cachedGrowthBookFeatures"] == features
     assert "cachedGrowthBookFeaturesAt" not in config
 
 
 @pytest.mark.parametrize(
     "host_state",
-    ["absent", "not json at all", "[1, 2, 3]", '{"additionalModelOptionsCache": "no"}'],
+    ["absent", "not json at all", "[1, 2, 3]", '{"cachedGrowthBookFeatures": "no"}'],
 )
-def test_seed_state_keeps_the_boxs_model_menu_when_the_host_lends_none(
+def test_seed_state_keeps_the_boxs_feature_flags_when_the_host_lends_none(
     tmp_path, host_state
 ):
     import json
@@ -302,10 +300,8 @@ def test_seed_state_keeps_the_boxs_model_menu_when_the_host_lends_none(
 
     state = tmp_path / "state"
     state.mkdir()
-    kept = [{"value": "claude-fable-5", "label": "Fable", "description": "Fable 5"}]
-    (state / ".claude.json").write_text(
-        json.dumps({"additionalModelOptionsCache": kept})
-    )
+    kept = {"tengu_saffron_lattice": {"enabled": False}}
+    (state / ".claude.json").write_text(json.dumps({"cachedGrowthBookFeatures": kept}))
     host = tmp_path / ".claude.json"
     if host_state != "absent":
         host.write_text(host_state)
@@ -313,19 +309,19 @@ def test_seed_state_keeps_the_boxs_model_menu_when_the_host_lends_none(
     seed_state(state, host)
 
     config = json.loads((state / ".claude.json").read_text())
-    assert config["additionalModelOptionsCache"] == kept
+    assert config["cachedGrowthBookFeatures"] == kept
 
 
-def test_the_model_menu_is_read_from_the_hosts_real_config_dir(tmp_path, monkeypatch):
+def test_host_caches_are_read_from_the_hosts_real_config_dir(tmp_path, monkeypatch):
     import json
 
     from aisan.cli.claude import host_config, seed_state
 
     configured = tmp_path / "elsewhere"
     configured.mkdir()
-    options = [{"value": "claude-fable-5", "label": "Fable", "description": "Fable 5"}]
+    features = {"tengu_saffron_lattice": {"enabled": False}}
     (configured / ".claude.json").write_text(
-        json.dumps({"additionalModelOptionsCache": options})
+        json.dumps({"cachedGrowthBookFeatures": features})
     )
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(configured))
 
@@ -336,7 +332,7 @@ def test_the_model_menu_is_read_from_the_hosts_real_config_dir(tmp_path, monkeyp
     seed_state(state)
 
     config = json.loads((state / ".claude.json").read_text())
-    assert config["additionalModelOptionsCache"] == options
+    assert config["cachedGrowthBookFeatures"] == features
 
 
 def test_the_seeded_sources_are_the_hosts_own_user_memory():
