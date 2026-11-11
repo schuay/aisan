@@ -192,6 +192,30 @@ class AnthropicBackend(Backend):
         await self._check_upstream()
         await self._credential.check(self.name)
 
+    async def list_models(self) -> list[dict]:
+        """Return the upstream's ``GET /v1/models`` entries for this credential."""
+        from aiohttp import ClientTimeout
+
+        async with (
+            self.transport.session(ClientTimeout(total=10)) as session,
+            session.get(
+                f"{self._upstream.rstrip('/')}/v1/models",
+                # One page; has_more is not followed.
+                params={"limit": "1000"},
+                headers={
+                    **await self._upstream_auth(),
+                    "anthropic-version": "2023-06-01",
+                },
+                allow_redirects=False,
+            ) as response,
+        ):
+            response.raise_for_status()
+            body = await response.json()
+        data = body.get("data") if isinstance(body, dict) else None
+        return (
+            [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
+        )
+
     async def _check_upstream(self) -> None:
         """Check whether the configured upstream accepts a connection.
 

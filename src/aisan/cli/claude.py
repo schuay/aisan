@@ -29,8 +29,10 @@ import asyncio
 import json
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
+from aisan.cli.claude_menu import MENU_KEY, fetch_menu
 from aisan.egress.anthropic import DEFAULT_UPSTREAM, PLACEHOLDER_KEY, AnthropicBackend
 from aisan.presets.claude_code import claude_code, claude_code_binary
 from aisan.session import (
@@ -81,13 +83,16 @@ def host_config() -> Path:
     return claude_config_file()
 
 
-def seed_state(state: Path, host_config_path: Path | None = None) -> None:
+def seed_state(
+    state: Path, host_config_path: Path | None = None, menu: Sequence[dict] = ()
+) -> None:
     """Seed first-run state that an isolated session can't obtain itself.
 
     Claude's onboarding checks fixed Anthropic URLs and exits when the isolated
     network blocks them, so mark onboarding complete. Approve the per-box API
     key placeholder, but preserve the operator's folder-trust choice. Merge host
-    caches and tolerate malformed state written by an earlier box.
+    caches and tolerate malformed state written by an earlier box. ``menu``
+    replaces the /model picker's server rows; see ``aisan.cli.claude_menu``.
 
     Never generate this state by running host Claude with
     ``CLAUDE_CONFIG_DIR`` here; that could store an OAuth credential in a
@@ -104,12 +109,10 @@ def seed_state(state: Path, host_config_path: Path | None = None) -> None:
     # Without approval, API-key sessions block at the custom-key prompt.
     if PLACEHOLDER_KEY[-20:] not in approved:  # the CLI stores the last 20 chars
         approved.append(PLACEHOLDER_KEY[-20:])
-    # The /model picker's server rows (GET /api/claude_cli/bootstrap) are not
-    # mirrored: a host with a claude.ai login builds its picker from the served
-    # catalog, so its copy of these rows can lag. Claude Code 2.1.322 omits its
-    # compiled-in Fable default when any Fable row is present, so a stale
-    # claude-fable-5-1 row hid claude-fable-5-2. Drop copies seeded earlier.
-    config.pop("additionalModelOptionsCache", None)
+    # The host's copy of these rows lags; a stale Fable 5.1 row hid Fable 5.2.
+    config.pop(MENU_KEY, None)
+    if menu:
+        config[MENU_KEY] = list(menu)
     mirror_host_caches(config, host_config_path or host_config())
     write_sealed(path, json.dumps(config, indent=2))
 
@@ -281,8 +284,10 @@ async def _main(argv: list[str]) -> int:
         payload=payload,
     )
 
+    menu = [] if args.explain else await fetch_menu(backend)
+
     def prepare() -> None:
-        seed_state(state)
+        seed_state(state, menu=menu)
         seed_settings(state)
         seed_user_memory(state, USER_MEMORY)
         if mcp.enabled:
