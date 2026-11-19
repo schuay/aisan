@@ -80,6 +80,11 @@ def _undo_host_paths(files: tuple[Path, ...], dirs: tuple[Path, ...]) -> None:
             d.rmdir()
 
 
+def _default_platform() -> str:
+    """Return the active confinement platform identifier."""
+    return "linux"
+
+
 class Box:
     """A running mount policy with its host-side egress services.
 
@@ -87,15 +92,66 @@ class Box:
     because they refer to resources created and removed by that context.
     """
 
-    def __init__(self, spec: BoxSpec, *, box_id: str) -> None:
+    def __init__(
+        self,
+        spec: BoxSpec,
+        *,
+        box_id: str,
+        platform: str | None = None,
+    ) -> None:
         self.spec = spec
         self.box_id = box_id
+        self.platform = _default_platform() if platform is None else platform
         self.runtime_dir = runtime_dir(box_id)
         self._stack: AsyncExitStack | None = None
         self._activations: dict[Backend, BackendActivation] = {}
 
+    def _uses_shared_tcp(self, backend: Backend) -> bool:
+        """Return whether `backend` serves authenticated TCP on host loopback.
+
+        macOS has no network namespaces, so HTTP backends always use
+        authenticated host-loopback TCP while Seatbelt pins outbound ports.
+        Backends whose clients can dial a Unix socket directly keep their
+        private socket in isolated mode.
+        """
+        if self.platform == "darwin":
+            return not (self.spec.unshare_net and backend.supports_direct_unix_socket)
+        return not self.spec.unshare_net
+
+    def _validate_platform_egress(self) -> None:
+        unsupported = [
+            b.name
+            for b in self.spec.egress
+            if self._uses_shared_tcp(b) and not b.supports_shared_net
+        ]
+        if unsupported:
+            raise ValueError(
+                f"box {self.box_id}: backend(s) {unsupported} require a network"
+                f" namespace and cannot serve on {self.platform}"
+            )
+
     def _needs_relays(self) -> bool:
-        return bool(self.spec.egress) and self.spec.unshare_net
+        return (
+            self.platform != "darwin"
+            and bool(self.spec.egress)
+            and self.spec.unshare_net
+        )
+
+    def _activated_endpoints(
+        self,
+    ) -> tuple[tuple[int | str, ...], tuple[Path, ...]]:
+        """Return `(tcp_ports, unix_sockets)` for sandbox network rules."""
+        tcp_ports = tuple(
+            self._activations[b].port if b in self._activations else f"<PORT:{b.name}>"
+            for b in self.spec.egress
+            if self._uses_shared_tcp(b)
+        )
+        unix_sockets = tuple(
+            b.socket_path(self.runtime_dir)
+            for b in self.spec.egress
+            if not self._uses_shared_tcp(b)
+        )
+        return tcp_ports, unix_sockets
 
     def _stage(self, stack: ExitStack | AsyncExitStack) -> None:
         """Create every on-disk source required before wrapper resolution.
@@ -169,6 +225,7 @@ class Box:
             stack.callback(_undo_host_paths, tuple(created_files), tuple(created_dirs))
 
     async def __aenter__(self) -> Self:
+        self._validate_platform_egress()
         stack = AsyncExitStack()
         try:
             for backend in self.spec.egress:
@@ -177,19 +234,22 @@ class Box:
                 await backend.preflight()
             self._stage(stack)
             activations: dict[Backend, BackendActivation] = {}
+            shared_backends = False
+            client_env: dict[str, str] = {}
             for backend in self.spec.egress:
-                if self.spec.unshare_net:
+                if self._uses_shared_tcp(backend):
+                    activation = await stack.enter_async_context(
+                        backend.serve_shared(
+                            self.runtime_dir, isolated=self.spec.unshare_net
+                        )
+                    )
+                    shared_backends = True
+                    client_env.update(activation.client_env)
+                else:
                     await stack.enter_async_context(backend.serve(self.runtime_dir))
                     activation = BackendActivation(backend.port, backend.client_env())
-                else:
-                    activation = await stack.enter_async_context(
-                        backend.serve_shared(self.runtime_dir)
-                    )
                 activations[backend] = activation
-            if not self.spec.unshare_net and activations:
-                client_env: dict[str, str] = {}
-                for activation in activations.values():
-                    client_env.update(activation.client_env)
+            if shared_backends:
                 path = write_client_env(self.runtime_dir, client_env)
                 stack.callback(path.unlink, missing_ok=True)
             if self._needs_relays():
@@ -240,39 +300,22 @@ class Box:
 
     @property
     def env(self) -> dict[str, str]:
-        """Return the environment serialized into the bwrap argv.
+        """Return the environment serialized into the wrapper argv.
 
-        Isolated mode includes backend placeholder values. In shared mode the
-        launcher reads live ports and proxy tokens from the protected runtime
-        file, keeping them out of host process command lines.
+        Backends served over Unix sockets include static placeholder values
+        here. Backends served on authenticated host loopback instead pass live
+        ports and proxy tokens through the protected runtime file, keeping them
+        out of host process command lines.
         """
         env = dict(self.spec.env)
-        if self.spec.unshare_net:
-            for backend in self.spec.egress:
+        for backend in self.spec.egress:
+            if not self._uses_shared_tcp(backend):
                 env.update(backend.client_env())
         return env
 
     def _sandbox(self) -> SandboxBackend:
-        """Combine the spec with runtime mounts and return a resolvable sandbox.
-
-        A box adds four kinds of mounts whose paths depend on runtime identity:
-
-        * aisan's interpreter and source runtime, read-only unless the spec
-          already grants the path writable;
-        * a seal over the private host root, hiding credential children and
-          other boxes' runtime capabilities;
-        * this box's runtime directory, read-only, for relay sockets or shared
-          client state;
-        * backend-specific mounts sourced from that directory.
-
-        The seal, the runtime directory, and the backend bind-overs are guards,
-        so the spec cannot mount anything at or below them; the sandbox refuses
-        the profile instead. Launcher mounts are omitted when an explicit
-        writable grant already provides the path, preserving that grant.
-
-        Compose the unresolved bind list and resolve it once so every seal's
-        deferred read-only remount follows the complete list.
-        """
+        """Combine the spec with runtime mounts and return a resolvable sandbox."""
+        self._validate_platform_egress()
         # Keep this import off the package initialization path. `python -m`
         # otherwise finds `launch` already imported, warns, and re-executes it.
         from .launch import launcher_binds

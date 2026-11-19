@@ -216,6 +216,21 @@ async def test_the_shared_backend_requires_its_activation_token(tmp_path):
                     headers=_bearer(client_token),
                 ) as response:
                     assert response.status == 200
+
+        async with backend.serve_shared(runtime, isolated=True) as isolated_act:
+            iso_base = f"http://127.0.0.1:{isolated_act.port}"
+            iso_token = json.loads((runtime / "antigravity-oauth-token").read_text())[
+                "token"
+            ]["access_token"]
+            async with (
+                ClientSession() as session,
+                session.post(
+                    f"{iso_base}/v1internal:generateContent",
+                    json=SEARCH,
+                    headers=_bearer(iso_token),
+                ) as response,
+            ):
+                assert response.status == 403
     finally:
         await upstream_runner.cleanup()
     assert reached == [("/v1internal:generateContent", f"Bearer {HOST_TOKEN}")]

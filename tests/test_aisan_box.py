@@ -112,8 +112,8 @@ class _SharedFakeBackend(_FakeBackend):
         }
 
     @contextlib.asynccontextmanager
-    async def serve_shared(self, runtime_dir: Path):
-        self.order.append("serve_shared")
+    async def serve_shared(self, runtime_dir: Path, *, isolated: bool = False):
+        self.order.append(f"serve_shared(isolated={isolated})")
         yield BackendActivation(
             23456,
             {
@@ -1044,3 +1044,51 @@ def test_a_tmpfs_root_does_not_stand_in_for_the_launcher_binds(tmp_path):
     )
     assert Mount("ro", source, source, guard=True) not in hosted.mounts()
     assert Mount("ro", source, source, guard=True) in tmpfs.mounts()
+
+
+async def test_darwin_box_serves_isolated_http_on_shared_tcp_and_direct_unix_sockets(
+    tmp_path,
+):
+    class _DirectUnixBackend(_FakeBackend):
+        supports_direct_unix_socket = True
+
+        def client_env(self) -> dict[str, str]:
+            return {"UNIX_ENDPOINT": f"unix://{self.runtime_sock}"}
+
+        def __init__(self, runtime_sock: Path) -> None:
+            super().__init__(name="direct", port=8811)
+            self.runtime_sock = runtime_sock
+
+    shared = _SharedFakeBackend(name="http", port=8810)
+    box_id = str(tmp_path / "darwin-mixed")
+    direct = _DirectUnixBackend(runtime_dir(box_id) / "direct.sock")
+    box = Box(
+        _spec(tmp_path, egress=(shared, direct), unshare_net=True),
+        box_id=box_id,
+        platform="darwin",
+    )
+    assert box._activated_endpoints() == (
+        ("<PORT:http>",),
+        (box.runtime_dir / "direct.sock",),
+    )
+    async with box:
+        assert shared.order == ["preflight", "prepare", "serve_shared(isolated=True)"]
+        assert direct.order == ["preflight", "prepare", "serve"]
+        assert not (box.runtime_dir / MANIFEST_NAME).exists()
+        assert read_client_env(box.runtime_dir)["FAKE_TOKEN"] == "private-token"
+        assert "FAKE_TOKEN" not in box.env
+        assert box.env["UNIX_ENDPOINT"] == f"unix://{box.runtime_dir / 'direct.sock'}"
+        assert box._activated_endpoints() == (
+            (23456,),
+            (box.runtime_dir / "direct.sock",),
+        )
+
+
+def test_darwin_box_refuses_backend_requiring_netns(tmp_path):
+    box = Box(
+        _spec(tmp_path, egress=(_FakeBackend(),), unshare_net=True),
+        box_id=str(tmp_path / "darwin-unsupported"),
+        platform="darwin",
+    )
+    with pytest.raises(ValueError, match="require a network namespace"):
+        box.wrapper()

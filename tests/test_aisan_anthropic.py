@@ -464,6 +464,20 @@ async def test_the_transport_decides_the_body_policy(tmp_path):
             ):
                 assert response.status == 200
 
+        async with backend.serve_shared(tmp_path, isolated=True) as activation:
+            endpoint = activation.client_env["ANTHROPIC_BASE_URL"]
+            token = activation.client_env[OAUTH_TOKEN_ENV]
+            async with (
+                ClientSession() as session,
+                session.post(
+                    f"{endpoint}/v1/messages",
+                    data=body,
+                    headers={"authorization": f"Bearer {token}"},
+                ) as response,
+            ):
+                assert response.status == 403
+                assert "web_search" in (await response.json())["error"]["message"]
+
         async with backend.serve(runtime):
             sock = backend.socket_path(runtime)
             async with (

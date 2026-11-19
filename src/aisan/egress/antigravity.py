@@ -184,16 +184,17 @@ class AntigravityBackend(Backend):
             sock.unlink(missing_ok=True)
 
     @asynccontextmanager
-    async def serve_shared(self, runtime_dir: Path) -> AsyncIterator[BackendActivation]:
+    async def serve_shared(
+        self, runtime_dir: Path, *, isolated: bool = False
+    ) -> AsyncIterator[BackendActivation]:
         client_token = shared_proxy_token()
         self._write_box_token(runtime_dir, client_token)
-        # ``Box`` calls this method only when the spec shares the host network.
-        # Isolated serving above always uses the strict body policy.
+        body = BodyPolicy() if isolated else BodyPolicy.for_shared_network()
         app = make_app(
             token=self._credential.token,
             client_token=client_token,
             profile=self._profile,
-            body=BodyPolicy.for_shared_network(),
+            body=body,
             rate=RateLimit(per_minute=self._rpm),
             transport=self.transport,
         )

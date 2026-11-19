@@ -82,6 +82,8 @@ class Backend(abc.ABC):
     credentials: tuple[Path, ...] = ()
     #: Whether this backend implements the authenticated host-loopback path.
     supports_shared_net: bool = False
+    #: Whether boxed clients can dial `socket_path` directly without TCP relays.
+    supports_direct_unix_socket: bool = False
     #: How the host service reaches its upstream.
     transport: Transport = DIRECT
 
@@ -150,8 +152,16 @@ class Backend(abc.ABC):
         yield  # pragma: no cover - keep the abstract method an async generator
 
     @asynccontextmanager
-    async def serve_shared(self, runtime_dir: Path) -> AsyncIterator[BackendActivation]:
-        """Run an authenticated host-loopback service for one activation."""
+    async def serve_shared(
+        self, runtime_dir: Path, *, isolated: bool = False
+    ) -> AsyncIterator[BackendActivation]:
+        """Run an authenticated host-loopback service for one activation.
+
+        ``isolated`` is True when a platform without network namespaces uses
+        authenticated host-loopback TCP while Seatbelt denies general network
+        access. Backends that widen request policy under ``--net`` keep their
+        strict isolated policy when ``isolated`` is True.
+        """
         raise NotImplementedError(f"{self.name} does not support shared networking")
         yield  # pragma: no cover - keep the method an async generator
 

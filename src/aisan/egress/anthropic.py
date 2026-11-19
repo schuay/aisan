@@ -268,14 +268,19 @@ class AnthropicBackend(Backend):
             sock.unlink(missing_ok=True)
 
     @asynccontextmanager
-    async def serve_shared(self, runtime_dir: Path) -> AsyncIterator[BackendActivation]:
+    async def serve_shared(
+        self, runtime_dir: Path, *, isolated: bool = False
+    ) -> AsyncIterator[BackendActivation]:
         client_token = shared_proxy_token()
-        # ``Box`` calls this method only when the spec shares the host network.
-        # Isolated serving above always uses the strict body policy.
+        body = (
+            BodyPolicy(models=self._models)
+            if isolated
+            else BodyPolicy.for_shared_network(models=self._models)
+        )
         app = make_app(
             authorization=self._upstream_auth,
             upstream=self._upstream,
-            body=BodyPolicy.for_shared_network(models=self._models),
+            body=body,
             rate=RateLimit(per_minute=self._rpm),
             transport=self.transport,
             client_token=client_token,

@@ -243,7 +243,9 @@ class CodexBackend(Backend):
             sock.unlink(missing_ok=True)
 
     @asynccontextmanager
-    async def serve_shared(self, runtime_dir: Path) -> AsyncIterator[BackendActivation]:
+    async def serve_shared(
+        self, runtime_dir: Path, *, isolated: bool = False
+    ) -> AsyncIterator[BackendActivation]:
         client_token = shared_proxy_token()
         if self._codex_home is not None:
             self._write_box_auth(runtime_dir, client_token)
