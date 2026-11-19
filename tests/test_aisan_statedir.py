@@ -13,6 +13,7 @@ from aisan.cli.claude import seed_settings, seed_state
 from aisan.session import mirror_user_memory
 from aisan.session_mcp import SessionMCP
 from aisan.statedir import (
+    ensure_sealed_dir,
     planted_credentials,
     prepare_state_dir,
     read_sealed_object,
@@ -62,6 +63,40 @@ def test_empty_codex_auth_mountpoint_is_not_a_planted_credential(tmp_path):
 
     auth.write_text('{"tokens": {"access_token": "planted"}}')
     assert planted_credentials(state, "codex") == [auth]
+
+
+def test_empty_antigravity_token_mountpoint_is_not_a_planted_credential(tmp_path):
+    state = tmp_path / "state"
+    token = state / "antigravity-cli" / "antigravity-oauth-token"
+    token.parent.mkdir(parents=True)
+    token.touch()
+
+    assert planted_credentials(state, "antigravity") == []
+
+    token.write_text('{"token": {"access_token": "planted"}}')
+    assert planted_credentials(state, "antigravity") == [token]
+
+
+def test_ensure_sealed_dir_replaces_a_planted_link(tmp_path):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+
+    ensure_sealed_dir(state / "fresh")
+    assert (state / "fresh").is_dir()
+    (state / "fresh" / "kept").touch()
+    ensure_sealed_dir(state / "fresh")
+    assert (state / "fresh" / "kept").exists()
+
+    (state / "link").symlink_to(victim)
+    ensure_sealed_dir(state / "link")
+    assert (state / "link").is_dir() and not (state / "link").is_symlink()
+    assert victim.is_dir()
+
+    (state / "file").write_text("x")
+    ensure_sealed_dir(state / "file")
+    assert (state / "file").is_dir()
 
 
 def test_empty_credential_symlink_is_still_planted(tmp_path):

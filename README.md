@@ -9,8 +9,8 @@ python -m pip install aisan   # or: uv tool install aisan
 aisan claude /path/to/repo
 ```
 
-The command starts an interactive Claude Code session. `aisan codex` and
-`aisan opencode` provide the same confinement:
+The command starts an interactive Claude Code session. `aisan codex`,
+`aisan agy` and `aisan opencode` provide the same confinement:
 
 - **No credentials in the box.** `~/.claude/.credentials.json` is never
   mounted. The client sends a per-box placeholder, and the proxy replaces it
@@ -175,14 +175,16 @@ separate integrations.
   is absent. On a host without a usable user manager, disable them explicitly
   with `Limits(use_cgroup=False)`.
 - Interactive sessions require the corresponding host CLI (`claude`, `codex`,
-  or `opencode`) to be installed and already logged in.
+  `agy`, or `opencode`) to be installed and already logged in.
+- `aisan agy` reads the host login from the Secret Service keyring with the
+  system Python (`/usr/bin/python3`), which needs PyGObject and libsecret.
 - RBE/V8 use additionally requires the relevant siso/depot_tools environment
   and `luci-auth`.
 - Vertex credential minting requires the `google-auth` extra and Application
   Default Credentials.
 
 Boxes have no general network access by default. Interactive `claude`, `codex`,
-and `opencode` sessions accept `--net` before the literal `--` to share the
+`agy`, and `opencode` sessions accept `--net` before the literal `--` to share the
 host network namespace. That exposes the internet, LAN/VPN routes, and
 host-local services in both directions; configured model credential files stay
 unmounted and model calls still pass through authenticated host proxies.
@@ -206,6 +208,7 @@ subcommands:
 aisan explain --help
 aisan claude /path/to/repo
 aisan codex /path/to/repo
+aisan agy /path/to/repo
 aisan opencode /path/to/repo
 aisan codex /path/to/repo --net
 ```
@@ -218,6 +221,23 @@ discovery and Daybreak controls for entitled accounts. The launcher imports the
 host's boolean `daybreak` preference alongside model and reasoning choices.
 Responses use inspected HTTP JSON/SSE; WebSocket attempts receive HTTP 426, and
 request compression is disabled. Context compaction runs through `/responses`.
+
+Antigravity CLI (`agy`) runs on the host's Google consumer login. The box holds
+a placeholder login in a per-repository state directory selected with
+`--gemini_dir`; the host's `~/.gemini` is not mounted. The proxy permits the
+Cloud Code methods and request shapes measured from agy 1.5.11, and refuses
+account-setting writes and trajectory analytics. Web search executes on the
+upstream and is permitted only with `--net`. `CLOUD_CODE_URL`,
+`USER_INFO_OVERRIDE_URL`, `--gemini_dir` and the token file are undocumented
+client internals, so a client update can break the route.
+
+agy has no setting that stops its other calls: it contacts Google's telemetry,
+configuration and profile hosts directly. Without `--net` those calls fail.
+With `--net` they carry the box's proxy token, which those hosts reject, but
+the telemetry payload is uploaded before the refusal. Commands the agent runs
+can reach agy's local language server; it refused a request to change the
+Cloud Code route from there, by its own check rather than aisan's, and the
+route carries only the box's token either way.
 
 OpenCode selects `model` from the host config, then the most recent model in
 `$XDG_STATE_HOME/opencode/model.json` (default `~/.local/state/opencode`).
@@ -343,8 +363,8 @@ from `aisan` is internal and may change between versions.
 
 The dispatcher enforces four rules:
 
-- **Plugins can't override built-ins.** Claims on `claude`, `codex`, `opencode`,
-  or `explain` are refused and reported.
+- **Plugins can't override built-ins.** Claims on `agy`, `claude`, `codex`,
+  `opencode`, or `explain` are refused and reported.
 - **Discovery costs nothing on the built-in path.** The group is read only when
   the first token names no built-in, and when help is printed. `aisan claude`
   scans no metadata and imports no plugin.

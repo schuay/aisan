@@ -16,6 +16,7 @@ from pathlib import Path
 
 from ..egress.base import EgressProfile
 from ..spec import BoxSpec, Grant
+from .antigravity import antigravity, antigravity_default
 from .claude_code import claude_code, claude_code_default
 from .codex import codex, codex_default
 from .depot_tools_job import (
@@ -28,6 +29,7 @@ from .depot_tools_job import (
 from .opencode import opencode, opencode_default
 
 PRESETS: dict[str, Callable[[Path], BoxSpec]] = {
+    "antigravity": antigravity_default,
     "claude_code": claude_code_default,
     "codex": codex_default,
     "opencode": opencode_default,
@@ -50,6 +52,8 @@ __all__ = [
     "EGRESS_PROFILES",
     "GRANTS",
     "PRESETS",
+    "antigravity",
+    "antigravity_default",
     "claude_code",
     "claude_code_default",
     "codex",

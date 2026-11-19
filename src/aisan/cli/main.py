@@ -13,11 +13,12 @@ from typing import TextIO
 from aisan import explain
 from aisan.session import LaunchRefused
 
-from . import claude, codex, opencode
+from . import antigravity, claude, codex, opencode
 
 Command = Callable[[list[str] | None], int]
 
 COMMANDS: dict[str, Command] = {
+    "agy": antigravity.main,
     "claude": claude.main,
     "codex": codex.main,
     "opencode": opencode.main,
@@ -31,6 +32,7 @@ PLUGIN_GROUP = "aisan.commands"
 _HELP = """usage: aisan <command> [args...]
 
 commands:
+  agy       start an interactive Antigravity CLI session
   claude    start an interactive Claude Code session
   codex     start an interactive Codex session
   opencode  start an interactive opencode session

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import subprocess
@@ -27,8 +28,16 @@ from aisan.egress.base import (
     SHARED_PORT_MARKER,
     PreflightError,
 )
+from aisan.presets import PRESETS
+from aisan.presets.antigravity import (
+    TOKEN_FILE,
+    agy_argv,
+    agy_binary,
+    antigravity,
+    antigravity_default,
+)
 from aisan.proxy.antigravity import USERINFO, Profile
-from aisan.sandbox import RW, Bind, BindOver
+from aisan.sandbox import RO, RW, Bind, BindOver
 from aisan.spec import BoxSpec, Limits
 
 HOST_TOKEN = "host-token-for-tests"
@@ -297,3 +306,262 @@ async def test_a_real_box_reads_the_placeholder_and_reaches_only_the_proxy(tmp_p
     assert lines["direct"] == "unreachable"
     assert reached == [("/v1internal:loadCodeAssist", f"Bearer {HOST_TOKEN}")]
     assert token_file.read_bytes() == b""
+
+
+def test_the_preset_is_registered_and_uses_isolated_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("BROWSER", "firefox")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    config = tmp_path / "git-config"
+    config.mkdir()
+    backend = _backend(tmp_path, token_file=state / TOKEN_FILE)
+    spec = antigravity(worktree, state=state, egress=(backend,), extra_ro=(config,))
+
+    assert PRESETS["antigravity"] is antigravity_default
+    assert [(bind.path, bind.mode) for bind in spec.binds] == [
+        (config, RO),
+        (state, RW),
+    ]
+    assert not {
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "BROWSER",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_RUNTIME_DIR",
+    } & set(dict(spec.env))
+    assert agy_argv(("-p", "hello"), state=state) == [
+        "agy",
+        "--gemini_dir",
+        str(state),
+        "--dangerously-skip-permissions",
+        "-p",
+        "hello",
+    ]
+    [bind] = backend.box_binds(tmp_path)
+    assert bind.dst == state / "antigravity-cli" / "antigravity-oauth-token"
+
+
+def test_state_is_seeded_past_first_run_with_the_repository_trusted(tmp_path):
+    from aisan.cli.antigravity import ONBOARDING, host_settings, seed_state
+
+    state = tmp_path / "state"
+    state.mkdir()
+    repo = tmp_path / "repo"
+    host = tmp_path / "host-settings.json"
+    host.write_text(json.dumps({"model": "Host Model", "trustedWorkspaces": ["/h"]}))
+
+    seed_state(state, repo, host_settings(host))
+    app = state / "antigravity-cli"
+    assert json.loads((app / "cache" / "onboarding.json").read_text()) == ONBOARDING
+    assert ONBOARDING == {
+        "consumerOnboardingComplete": True,
+        "enterpriseOnboardingComplete": False,
+        "onboardingComplete": True,
+    }
+    assert json.loads((app / "settings.json").read_text()) == {
+        "model": "Host Model",
+        "trustedWorkspaces": [str(repo)],
+    }
+
+    # The box's own choices stay, the host's model wins, trust is not repeated.
+    (app / "settings.json").write_text(
+        json.dumps(
+            {
+                "model": "Box Model",
+                "colorScheme": "dark",
+                "trustedWorkspaces": ["/elsewhere", str(repo)],
+            }
+        )
+    )
+    seed_state(state, repo, host_settings(host))
+    assert json.loads((app / "settings.json").read_text()) == {
+        "model": "Host Model",
+        "colorScheme": "dark",
+        "trustedWorkspaces": ["/elsewhere", str(repo)],
+    }
+
+
+@pytest.mark.parametrize("content", [None, "not json", "[]", '{"model": 3}'])
+def test_host_settings_copies_nothing_from_a_mangled_or_absent_file(tmp_path, content):
+    from aisan.cli.antigravity import host_settings
+
+    source = tmp_path / "settings.json"
+    if content is not None:
+        source.write_text(content)
+    assert host_settings(source) == {}
+
+
+def test_host_rules_files_are_mirrored_under_their_own_names(tmp_path):
+    from aisan.cli.antigravity import USER_MEMORY, seed_user_memory
+
+    assert [path.name for path in USER_MEMORY] == ["GEMINI.md", "AGENTS.md"]
+    assert {path.parent for path in USER_MEMORY} == {Path.home() / ".gemini"}
+
+    state = tmp_path / "state"
+    state.mkdir()
+    source = tmp_path / "GEMINI.md"
+    source.write_text("host rules\n")
+
+    seed_user_memory(state, source)
+    assert (state / "GEMINI.md").read_text() == "host rules\n"
+
+    seed_user_memory(state, tmp_path / "AGENTS.md")
+    assert not (state / "AGENTS.md").exists()
+
+
+def test_seeding_writes_nothing_through_links_planted_in_the_state(tmp_path):
+    from aisan.cli.antigravity import seed_state
+
+    victim = tmp_path / "victim"
+    (victim / "cache").mkdir(parents=True)
+    target = tmp_path / "target.json"
+    target.write_text("host file")
+    state = tmp_path / "state"
+    state.mkdir()
+
+    (state / "antigravity-cli").symlink_to(victim)
+    seed_state(state, tmp_path / "repo", {})
+    assert list(victim.iterdir()) == [victim / "cache"]
+    assert list((victim / "cache").iterdir()) == []
+
+    app = state / "antigravity-cli"
+    (app / "settings.json").unlink()
+    (app / "settings.json").symlink_to(target)
+    seed_state(state, tmp_path / "repo", {})
+    assert target.read_text() == "host file"
+    assert not (app / "settings.json").is_symlink()
+
+
+# The proxy policy, the token file, ``CLOUD_CODE_URL`` and ``--gemini_dir``
+# were measured against this version. On another, re-measure before trusting
+# a pass.
+AGY_VERSION = "1.5.11"
+
+
+def _agy_version() -> str:
+    done = subprocess.run(
+        ["agy", "--version"], capture_output=True, text=True, timeout=30, check=True
+    )
+    return done.stdout.strip()
+
+
+async def _run_agy(tmp_path: Path, backend_for, *payload: str):
+    """Run real agy in a real box; ``backend_for`` builds the backend."""
+    from aisan.cli.antigravity import seed_state
+
+    assert _agy_version() == AGY_VERSION
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    seed_state(state, worktree, {})
+    backend = backend_for(state / TOKEN_FILE)
+    base = antigravity(worktree, state=state, egress=(backend,))
+    spec = dataclasses.replace(
+        base, limits=dataclasses.replace(base.limits, use_cgroup=False)
+    )
+    async with Box(spec, box_id="antigravity-live") as box:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            box.command(agy_argv(payload, state=state)),
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+            env={**os.environ, **box.env},
+        )
+    assert (state / TOKEN_FILE).read_bytes() == b""
+    return result
+
+
+@pytest.mark.live
+@pytest.mark.skipif(agy_binary() is None, reason="agy is not installed")
+async def test_real_agy_presents_only_the_placeholder_to_a_stub(tmp_path):
+    """The tripwire: a client that rejected the placeholder login would start
+    an OAuth flow and send the proxy nothing."""
+    seen = []
+
+    async def upstream(request: web.Request) -> web.Response:
+        # Preflight probes the root without a credential.
+        if request.path != "/":
+            seen.append(
+                (request.method, request.path, request.headers.get("Authorization"))
+            )
+        return web.json_response(
+            {"error": {"code": 501, "message": "stub", "status": "UNIMPLEMENTED"}},
+            status=501,
+        )
+
+    url, upstream_runner = await _upstream_server(upstream)
+    try:
+        result = await _run_agy(
+            tmp_path,
+            lambda token_file: _backend(tmp_path, url, token_file=token_file),
+            "--print-timeout",
+            "30s",
+            "-p",
+            "say hi",
+        )
+    finally:
+        await upstream_runner.cleanup()
+
+    assert result.returncode != 0
+    assert ("POST", "/v1internal:loadCodeAssist", f"Bearer {HOST_TOKEN}") in seen
+    # The proxy forwards only what arrived with the placeholder, and attaches
+    # the host token itself.
+    assert {authorization for _, _, authorization in seen} == {f"Bearer {HOST_TOKEN}"}
+
+
+@pytest.mark.live
+@pytest.mark.skipif(agy_binary() is None, reason="agy is not installed")
+async def test_real_agy_completes_a_turn_on_the_host_login(tmp_path):
+    from aisan.egress.antigravity_keyring import KeyringCredential, KeyringError
+
+    credential = KeyringCredential()
+    try:
+        await credential.token()
+    except KeyringError as e:
+        pytest.skip(f"no usable host agy login: {e}")
+
+    result = await _run_agy(
+        tmp_path,
+        lambda token_file: AntigravityBackend(
+            credential=credential, token_file=token_file
+        ),
+        "--model",
+        "claude-opus-5-5-low",
+        "-p",
+        "Reply with exactly: hi",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "hi"
+
+
+@pytest.mark.live
+@pytest.mark.skipif(agy_binary() is None, reason="agy is not installed")
+async def test_host_agy_runs_against_the_refresh_sink_and_keeps_its_login():
+    from aisan.egress.antigravity_keyring import (
+        KeyringError,
+        _refresh_agy_login,
+        parse_login,
+        read_keyring,
+    )
+
+    assert _agy_version() == AGY_VERSION
+    try:
+        before = parse_login(read_keyring())
+    except KeyringError as e:
+        pytest.skip(f"no usable host agy login: {e}")
+
+    await _refresh_agy_login(("agy",))
+
+    after = parse_login(read_keyring())
+    assert after.remaining() > 0
+    # agy rewrites the item only near or past the expiry.
+    if before.remaining() > 120:
+        assert after == before

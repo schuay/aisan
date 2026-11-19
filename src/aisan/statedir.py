@@ -47,6 +47,7 @@ def prepare_state_dir(state: Path) -> Path:
 # these paths instead of the host configuration. Ordinary boxed sessions pass
 # credentials through the environment and do not write these files.
 BOXED_CREDENTIALS: dict[str, tuple[str, ...]] = {
+    "antigravity": ("antigravity-cli/antigravity-oauth-token",),
     "claude": (".credentials.json",),
     "codex": ("auth.json",),
     "opencode": ("opencode/auth.json",),
@@ -56,6 +57,7 @@ BOXED_CREDENTIALS: dict[str, tuple[str, ...]] = {
 # persistent state directory. The generated placeholder credential is mounted
 # over it from the protected runtime directory and never persists here.
 EMPTY_CREDENTIAL_MOUNTPOINTS: dict[str, tuple[str, ...]] = {
+    "antigravity": ("antigravity-cli/antigravity-oauth-token",),
     "codex": ("auth.json",),
 }
 
@@ -68,8 +70,8 @@ def planted_credentials(state: Path, client: str) -> list[Path]:
     token to later sessions without adding a credential mount.
 
     ``lstat`` counts symlinks because an occupied credential path is sufficient.
-    Codex's empty regular bind-over mountpoint is the one exception; it contains
-    no credential and the runtime placeholder hides it inside the box.
+    An empty regular bind-over mountpoint is the one exception; it contains no
+    credential and the runtime placeholder hides it inside the box.
     """
     found: list[Path] = []
     for name in BOXED_CREDENTIALS.get(client, ()):
@@ -102,6 +104,22 @@ def write_sealed(path: Path, data: str | bytes, *, mode: int = 0o600) -> None:
         os.write(fd, data.encode() if isinstance(data, str) else data)
     finally:
         os.close(fd)
+
+
+def ensure_sealed_dir(path: Path, *, mode: int = 0o700) -> None:
+    """Make ``path`` a real directory, replacing a link or file planted there.
+
+    ``write_sealed`` guards only the final component; a seed file below a
+    subdirectory also needs that directory not to be a link out of the state.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        path.mkdir(mode=mode)
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        path.unlink()
+        path.mkdir(mode=mode)
 
 
 def read_sealed_text(path: Path) -> str | None:

@@ -55,7 +55,12 @@ def test_missing_and_unknown_commands_fail(argv, message, capsys):
 
 @pytest.mark.parametrize(
     "module_name",
-    ["aisan.cli.claude", "aisan.cli.codex", "aisan.cli.opencode"],
+    [
+        "aisan.cli.antigravity",
+        "aisan.cli.claude",
+        "aisan.cli.codex",
+        "aisan.cli.opencode",
+    ],
 )
 def test_session_main_accepts_explicit_argv(monkeypatch, module_name):
     module = importlib.import_module(module_name)
@@ -73,7 +78,12 @@ def test_session_main_accepts_explicit_argv(monkeypatch, module_name):
 
 @pytest.mark.parametrize(
     "module_name",
-    ["aisan.cli.claude", "aisan.cli.codex", "aisan.cli.opencode"],
+    [
+        "aisan.cli.antigravity",
+        "aisan.cli.claude",
+        "aisan.cli.codex",
+        "aisan.cli.opencode",
+    ],
 )
 def test_session_parsers_preserve_explain_and_payload(module_name):
     module = importlib.import_module(module_name)
@@ -87,7 +97,12 @@ def test_session_parsers_preserve_explain_and_payload(module_name):
 
 @pytest.mark.parametrize(
     "module_name",
-    ["aisan.cli.claude", "aisan.cli.codex", "aisan.cli.opencode"],
+    [
+        "aisan.cli.antigravity",
+        "aisan.cli.claude",
+        "aisan.cli.codex",
+        "aisan.cli.opencode",
+    ],
 )
 def test_session_parsers_default_offline_and_accept_net(module_name):
     module = importlib.import_module(module_name)

@@ -185,6 +185,31 @@ def test_codex_profile_snapshot(tmp_path, pinned_host, home_layout):
     )
 
 
+def test_antigravity_profile_snapshot(tmp_path, pinned_host, home_layout):
+    from aisan.egress.antigravity import AntigravityBackend
+    from aisan.egress.antigravity_keyring import KeyringCredential
+    from aisan.presets.antigravity import TOKEN_FILE, antigravity
+
+    wt = _checkout(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    backend = AntigravityBackend(
+        credential=KeyringCredential(), token_file=state / TOKEN_FILE
+    )
+    spec = antigravity(wt, state=state, egress=(backend,))
+    _check(
+        "antigravity",
+        home_layout,
+        _report(
+            wt,
+            pinned_host,
+            spec,
+            preset="antigravity",
+            extra_paths=((state, "<STATE>"),),
+        ),
+    )
+
+
 def test_every_registered_preset_has_a_snapshot(tmp_path, pinned_host, home_layout):
     for name, build in sorted(PRESETS.items()):
         wt = _checkout(tmp_path / name)
