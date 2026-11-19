@@ -33,12 +33,9 @@ from aiohttp import web
 from ..hostproc import neutral_child
 from ..proxy.http import serve_tcp
 from .base import PreflightError
+from .hostlogin import CredentialRefreshError, SingleFlight, ensure_fresh
 
 log = logging.getLogger(__name__)
-
-
-class CredentialRefreshError(Exception):
-    """Host Claude could not leave behind a sufficiently fresh credential."""
 
 
 # Compute the default path when needed so credential guards honor environment
@@ -93,30 +90,14 @@ def _read_subscription(path: Path) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-class _Flight:
-    """Share one in-progress credential refresh among waiting requests.
-
-    Sharing the task deduplicates failed and successful attempts. A later wave
-    may start another attempt after the current task finishes.
-
-    The task outlives a cancelled request handler so credential updates can
-    finish. It returns exceptions to avoid leaving failures unobserved when all
-    waiters disconnect.
-    """
-
-    def __init__(self) -> None:
-        self.lock = asyncio.Lock()
-        self.task: asyncio.Task[Exception | None] | None = None
-
-
 @dataclass(frozen=True)
 class PlanCredential:
     """The host's Claude Code subscription login."""
 
     path: Path
     claude_command: tuple[str, ...]
-    _flight: _Flight = field(
-        default_factory=_Flight, init=False, repr=False, compare=False
+    _flight: SingleFlight = field(
+        default_factory=SingleFlight, init=False, repr=False, compare=False
     )
 
     @property
@@ -134,33 +115,15 @@ class PlanCredential:
         return {"authorization": f"Bearer {token}"}
 
     async def _ensure_fresh(self, *, floor: float) -> tuple[str, int]:
-        """Refresh a near-expired token and determine success from the file.
-
-        ``floor`` is the minimum remaining lifetime the caller accepts. Preflight
-        requires the full margin; an active session accepts any valid token.
-        Always reread the file because a timed-out Claude process may already
-        have completed the refresh.
-        """
-        credential = _read_plan_credential(self.path)
-        if _remaining_seconds(credential) >= _EXPIRY_MARGIN_S:
-            return credential
-
-        failure = await self._refresh()
-
-        credential = _read_plan_credential(self.path)
-        remaining = _remaining_seconds(credential)
-        if remaining >= floor:
-            return credential
-        raise CredentialRefreshError(self._refusal(remaining, failure))
-
-    async def _refresh(self) -> Exception | None:
-        """Join the current refresh attempt or start a new one."""
-        async with self._flight.lock:
-            task = self._flight.task
-            if task is None or task.done():
-                task = asyncio.create_task(self._attempt())
-                self._flight.task = task
-        return await task
+        """Refresh a near-expired token and determine success from the file."""
+        return await ensure_fresh(
+            lambda: _read_plan_credential(self.path),
+            _remaining_seconds,
+            lambda: self._flight.join(self._attempt),
+            margin=_EXPIRY_MARGIN_S,
+            floor=floor,
+            refusal=self._refusal,
+        )
 
     async def _attempt(self) -> Exception | None:
         try:
