@@ -407,6 +407,7 @@ def make_app(
             headers=upstream_headers,
             refuse=lambda status, message: _error(status, "api_error", message),
             logger=log,
+            gate=warn,
             label="openai-compat",
             origin=origin,
             respond=(

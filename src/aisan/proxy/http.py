@@ -137,6 +137,9 @@ Responder = Callable[[ClientResponse], Awaitable[web.StreamResponse | None]]
 
 # Forward chunks incrementally so streamed responses aren't buffered in full.
 _CHUNK = 64 << 10
+# Log the start of an upstream error body: enough for the error message, not a
+# whole echoed request.
+_ERROR_LOG_BYTES = 2 << 10
 
 
 async def forward(
@@ -148,6 +151,7 @@ async def forward(
     headers: Mapping[str, str] | Sequence[tuple[str, str]],
     refuse: Refusal,
     logger: logging.Logger,
+    gate: LogGate,
     label: str,
     origin: str,
     failure_detail: bool = False,
@@ -155,10 +159,13 @@ async def forward(
 ) -> web.StreamResponse:
     """Send a checked request upstream and relay the response to the box.
 
-    Redirects are refused with 502 rather than followed. ``label`` prefixes log
-    lines and ``origin`` names the upstream in them. ``failure_detail`` adds
-    the client exception text to the log and refusal; leave it off for
-    user-configured upstreams, whose URLs may appear in that text.
+    Redirects are refused with 502 rather than followed. An upstream status of
+    400 or above is logged through ``gate`` with the start of its body, which
+    is still relayed in full; otherwise a faithfully relayed refusal leaves no
+    host-side record of which call failed. ``label`` prefixes log lines and
+    ``origin`` names the upstream in them. ``failure_detail`` adds the client
+    exception text to the log and refusal; leave it off for user-configured
+    upstreams, whose URLs may appear in that text.
     """
     try:
         async with session.request(
@@ -182,6 +189,19 @@ async def forward(
                 answered = await respond(up)
                 if answered is not None:
                     return answered
+            head = b""
+            if up.status >= 400:
+                head = await up.content.read(_ERROR_LOG_BYTES)
+                # ``%r`` keeps a body containing newlines from forging log lines.
+                gate.warning(
+                    logger,
+                    "%s proxy: upstream %s answered %d for %s: %r",
+                    label,
+                    origin,
+                    up.status,
+                    request_path(request),
+                    head.decode("utf-8", "replace"),
+                )
             resp = web.StreamResponse(
                 status=up.status, headers=relayed_response_headers(up.headers)
             )
@@ -189,6 +209,8 @@ async def forward(
                 # ``prepare`` also writes and can fail if the box disconnects
                 # while the upstream is still working.
                 await resp.prepare(request)
+                if head:
+                    await resp.write(head)
                 async for chunk in up.content.iter_chunked(_CHUNK):
                     await resp.write(chunk)
                 await resp.write_eof()

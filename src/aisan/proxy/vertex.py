@@ -265,6 +265,7 @@ def make_app(
             headers=headers,
             refuse=lambda status, message: _error(status, message, streaming=streaming),
             logger=log,
+            gate=warn,
             label="vertex",
             origin=upstream,
             failure_detail=True,

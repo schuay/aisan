@@ -549,6 +549,51 @@ async def test_a_dead_upstream_is_502_not_a_torn_connection(tmp_path, streaming)
     assert "cannot reach its upstream" in error["message"]
 
 
+async def test_an_upstream_error_is_relayed_and_logged_on_one_line(tmp_path, caplog):
+    from aiohttp import ClientSession
+
+    refusal = b'{"error": {"code": 403,\n "message": "no valid license"}}'
+
+    async def upstream(request: web.Request) -> web.Response:
+        return web.Response(status=403, body=refusal, content_type="application/json")
+
+    up_url, up_runner = await _upstream_server(upstream)
+
+    import aisan.proxy.vertex as v
+
+    orig = v._upstream
+    v._upstream = lambda _loc: up_url
+    try:
+        app = make_app(allowlist=_allow(), token=lambda: _ready("t"), location=LOCATION)
+        sock = tmp_path / "vertex.sock"
+        runner = await serve_proxy(sock, app)
+        relay = await serve_relay(sock, 0)
+        port = relay.sockets[0].getsockname()[1]
+        try:
+            url = (
+                f"http://127.0.0.1:{port}{BASE}"
+                f"/publishers/google/models/{MODEL}:generateContent"
+            )
+            with caplog.at_level("WARNING", logger="aisan.proxy.vertex"):
+                async with ClientSession() as s, s.post(url, data=b"{}") as r:
+                    status, relayed = r.status, await r.read()
+        finally:
+            relay.close()
+            await relay.wait_closed()
+            await runner.cleanup()
+    finally:
+        v._upstream = orig
+        await up_runner.cleanup()
+
+    assert (status, relayed) == (403, refusal)
+    [line] = [
+        rec.getMessage() for rec in caplog.records if "answered 403" in rec.getMessage()
+    ]
+    assert "no valid license" in line
+    assert ":generateContent" in line
+    assert "\n" not in line
+
+
 async def test_box_headers_are_never_forwarded(tmp_path):
     from aiohttp import ClientSession
 

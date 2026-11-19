@@ -526,6 +526,7 @@ def make_app(
             headers=out,
             refuse=lambda status, message: _error(status, "api_error", message),
             logger=log,
+            gate=warn,
             label="anthropic",
             origin=base,
             failure_detail=True,
