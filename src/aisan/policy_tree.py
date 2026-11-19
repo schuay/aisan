@@ -19,6 +19,7 @@ same mount specifications before rendering platform-specific confinement rules:
 from __future__ import annotations
 
 import enum
+import re
 from collections.abc import Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -142,7 +143,59 @@ class Seal:
             )
 
 
-BindSpec = Bind | BindOver | Overlay | Seal
+@dataclass(frozen=True)
+class PinnedSymlink:
+    """Publish read-only `src` at `dst` via a host symlink pinned in Seatbelt.
+
+    macOS Seatbelt cannot mount one path at another. For state directories owned
+    by aisan, `Box` creates `dst -> src` before launch, removes `dst` on exit,
+    and `SeatbeltSandbox` denies unlinking or replacing `dst` and writing `src`.
+    Always a guard. Refused by `BwrapSandbox`, which uses `BindOver`.
+    """
+
+    src: Path
+    dst: Path
+
+    def __post_init__(self) -> None:
+        validate_destination(self.src)
+        validate_destination(self.dst)
+
+
+@dataclass(frozen=True)
+class WriteRegex:
+    """Mount `path` read-only while permitting writes to matching subpaths.
+
+    Seatbelt has no copy-on-write overlay mount. Shared caches that only touch
+    lock or timestamp files during reads can stay at their host path read-only
+    with narrow `file-write*` regular expressions anchored strictly below
+    `path`. Each entry in `suffixes` must begin with `/` and contain no NUL or
+    newline characters. Refused by `BwrapSandbox`, which uses `Overlay`.
+    """
+
+    path: Path
+    suffixes: tuple[str, ...]
+    guard: bool = True
+
+    def __post_init__(self) -> None:
+        validate_destination(self.path)
+        if '"' in str(self.path):
+            raise ValueError(f"WriteRegex path cannot contain '\"': {self.path!r}")
+        if not self.suffixes:
+            raise ValueError(f"WriteRegex at {self.path} requires at least one suffix")
+        for suffix in self.suffixes:
+            if (
+                not suffix.startswith("/")
+                or any(c in suffix for c in '\x00\r\n"')
+                or "(?" in suffix
+            ):
+                raise ValueError(
+                    f"WriteRegex suffix {suffix!r} must be a POSIX ERE starting"
+                    " with '/' with no quotes, control lines, or '(?' groups"
+                )
+            re.compile(suffix)
+
+
+BindSpec = Bind | BindOver | Overlay | Seal | PinnedSymlink | WriteRegex
 
 
 @dataclass(frozen=True)

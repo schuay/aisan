@@ -17,6 +17,10 @@ import pytest
 needs_bwrap = pytest.mark.skipif(
     shutil.which("bwrap") is None, reason="bubblewrap not installed"
 )
+needs_seatbelt = pytest.mark.skipif(
+    sys.platform != "darwin" or shutil.which("sandbox-exec") is None,
+    reason="macOS sandbox-exec not available",
+)
 
 _DARWIN_BASETEMP_ROOT: Path | None = None
 

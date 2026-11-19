@@ -66,6 +66,18 @@ class Limits:
     use_cgroup: bool = True
 
 
+KNOWN_MACH_PROFILES = frozenset({"codex-cfprefs"})
+
+
+def _validate_mach_profiles(profiles: tuple[str, ...]) -> None:
+    unknown = [p for p in profiles if p not in KNOWN_MACH_PROFILES]
+    if unknown:
+        raise ValueError(
+            f"unknown mach_profiles {unknown}; expected subset of"
+            f" {sorted(KNOWN_MACH_PROFILES)}"
+        )
+
+
 @dataclass(frozen=True)
 class Grant:
     """Mounts, PATH entries, and environment added by one `--grant NAME`.
@@ -87,12 +99,15 @@ class Grant:
     binds: tuple[BindSpec, ...] = ()
     path: tuple[Path, ...] = ()
     env: tuple[tuple[str, str], ...] = ()
+    allow_local_loopback: bool = False
+    mach_profiles: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # A PATH in `env` would override the entries from `path` instead of
         # prepending them.
         if any(k == "PATH" for k, _ in self.env):
             raise ValueError("a grant names PATH through `path`, not through `env`")
+        _validate_mach_profiles(self.mach_profiles)
 
     def __bool__(self) -> bool:
         """Return whether this grant contributes anything.
@@ -101,7 +116,13 @@ class Grant:
         reports that result instead of building a box missing the requested
         resource.
         """
-        return bool(self.binds or self.path or self.env)
+        return bool(
+            self.binds
+            or self.path
+            or self.env
+            or self.allow_local_loopback
+            or self.mach_profiles
+        )
 
 
 @dataclass(frozen=True)
@@ -142,10 +163,17 @@ class BoxSpec:
     # for payloads whose writes must neither reach the host disk nor outlive the
     # box. Zero binds the host directory. See `Sandbox.root_tmpfs`.
     root_tmpfs: int = 0
+    # On platforms without network namespaces (macOS Seatbelt), permit binding
+    # and connecting to arbitrary localhost TCP ports inside an isolated box.
+    # Needed by harnesses that spawn an ephemeral local server on a random port.
+    allow_local_loopback: bool = False
+    # Named macOS Mach lookup capability sets required by specific runtimes.
+    mach_profiles: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.root_tmpfs < 0:
             raise ValueError(f"root_tmpfs must not be negative: {self.root_tmpfs}")
+        _validate_mach_profiles(self.mach_profiles)
         # Shared networking requires authenticated, kernel-assigned loopback
         # endpoints. A fixed relay port could collide with another box or expose
         # an unauthenticated credential capability on the host.
@@ -250,3 +278,16 @@ class BoxSpec:
         `__post_init__` rejects any port collision introduced by composition.
         """
         return replace(self, egress=(*self.egress, *extra))
+
+    def with_local_loopback(self, enabled: bool = True) -> BoxSpec:
+        """Return this spec with `allow_local_loopback` widened if `enabled`."""
+        if not enabled or self.allow_local_loopback:
+            return self
+        return replace(self, allow_local_loopback=True)
+
+    def with_mach_profiles(self, extra: tuple[str, ...]) -> BoxSpec:
+        """Return this spec with named `extra` Mach profiles added."""
+        if not extra:
+            return self
+        merged = tuple(dict.fromkeys((*self.mach_profiles, *extra)))
+        return replace(self, mach_profiles=merged)

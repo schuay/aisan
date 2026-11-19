@@ -45,9 +45,11 @@ from .policy_tree import (
     MountConflict,
     Op,
     Overlay,
+    PinnedSymlink,
     SandboxBackend,
     Seal,
     SymlinkDestination,
+    WriteRegex,
     check_guards,
     check_surface,
     check_symlink_free,
@@ -73,10 +75,12 @@ __all__ = [
     "MountConflict",
     "Op",
     "Overlay",
+    "PinnedSymlink",
     "Sandbox",
     "SandboxBackend",
     "Seal",
     "SymlinkDestination",
+    "WriteRegex",
     "paths_overlap",
     "system_ro_roots",
     "through_system_symlink",
@@ -260,7 +264,20 @@ class Sandbox:
             out.append(Entry(self.root, Op.TMPFS, fixed=True, size=self.root_tmpfs))
         else:
             out.append(Entry(self.root, Op.RW, self.root, fixed=True))
-        out += [entry_for(spec) for spec in self.binds]
+        for spec in self.binds:
+            match spec:
+                case PinnedSymlink(src=src, dst=dst):
+                    raise ValueError(
+                        f"PinnedSymlink ({src} -> {dst}) is a macOS Seatbelt"
+                        " construct; use BindOver on Linux"
+                    )
+                case WriteRegex(path=p):
+                    raise ValueError(
+                        f"WriteRegex ({p}) is a macOS Seatbelt construct; use"
+                        " Overlay on Linux"
+                    )
+                case _:
+                    out.append(entry_for(spec))
         return out
 
     def tree(self) -> dict[Path, Entry]:

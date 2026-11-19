@@ -261,6 +261,8 @@ class LauncherFlags:
                 spec.with_binds(list(grant.binds))
                 .with_path_prefix(grant.path)
                 .with_env(grant.env)
+                .with_local_loopback(grant.allow_local_loopback)
+                .with_mach_profiles(grant.mach_profiles)
             )
         for user in self.users:
             spec = spec.with_binds(user.binds).with_path_prefix(user.path)
