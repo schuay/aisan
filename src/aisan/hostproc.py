@@ -44,7 +44,9 @@ def neutral_child(env: Mapping[str, str] | None = None) -> Iterator[HostChild]:
     """
     root = prepare_private_dir(host_child_root())
     with tempfile.TemporaryDirectory(prefix="child-", dir=root) as raw_path:
-        path = Path(raw_path)
+        # Resolve root symlinks such as macOS ``/tmp -> /private/tmp`` so ``PWD``
+        # agrees with ``os.getcwd()`` inside the child process.
+        path = Path(raw_path).resolve()
         child_env = dict(os.environ if env is None else env)
         child_env.update(
             {

@@ -6,7 +6,36 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
+import sys
+from pathlib import Path
+
+import pytest
+
+needs_bwrap = pytest.mark.skipif(
+    shutil.which("bwrap") is None, reason="bubblewrap not installed"
+)
+
+_DARWIN_BASETEMP: Path | None = None
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Keep Darwin's ``tmp_path`` short enough for ``AF_UNIX`` sockets.
+
+    macOS sets ``TMPDIR`` to ``/var/folders/...``, which resolves below
+    ``/private/var/folders/...`` and leaves pytest's per-test directories past
+    Darwin's 104-byte ``sun_path`` limit before a socket name is appended.
+    """
+    global _DARWIN_BASETEMP  # noqa: PLW0603
+    if sys.platform == "darwin" and config.option.basetemp is None:
+        _DARWIN_BASETEMP = Path(f"/private/tmp/aisan-pt-{os.getuid()}-{os.getpid()}")
+        config.option.basetemp = str(_DARWIN_BASETEMP)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    if _DARWIN_BASETEMP is not None:
+        shutil.rmtree(_DARWIN_BASETEMP, ignore_errors=True)
 
 
 async def run_boxed(command: str, *, sandbox=None, timeout: float = 60.0) -> str:

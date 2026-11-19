@@ -44,12 +44,19 @@ __all__ = [
     "KeyringCredential",
     "KeyringError",
     "Login",
+    "default_credentials",
     "parse_login",
     "read_keyring",
 ]
 
 # The item as ``secret-tool lookup service gemini username antigravity``.
 KEYRING_ATTRIBUTES = (("service", "gemini"), ("username", "antigravity"))
+
+
+def default_credentials() -> Path:
+    """Return the token-file path agy falls back to when no keyring answers."""
+    return Path.home() / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+
 
 _FIX_LOGIN = "run `agy` on the HOST and sign in with your Google account"
 _FIX_LIBSECRET = (
@@ -199,8 +206,10 @@ def parse_login(secret: str) -> Login:
 class KeyringCredential:
     """The host's Antigravity consumer login."""
 
-    #: The login is in the keyring; no host file needs a mount guard.
-    files: tuple[Path, ...] = ()
+    @property
+    def files(self) -> tuple[Path, ...]:
+        """Host fallback token file to keep out of every box."""
+        return (default_credentials(),)
 
     def __init__(
         self,

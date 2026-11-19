@@ -226,6 +226,31 @@ def test_a_user_bind_may_not_name_a_private_key_store(tmp_path, monkeypatch, sto
         load(f, egress=())
 
 
+def test_a_user_bind_may_not_name_antigravity_fallback_token(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    gemini = home / ".gemini"
+    (gemini / "antigravity-cli").mkdir(parents=True)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+
+    f = _spec_file(tmp_path, f'ro = ["{gemini}"]\n')
+    with pytest.raises(ValueError, match="antigravity-oauth-token"):
+        load(f, egress=())
+
+
+def test_a_darwin_user_bind_may_not_name_keychains(tmp_path, monkeypatch):
+    import sys
+
+    home = tmp_path / "home"
+    lib = home / "Library"
+    (lib / "Keychains").mkdir(parents=True)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    f = _spec_file(tmp_path, f'ro = ["{lib}"]\n')
+    with pytest.raises(ValueError, match="Keychains"):
+        load(f, egress=())
+
+
 def test_egress_is_required_so_the_guard_is_never_off_by_default(tmp_path):
     f = _spec_file(tmp_path, 'ro = ["/a"]\n')
     with pytest.raises(TypeError):

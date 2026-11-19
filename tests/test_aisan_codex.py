@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp import ClientSession, UnixConnector, web
+from conftest import needs_bwrap
 
 from aisan import Box
 from aisan.egress.base import PLACEHOLDER_KEY, PreflightError
@@ -387,6 +388,7 @@ async def _run_in_box(spec, script: str) -> subprocess.CompletedProcess:
         )
 
 
+@needs_bwrap
 async def test_subscription_credential_is_absent_inside_a_real_box(tmp_path):
     upstream, runner = await _upstream_server(_hello)
     worktree = tmp_path / "worktree"
@@ -416,6 +418,7 @@ async def test_subscription_credential_is_absent_inside_a_real_box(tmp_path):
     assert f"client_key={PLACEHOLDER_KEY}" in result.stdout
 
 
+@needs_bwrap
 async def test_box_auth_bind_leaves_only_an_empty_mountpoint(tmp_path):
     upstream, runner = await _upstream_server(_hello)
     worktree = tmp_path / "worktree"

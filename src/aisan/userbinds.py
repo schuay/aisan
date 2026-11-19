@@ -99,6 +99,7 @@ worktree's external Git metadata can add `git_binds`, as demonstrated by
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from dataclasses import dataclass
 from itertools import combinations
@@ -110,15 +111,22 @@ from .sandbox import RO, RW, Bind, BindSpec, Overlay
 
 __all__ = ["UserSpec", "load"]
 
-# Always refuse the host's SSH and GnuPG private-key stores. Neither belongs in
-# an agent box; host-side Git or a purpose-specific deploy key handles pushes.
-# This is intentionally narrower than a general list of sensitive directories.
+# Always refuse the host's SSH and GnuPG private-key stores, plus the macOS
+# Keychain directory on Darwin. None belongs in an agent box; host-side Git or a
+# purpose-specific deploy key handles pushes. This is intentionally narrower
+# than a general list of sensitive directories.
 _REFUSED_KEY_STORES = (".ssh", ".gnupg")
+_DARWIN_KEY_STORES = ("Library/Keychains",)
 
 
 def _refused_key_stores() -> tuple[Path, ...]:
     """Return key-store paths using the current home directory."""
-    return tuple(Path.home() / name for name in _REFUSED_KEY_STORES)
+    names = (
+        (*_REFUSED_KEY_STORES, *_DARWIN_KEY_STORES)
+        if sys.platform == "darwin"
+        else _REFUSED_KEY_STORES
+    )
+    return tuple(Path.home() / name for name in names)
 
 
 # Keys that produce mounts. `path` adds no mount and must be covered by one of

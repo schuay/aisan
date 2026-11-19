@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp import ClientSession, UnixConnector, web
+from conftest import needs_bwrap
 
 from aisan import Box
 from aisan.egress.antigravity import (
@@ -243,6 +244,7 @@ async def test_preflight_reports_an_unreachable_upstream_before_the_credential(
         await backend.preflight()
 
 
+@needs_bwrap
 async def test_a_real_box_reads_the_placeholder_and_reaches_only_the_proxy(tmp_path):
     reached = []
 

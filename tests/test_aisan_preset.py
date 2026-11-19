@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import run_boxed
+from conftest import needs_bwrap, run_boxed
 
 from aisan import Box
 from aisan.gitbinds import external_symlink_targets, git_binds, git_host_files
@@ -500,6 +500,7 @@ def test_only_extra_ro_is_plain_in_a_preset(tmp_path, preset):
     assert all(b.guard for b in flagged if b.path not in extra)
 
 
+@needs_bwrap
 async def test_an_in_box_gc_cannot_destroy_a_sibling_worktrees_objects(tmp_path):
     import dataclasses
 

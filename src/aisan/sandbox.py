@@ -700,8 +700,11 @@ def _mount(e: Entry) -> Mount | None:
     elif e.optional:
         if not _bindable(e.src):
             return None
-    elif not e.src.exists():
-        raise FileNotFoundError(f"bind source missing: {e.src}")
+    else:
+        try:
+            e.src.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            raise FileNotFoundError(f"bind source missing: {e.src}") from None
     return Mount(e.op.value, e.dst, e.src, guard=e.guard)
 
 

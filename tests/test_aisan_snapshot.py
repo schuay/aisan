@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -15,6 +16,11 @@ from aisan import Box
 from aisan.explain import explain, normalise
 from aisan.presets import PRESETS
 from aisan.presets.depot_tools_job import depot_tools_job
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="Linux bwrap mount-order snapshots require a non-symlinked /tmp and journald",
+)
 
 SNAPSHOTS = Path(__file__).parent / "snapshots"
 

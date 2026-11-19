@@ -19,6 +19,7 @@ import pytest
 from aisan import Box, PreflightError
 from aisan import private as private_mod
 from aisan import sandbox as sandbox_mod
+from aisan.egress.base import _SUN_PATH_BYTES as _SUN_PATH_MAX
 from aisan.egress.base import Backend, BackendActivation
 from aisan.hostproc import neutral_child
 from aisan.launch import own_source_root
@@ -44,7 +45,6 @@ from aisan.sandbox import (
 )
 from aisan.spec import BoxSpec, Limits
 
-_SUN_PATH_MAX = 107
 needs_bwrap = pytest.mark.skipif(
     shutil.which("bwrap") is None, reason="bubblewrap not installed"
 )
@@ -139,8 +139,10 @@ def test_a_named_root_that_leaves_no_room_for_a_socket_is_refused(
         _FakeBackend().socket_path(runtime_dir("box"))
 
 
-def test_a_caller_named_backend_cannot_overrun_the_socket_path(tmp_path):
+def test_a_caller_named_backend_cannot_overrun_the_socket_path(monkeypatch):
+    import aisan.private as private_mod
 
+    monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", Path("/tmp/aisan-100000"))
     with pytest.raises(ValueError, match="too long for AF_UNIX"):
         _FakeBackend(name="a" * 64).socket_path(runtime_dir("box"))
 

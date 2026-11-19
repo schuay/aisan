@@ -423,7 +423,9 @@ def test_claude_takes_its_skills_from_the_hosts_own_directory(tmp_path):
     assert claude.user_skills(plain) is None
 
 
-def test_opencode_mounts_user_memory_where_the_box_reads_it(tmp_path):
+def test_opencode_mounts_user_memory_where_the_box_reads_it(tmp_path, monkeypatch):
+    from aisan.sandbox import RO, Bind
+
     opencode = importlib.import_module("aisan.cli.opencode")
     source = tmp_path / "AGENTS.md"
     source.write_text("host memory\n")
@@ -431,6 +433,13 @@ def test_opencode_mounts_user_memory_where_the_box_reads_it(tmp_path):
     (bind,) = opencode.user_memory_bind(source)
     assert bind.src == source
     assert bind.dst == Path.home() / ".config" / "opencode" / "AGENTS.md"
+
+    home = tmp_path / "home"
+    default_source = home / ".config" / "opencode" / "AGENTS.md"
+    default_source.parent.mkdir(parents=True)
+    default_source.write_text("default host memory\n")
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    assert opencode.user_memory_bind(default_source) == [Bind(default_source, RO)]
 
     assert opencode.user_memory_bind(tmp_path / "absent.md") == []
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 
@@ -15,15 +16,19 @@ def known_credential_paths() -> tuple[Path, ...]:
     and client-specific environment variables may change.
     """
     from .anthropic import default_credentials as anthropic_credentials
+    from .antigravity_keyring import default_credentials as antigravity_credentials
     from .openai_compat import default_credentials as openai_compat_credentials
     from .openai_responses import default_credentials as openai_responses_credentials
     from .reapi import LUCI_STORE
     from .vertex import default_credentials as vertex_credentials
 
+    macos = (Path.home() / "Library" / "Keychains",) if sys.platform == "darwin" else ()
     return (
         anthropic_credentials(),
+        antigravity_credentials(),
         openai_compat_credentials(),
         openai_responses_credentials(),
         *vertex_credentials(),
         LUCI_STORE,
+        *macos,
     )

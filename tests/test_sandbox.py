@@ -144,7 +144,8 @@ def test_unreachable_optional_binds_skipped(profile, monkeypatch):
 
     def fake_stat(self, *a, **kw):
         if self == gated:
-            raise OSError(errno.ENOKEY, "Required key not available", str(self))
+            code = getattr(errno, "ENOKEY", errno.EIO)
+            raise OSError(code, "Required key not available", str(self))
         return real_stat(self, *a, **kw)
 
     monkeypatch.setattr(Path, "stat", fake_stat)
@@ -170,7 +171,8 @@ def test_unreachable_mandatory_bind_still_raises(profile, monkeypatch):
 
     def fake_stat(self, *a, **kw):
         if self == guard:
-            raise OSError(errno.ENOKEY, "Required key not available", str(self))
+            code = getattr(errno, "ENOKEY", errno.EIO)
+            raise OSError(code, "Required key not available", str(self))
         return real_stat(self, *a, **kw)
 
     monkeypatch.setattr(Path, "stat", fake_stat)

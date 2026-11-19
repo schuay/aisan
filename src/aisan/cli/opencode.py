@@ -30,7 +30,7 @@ from aisan.egress.openai_compat import DEFAULT_CATALOG, OpenAICompatBackend
 from aisan.opencode_config import config_file, read_config, select_model
 from aisan.opencode_provider import resolve_provider
 from aisan.presets.opencode import opencode, opencode_binary
-from aisan.sandbox import BindOver, BindSpec
+from aisan.sandbox import RO, Bind, BindOver, BindSpec
 from aisan.session import (
     LaunchRefused,
     git_config_binds,
@@ -57,12 +57,15 @@ def user_memory_bind(source: Path) -> list[BindSpec]:
     """Bind host instructions at the default path used inside the box.
 
     The host source honors ``XDG_CONFIG_HOME``. The box leaves that variable
-    unset to preserve Git config lookup, so use ``BindOver`` when the source
-    exists.
+    unset to preserve Git config lookup, so use ``BindOver`` only when the
+    source differs from the default destination.
     """
     if not source.exists():
         return []
-    return [BindOver(source, Path.home() / ".config" / "opencode" / "AGENTS.md")]
+    dst = Path.home() / ".config" / "opencode" / "AGENTS.md"
+    if source.resolve() == dst.resolve():
+        return [Bind(source, RO)]
+    return [BindOver(source, dst)]
 
 
 def parse_args(argv: list[str]):
@@ -156,8 +159,8 @@ async def _main(argv: list[str]) -> int:
     )
     # Bind the XDG-aware Git config file without its credential directory.
     spec = spec.with_binds(git_config_binds())
-    # A user bind file cannot replace this: a bind-over is a guard, and a user
-    # entry at the same path is refused as a conflict.
+    # A user bind file cannot make this writable: the stricter read-only mode
+    # wins at the default path, and a bind-over conflicts with a user entry.
     spec = spec.with_binds(user_memory_bind(USER_MEMORY))
     return await run_interactive(
         client="opencode",

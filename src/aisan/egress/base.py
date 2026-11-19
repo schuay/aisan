@@ -19,6 +19,7 @@ from __future__ import annotations
 import abc
 import re
 import secrets
+import sys
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -48,8 +49,9 @@ SHARED_PORT_MARKER = "(assigned at launch)"
 SHARED_TOKEN_MARKER = "<per-box proxy token>"  # noqa: S105 - descriptive marker
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
-# Linux allows 107 path bytes plus the terminating NUL in ``sun_path``.
-_SUN_PATH_BYTES = 107
+# ``sockaddr_un.sun_path`` holds 104 bytes on Darwin and 108 on Linux,
+# including the terminating NUL.
+_SUN_PATH_BYTES = 103 if sys.platform == "darwin" else 107
 
 
 @dataclass(frozen=True)

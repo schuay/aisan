@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp import ClientSession, UnixConnector, web
+from conftest import needs_bwrap
 
 from aisan import Box
 from aisan.egress.base import PLACEHOLDER_KEY, PreflightError
@@ -468,6 +469,7 @@ async def _run_in_box(spec, script: str) -> subprocess.CompletedProcess:
         )
 
 
+@needs_bwrap
 @pytest.mark.skipif(
     not DEFAULT_CREDENTIALS.exists(), reason="no host credential, so nothing to hide"
 )
@@ -490,6 +492,7 @@ async def test_the_credential_is_not_in_the_box(tmp_path):
     assert "share_exists=False" in r.stdout, r.stdout
 
 
+@needs_bwrap
 async def test_the_box_reaches_the_model_only_through_the_relay(tmp_path):
 
     async def upstream(request: web.Request) -> web.Response:
