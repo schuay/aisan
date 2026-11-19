@@ -5,8 +5,8 @@
 
 Host agy keeps its Google login in the Secret Service keyring and is the only
 writer of that item; this module reads it. agy 1.5.11 refreshes the access
-token only when it runs within about ten seconds of the expiry or after it,
-so aisan cannot refresh early. Once a token enters that window, aisan runs
+token only when it runs within about a minute of the expiry or after it, so
+aisan cannot refresh early. Once a token enters that window, aisan runs
 host agy against a loopback sink in place of Cloud Code and reads the item
 again. The sink answers 404, so no account or model call leaves the host.
 
@@ -58,9 +58,9 @@ _FIX_LIBSECRET = (
 )
 _FIX_LOCKED = "unlock the login keyring on the HOST, then retry"
 
-# agy refreshed a token with 10.8 s left and left one with 18 min alone. Below
+# agy refreshed a token with 60 s left and left one with 18 min alone. Below
 # this lifetime a request waits for host agy; above it the token is used as is.
-_CLIENT_WINDOW_S = 10.0
+_CLIENT_WINDOW_S = 30.0
 _REFRESH_TIMEOUT_S = 30
 _READ_TIMEOUT_S = 10
 _STDERR_TAIL = 800
