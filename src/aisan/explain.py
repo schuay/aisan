@@ -225,11 +225,11 @@ def explain(
     wrapper = box.wrapper()
     prof = parse_wrapper(wrapper, sandbox)
     isolated = box.spec.unshare_net
-    shared_egress = bool(box.spec.egress) and not isolated
+    shared_backends = [b for b in box.spec.egress if box._uses_shared_tcp(b)]
+    shared_egress = bool(shared_backends)
     effective_env = dict(prof.env)
-    if shared_egress:
-        for backend in box.spec.egress:
-            effective_env.update(backend.shared_client_env_description())
+    for backend in shared_backends:
+        effective_env.update(backend.shared_client_env_description())
     home = effective_env.get("HOME", "")
 
     section("inputs")
@@ -246,11 +246,13 @@ def explain(
 
     if not shared_egress:
         section("egress backends (host half on a socket, in-box on loopback)")
-    else:
+    elif len(shared_backends) == len(box.spec.egress):
         section("egress backends (authenticated host-loopback TCP)")
+    else:
+        section("egress backends (authenticated host-loopback TCP + Unix sockets)")
     if box.spec.egress:
         for backend in box.spec.egress:
-            if not shared_egress:
+            if not box._uses_shared_tcp(backend):
                 sock = backend.socket_path(box.runtime_dir)
                 out.write(f"  {backend.name:<8} 127.0.0.1:{backend.port} -> {sock}\n")
             else:

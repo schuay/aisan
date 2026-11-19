@@ -77,7 +77,7 @@ def git_config_binds() -> list[BindSpec]:
         return []
     box_dst = Path.home() / ".config" / "git" / "config"
     if host.resolve() == box_dst.resolve():
-        return [Bind(host, RO)]
+        return [Bind(box_dst, RO)]
     return [BindOver(host, box_dst)]
 
 

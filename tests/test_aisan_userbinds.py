@@ -247,7 +247,7 @@ def test_a_darwin_user_bind_may_not_name_keychains(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
 
     f = _spec_file(tmp_path, f'ro = ["{lib}"]\n')
-    with pytest.raises(ValueError, match="Keychains"):
+    with pytest.raises(ValueError, match=r"private key store.*Keychains"):
         load(f, egress=())
 
 

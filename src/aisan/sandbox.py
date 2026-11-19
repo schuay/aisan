@@ -48,7 +48,6 @@ from .policy_tree import (
     SandboxBackend,
     Seal,
     SymlinkDestination,
-    bindable,
     check_guards,
     check_surface,
     check_symlink_free,
@@ -57,7 +56,6 @@ from .policy_tree import (
     merge_entries,
     mount_for,
     paths_overlap,
-    reachable_through,
 )
 
 __all__ = [
@@ -199,11 +197,6 @@ def _system_mounts() -> list[Mount]:
     return mounts if journal is None else [*mounts, journal]
 
 
-# Preserve underscore aliases for internal callers and direct unit tests.
-_bindable = bindable
-_reachable_through = reachable_through
-
-
 @dataclass(frozen=True)
 class Sandbox:
     """An immutable Linux bubblewrap confinement profile for one job.
@@ -320,7 +313,13 @@ class Sandbox:
         *,
         allowed_sources: Iterable[Path] = (),
     ) -> tuple[Path, Path] | None:
-        """Return the first protected path left readable through a mount source."""
+        """Return the first protected path left readable through a mount source.
+
+        Evaluate the resolved mounts after the fixed system surface because that
+        ordered result determines whether the payload can read a path. Checking
+        only the requested bind list misses implicit mounts (such as `/usr`
+        when home lives under `/usr/local`) and later masks.
+        """
         paths = tuple(paths)
         if not paths:
             return None
@@ -331,7 +330,13 @@ class Sandbox:
         return [*_system_mounts(), *self.resolve()]
 
     def sealed_exposure(self) -> tuple[Path, Path] | None:
-        """Return the first mount source republishing a sealed directory."""
+        """Return the first mount source republishing a sealed directory.
+
+        A `Seal` empties one destination; any other mount whose source resolves
+        into the sealed host directory publishes the same data under a second
+        name. Each seal carries its own `allow` hole list, so each receives its
+        own pass over the shared mount list.
+        """
         seals = [b for b in self.binds if isinstance(b, Seal)]
         if not seals:
             return None

@@ -441,6 +441,10 @@ def test_opencode_mounts_user_memory_where_the_box_reads_it(tmp_path, monkeypatc
     monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
     assert opencode.user_memory_bind(default_source) == [Bind(default_source, RO)]
 
+    alias = tmp_path / "alias-AGENTS.md"
+    alias.symlink_to(default_source)
+    assert opencode.user_memory_bind(alias) == [Bind(default_source, RO)]
+
     assert opencode.user_memory_bind(tmp_path / "absent.md") == []
 
 

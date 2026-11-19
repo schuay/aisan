@@ -140,8 +140,6 @@ def test_a_named_root_that_leaves_no_room_for_a_socket_is_refused(
 
 
 def test_a_caller_named_backend_cannot_overrun_the_socket_path(monkeypatch):
-    import aisan.private as private_mod
-
     monkeypatch.setattr(private_mod, "_PRIVATE_ROOT", Path("/tmp/aisan-100000"))
     with pytest.raises(ValueError, match="too long for AF_UNIX"):
         _FakeBackend(name="a" * 64).socket_path(runtime_dir("box"))
@@ -1092,3 +1090,25 @@ def test_darwin_box_refuses_backend_requiring_netns(tmp_path):
     )
     with pytest.raises(ValueError, match="require a network namespace"):
         box.wrapper()
+
+
+async def test_darwin_direct_unix_only_box_needs_no_launcher(tmp_path):
+    class _DirectOnly(_FakeBackend):
+        supports_direct_unix_socket = True
+
+    direct = _DirectOnly(name="direct", port=8812)
+    box = Box(
+        _spec(tmp_path, egress=(direct,), unshare_net=True),
+        box_id=str(tmp_path / "darwin-direct"),
+        platform="darwin",
+    )
+    async with box:
+        assert direct.order == ["preflight", "prepare", "serve"]
+        assert box.launch_prefix() == []
+        assert not (box.runtime_dir / MANIFEST_NAME).exists()
+        assert not (box.runtime_dir / CLIENT_ENV_NAME).exists()
+
+
+def test_box_rejects_unknown_platform(tmp_path):
+    with pytest.raises(ValueError, match="unsupported box platform"):
+        Box(_spec(tmp_path), box_id="bad-platform", platform="macos")

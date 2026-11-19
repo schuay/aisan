@@ -64,7 +64,7 @@ def user_memory_bind(source: Path) -> list[BindSpec]:
         return []
     dst = Path.home() / ".config" / "opencode" / "AGENTS.md"
     if source.resolve() == dst.resolve():
-        return [Bind(source, RO)]
+        return [Bind(dst, RO)]
     return [BindOver(source, dst)]
 
 

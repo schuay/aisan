@@ -80,6 +80,9 @@ def _undo_host_paths(files: tuple[Path, ...], dirs: tuple[Path, ...]) -> None:
             d.rmdir()
 
 
+_PLATFORMS = frozenset({"linux", "darwin"})
+
+
 def _default_platform() -> str:
     """Return the active confinement platform identifier."""
     return "linux"
@@ -99,9 +102,15 @@ class Box:
         box_id: str,
         platform: str | None = None,
     ) -> None:
+        resolved = _default_platform() if platform is None else platform
+        if resolved not in _PLATFORMS:
+            raise ValueError(
+                f"unsupported box platform {resolved!r}; expected one of"
+                f" {sorted(_PLATFORMS)}"
+            )
         self.spec = spec
         self.box_id = box_id
-        self.platform = _default_platform() if platform is None else platform
+        self.platform = resolved
         self.runtime_dir = runtime_dir(box_id)
         self._stack: AsyncExitStack | None = None
         self._activations: dict[Backend, BackendActivation] = {}
@@ -135,6 +144,11 @@ class Box:
             self.platform != "darwin"
             and bool(self.spec.egress)
             and self.spec.unshare_net
+        )
+
+    def _needs_launcher(self) -> bool:
+        return self._needs_relays() or any(
+            self._uses_shared_tcp(b) for b in self.spec.egress
         )
 
     def _activated_endpoints(
@@ -314,7 +328,23 @@ class Box:
         return env
 
     def _sandbox(self) -> SandboxBackend:
-        """Combine the spec with runtime mounts and return a resolvable sandbox."""
+        """Combine the spec with runtime mounts and return a resolvable sandbox.
+
+        A box adds four kinds of mounts whose paths depend on runtime identity:
+
+        * aisan's interpreter and source runtime, read-only unless the spec
+          already grants the path writable;
+        * a seal over the private host root, hiding credential children and
+          other boxes' runtime capabilities;
+        * this box's runtime directory, read-only, for relay sockets or shared
+          client state;
+        * backend-specific mounts sourced from that directory.
+
+        The seal, the runtime directory, and the backend mounts are guards, so
+        the spec cannot mount anything at or below them; the sandbox refuses the
+        profile instead. Launcher mounts are omitted when an explicit writable
+        grant already provides the path, preserving that grant.
+        """
         self._validate_platform_egress()
         # Keep this import off the package initialization path. `python -m`
         # otherwise finds `launch` already imported, warns, and re-executes it.
@@ -420,10 +450,10 @@ class Box:
     def launch_prefix(self) -> list[str]:
         """Return the launcher argv prefix for the selected egress transport.
 
-        A box without backends needs neither relays nor protected client state,
-        so it can launch the payload directly.
+        A box without relays or protected shared client state can launch the
+        payload directly.
         """
-        if not self.spec.egress:
+        if not self._needs_launcher():
             return []
         from .launch import launch_prefix
 

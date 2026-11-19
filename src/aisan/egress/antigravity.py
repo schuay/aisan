@@ -59,7 +59,7 @@ _BOX_TOKEN_NAME = "antigravity-oauth-token"  # noqa: S105 -- a file name
 class Credential(Protocol):
     """A host login the proxy presents upstream."""
 
-    #: Host paths holding the login, for mount guards. Empty for a keyring.
+    #: Host paths holding the login or its fallback store, for mount guards.
     files: tuple[Path, ...]
 
     async def token(self) -> str:

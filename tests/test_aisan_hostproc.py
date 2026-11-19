@@ -28,7 +28,7 @@ def test_host_child_ignores_ambient_tmpdir_and_normalizes_paths(tmp_path, monkey
         "INIT_CWD": "/agent/init",
     }
     with hostproc.neutral_child(original) as child:
-        assert child.cwd.parent == private_mod.host_child_root()
+        assert child.cwd.parent == private_mod.host_child_root().resolve()
         assert child.cwd.is_dir()
         assert not child.cwd.is_relative_to(hostile_tmp)
         assert child.env["KEEP"] == "yes"

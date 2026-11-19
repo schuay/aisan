@@ -91,8 +91,9 @@ class Backend(abc.ABC):
         """Return this backend's socket path in the runtime directory.
 
         Deriving the filename from the validated backend name keeps the service
-        and manifest aligned. Check the full encoded path against Linux's UNIX
-        socket limit after combining the configurable root and backend name.
+        and manifest aligned. Check the full encoded path against the platform's
+        ``AF_UNIX`` ``sun_path`` limit after combining the configurable root and
+        backend name.
         """
         if not isinstance(self.name, str) or _NAME_RE.fullmatch(self.name) is None:
             raise ValueError(

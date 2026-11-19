@@ -273,14 +273,6 @@ def _load(
         if (src := getattr(spec, "path", None) or getattr(spec, "src", None))
         is not None
     ]
-    other = credential_overlap(sources, known_credential_paths())
-    if other is not None:
-        src, cred = other
-        raise ValueError(
-            f"{path}: {src} would expose the credential at {cred} -- it belongs"
-            " to a backend this box does not carry, but a box that can read it"
-            " can use it"
-        )
     keys = credential_overlap(sources, _refused_key_stores())
     if keys is not None:
         src, store = keys
@@ -288,6 +280,14 @@ def _load(
             f"{path}: {src} would expose the private key store at {store} --"
             " a user bind may not name it, nor anything containing it or"
             " inside it"
+        )
+    other = credential_overlap(sources, known_credential_paths())
+    if other is not None:
+        src, cred = other
+        raise ValueError(
+            f"{path}: {src} would expose the credential at {cred} -- it belongs"
+            " to a backend this box does not carry, but a box that can read it"
+            " can use it"
         )
     return UserSpec(binds, tuple(dirs), servers)
 
