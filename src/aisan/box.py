@@ -35,7 +35,7 @@ from .runtime import (
     write_client_env,
     write_manifest,
 )
-from .sandbox import RO, RW, Bind, Mount, Sandbox, Seal
+from .sandbox import RO, RW, Bind, Mount, Sandbox, SandboxBackend, Seal
 from .spec import BoxSpec
 
 
@@ -252,7 +252,7 @@ class Box:
                 env.update(backend.client_env())
         return env
 
-    def _sandbox(self) -> Sandbox:
+    def _sandbox(self) -> SandboxBackend:
         """Combine the spec with runtime mounts and return a resolvable sandbox.
 
         A box adds four kinds of mounts whose paths depend on runtime identity:
@@ -353,10 +353,13 @@ class Box:
 
     def mounts(self) -> list[Mount]:
         """The resolved mount list, in the order bwrap will apply it."""
-        return self._sandbox().resolve()
+        sandbox = self._sandbox()
+        if not isinstance(sandbox, Sandbox):
+            raise TypeError("resolved mount lists belong to the bwrap backend")
+        return sandbox.resolve()
 
     def wrapper(self) -> list[str]:
-        """Return the systemd and bwrap argv prefix for a payload.
+        """Return the confinement wrapper argv prefix for a payload.
 
         When egress is configured, verify that the optional runtime-directory
         bind survived resolution. Calling this outside the lifecycle, before
@@ -364,14 +367,11 @@ class Box:
         the launcher without sockets or shared client state.
         """
         sandbox = self._sandbox()
-        if self.spec.egress and not any(
-            m.dst == self.runtime_dir and m.op == "ro" for m in sandbox.resolve()
-        ):
-            raise ValueError(
-                f"box {self.box_id}: spec has egress backends but does not bind"
-                f" the runtime dir {self.runtime_dir} ro -- the launcher would"
-                " have no egress control data"
-            )
+        if self.spec.egress:
+            try:
+                sandbox.assert_runtime_visible(self.runtime_dir)
+            except ValueError as e:
+                raise ValueError(f"box {self.box_id}: {e}") from e
         return sandbox.wrapper()
 
     def launch_prefix(self) -> list[str]:
