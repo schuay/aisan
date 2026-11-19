@@ -5,8 +5,8 @@
 
 Provider modules own request policy, credentials, upstream behavior, and error
 envelopes. This module owns only the mechanics they share: request-size and rate
-limits, unambiguous body parsing, constant-time token primitives, and UNIX/TCP
-server lifecycle.
+limits, unambiguous body parsing, constant-time token primitives, relaying an
+upstream response, and UNIX/TCP server lifecycle.
 """
 
 from __future__ import annotations
@@ -17,10 +17,11 @@ import logging
 import secrets
 import socket
 import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from aiohttp import web
+from aiohttp import ClientError, ClientResponse, ClientSession, web
 
 # Allow large prompts and histories while limiting bulk exfiltration.
 MAX_BODY_BYTES = 32 << 20
@@ -112,6 +113,99 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 def is_redirect(status: int) -> bool:
     return status in _REDIRECT_STATUSES
+
+
+async def read_capped_body(request: web.Request) -> bytes | None:
+    """Return the request body, or ``None`` if it exceeds ``MAX_BODY_BYTES``.
+
+    aiohttp decodes chunked framing. Applications set ``client_max_size`` one
+    byte above the limit, so a body at the limit plus one reaches the length
+    check.
+    """
+    try:
+        body = await request.read()
+    except web.HTTPRequestEntityTooLarge:
+        return None
+    return body if len(body) <= MAX_BODY_BYTES else None
+
+
+# Build a refusal in the caller's error envelope from a status and message.
+Refusal = Callable[[int, str], web.StreamResponse]
+# Answer from a received upstream response instead of streaming it, or return
+# ``None`` to stream it unchanged.
+Responder = Callable[[ClientResponse], Awaitable[web.StreamResponse | None]]
+
+# Forward chunks incrementally so streamed responses aren't buffered in full.
+_CHUNK = 64 << 10
+
+
+async def forward(
+    request: web.Request,
+    session: ClientSession,
+    *,
+    url: str,
+    body: bytes,
+    headers: Mapping[str, str] | Sequence[tuple[str, str]],
+    refuse: Refusal,
+    logger: logging.Logger,
+    label: str,
+    origin: str,
+    failure_detail: bool = False,
+    respond: Responder | None = None,
+) -> web.StreamResponse:
+    """Send a checked request upstream and relay the response to the box.
+
+    Redirects are refused with 502 rather than followed. ``label`` prefixes log
+    lines and ``origin`` names the upstream in them. ``failure_detail`` adds
+    the client exception text to the log and refusal; leave it off for
+    user-configured upstreams, whose URLs may appear in that text.
+    """
+    try:
+        async with session.request(
+            request.method,
+            url,
+            data=body or None,
+            headers=headers,
+            allow_redirects=False,
+        ) as up:
+            if is_redirect(up.status):
+                logger.warning(
+                    "%s proxy: upstream %s answered %d, not followed",
+                    label,
+                    origin,
+                    up.status,
+                )
+                return refuse(
+                    502, "sandbox proxy does not follow redirects from its upstream"
+                )
+            if respond is not None:
+                answered = await respond(up)
+                if answered is not None:
+                    return answered
+            resp = web.StreamResponse(
+                status=up.status, headers=relayed_response_headers(up.headers)
+            )
+            try:
+                # ``prepare`` also writes and can fail if the box disconnects
+                # while the upstream is still working.
+                await resp.prepare(request)
+                async for chunk in up.content.iter_chunked(_CHUNK):
+                    await resp.write(chunk)
+                await resp.write_eof()
+            except (ConnectionResetError, BrokenPipeError) as e:
+                # The agent exited or cancelled its turn; this is not an
+                # upstream failure.
+                logger.debug("%s proxy: downstream closed: %s", label, type(e).__name__)
+            return resp
+    except ClientError as e:
+        # A readable error, not a disconnected transport the client retries.
+        if failure_detail:
+            logger.warning("%s proxy: upstream %s unreachable: %s", label, origin, e)
+            return refuse(502, f"sandbox proxy cannot reach its upstream: {e}")
+        logger.warning(
+            "%s proxy: upstream %s unreachable: %s", label, origin, type(e).__name__
+        )
+        return refuse(502, "sandbox proxy cannot reach its upstream")
 
 
 def request_path(request) -> str:

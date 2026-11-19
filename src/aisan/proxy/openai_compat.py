@@ -34,7 +34,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
-from aiohttp import ClientError, ClientSession, ClientTimeout, web
+from aiohttp import ClientResponse, ClientSession, ClientTimeout, web
 
 from ..upstream import DIRECT, Transport, upstream_origin, validate_upstream
 from .http import (
@@ -42,10 +42,10 @@ from .http import (
     LogGate,
     RateLimit,
     bearer_token,
-    is_redirect,
+    forward,
     load_json_unambiguous,
     quoted_names,
-    relayed_response_headers,
+    read_capped_body,
     request_path,
     serve,
     token_matches,
@@ -59,7 +59,6 @@ __all__ = ["BodyPolicy", "PathAllowlist", "make_app", "serve"]
 
 _SESSION: web.AppKey[ClientSession] = web.AppKey("session")
 
-_CHUNK = 64 << 10
 _TIMEOUT = ClientTimeout(total=None, sock_read=600, sock_connect=30)
 
 # OpenCode 1.18.18 used this route for turns and title generation. Exact matching
@@ -283,6 +282,26 @@ AuthorizationSource = Callable[[], Awaitable[dict[str, str]]]
 ResponseTransform = Callable[[bytes, Mapping[str, str]], bytes]
 
 
+async def _transformed(
+    up: ClientResponse,
+    transform: ResponseTransform,
+    authorization_headers: Mapping[str, str],
+) -> web.StreamResponse:
+    """Buffer a successful upstream response and answer with its transform."""
+    if up.status != 200:
+        status = up.status if up.status >= 400 else 502
+        return _error(status, "api_error", "upstream account request failed")
+    response_body = await up.content.read(MAX_BODY_BYTES + 1)
+    if len(response_body) > MAX_BODY_BYTES:
+        return _error(502, "api_error", "upstream response too large")
+    try:
+        filtered = transform(response_body, authorization_headers)
+    except (TypeError, ValueError) as e:
+        log.warning("openai-compat proxy: invalid upstream response: %s", e)
+        return _error(502, "api_error", "invalid upstream response")
+    return web.Response(body=filtered, content_type="application/json")
+
+
 def make_app(
     *,
     token: TokenSource | None = None,
@@ -327,11 +346,8 @@ def make_app(
             )
         if not limiter.allow():
             return _error(429, "rate_limit_error", "sandbox proxy rate limit exceeded")
-        try:
-            body = await request.read()
-        except web.HTTPRequestEntityTooLarge:
-            return _error(413, "invalid_request_error", "request body too large")
-        if len(body) > MAX_BODY_BYTES:
+        body = await read_capped_body(request)
+        if body is None:
             return _error(413, "invalid_request_error", "request body too large")
 
         route = (request.method.upper(), path)
@@ -380,70 +396,25 @@ def make_app(
             }
         )
 
-        session = request.app[_SESSION]
-        url = (upstream_urls or {}).get(route, f"{base}{request.path_qs}")
-        try:
-            async with session.request(
-                request.method,
-                url,
-                data=body or None,
-                headers=upstream_headers,
-                allow_redirects=False,
-            ) as up:
-                if is_redirect(up.status):
-                    log.warning(
-                        "openai-compat proxy: upstream %s answered %d, not followed",
-                        origin,
-                        up.status,
-                    )
-                    return _error(
-                        502,
-                        "api_error",
-                        "sandbox proxy does not follow redirects from its upstream",
-                    )
-                transform = (response_transforms or {}).get(route)
-                if transform is not None and up.status != 200:
-                    status = up.status if up.status >= 400 else 502
-                    return _error(
-                        status, "api_error", "upstream account request failed"
-                    )
-                if transform is not None:
-                    response_body = await up.content.read(MAX_BODY_BYTES + 1)
-                    if len(response_body) > MAX_BODY_BYTES:
-                        return _error(502, "api_error", "upstream response too large")
-                    try:
-                        filtered = transform(response_body, authorization_headers)
-                    except (TypeError, ValueError) as e:
-                        log.warning(
-                            "openai-compat proxy: invalid upstream response: %s", e
-                        )
-                        return _error(502, "api_error", "invalid upstream response")
-                    return web.Response(body=filtered, content_type="application/json")
-                resp = web.StreamResponse(
-                    status=up.status, headers=relayed_response_headers(up.headers)
-                )
-                try:
-                    # ``prepare`` can fail if the box disconnects while the
-                    # upstream is still working.
-                    await resp.prepare(request)
-                    async for chunk in up.content.iter_chunked(_CHUNK):
-                        await resp.write(chunk)
-                    await resp.write_eof()
-                except (ConnectionResetError, BrokenPipeError) as e:
-                    # Catch failures from headers and body writes so a downstream
-                    # disconnect isn't reported as an upstream failure.
-                    log.debug(
-                        "openai-compat proxy: downstream closed: %s", type(e).__name__
-                    )
-                return resp
-        except ClientError as e:
-            # Return a readable failure instead of a retryable disconnect.
-            log.warning(
-                "openai-compat proxy: upstream %s unreachable: %s",
-                origin,
-                type(e).__name__,
-            )
-            return _error(502, "api_error", "sandbox proxy cannot reach its upstream")
+        transform = (response_transforms or {}).get(route)
+        # Provider URLs come from host configuration, so failures name only the
+        # origin and the exception type.
+        return await forward(
+            request,
+            request.app[_SESSION],
+            url=(upstream_urls or {}).get(route, f"{base}{request.path_qs}"),
+            body=body,
+            headers=upstream_headers,
+            refuse=lambda status, message: _error(status, "api_error", message),
+            logger=log,
+            label="openai-compat",
+            origin=origin,
+            respond=(
+                None
+                if transform is None
+                else lambda up: _transformed(up, transform, authorization_headers)
+            ),
+        )
 
     app = web.Application(client_max_size=MAX_BODY_BYTES + 1)
     app.router.add_route("*", "/{tail:.*}", handle)

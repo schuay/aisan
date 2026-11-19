@@ -29,7 +29,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from aiohttp import ClientError, ClientSession, ClientTimeout, web
+from aiohttp import ClientSession, ClientTimeout, web
 
 from ..upstream import DIRECT, Transport
 
@@ -43,9 +43,9 @@ from .http import (
     AmbiguousBody,
     LogGate,
     RateLimit,
-    is_redirect,
+    forward,
     load_json_unambiguous,
-    relayed_response_headers,
+    read_capped_body,
     request_path,
     run_forever,
     serve,
@@ -80,9 +80,6 @@ def _upstream(location: str) -> str:
     )
     return f"https://{host}"
 
-
-# Forward chunks incrementally so streamed responses aren't buffered in full.
-_CHUNK = 64 << 10
 
 _TIMEOUT = ClientTimeout(total=None, sock_read=600, sock_connect=30)
 
@@ -327,11 +324,8 @@ def make_app(
             )
         if not limiter.allow():
             return _error(429, "sandbox proxy rate limit exceeded", streaming=streaming)
-        try:
-            body = await request.read()
-        except web.HTTPRequestEntityTooLarge:
-            return _error(413, "request body too large", streaming=streaming)
-        if len(body) > MAX_BODY_BYTES:
+        body = await read_capped_body(request)
+        if body is None:
             return _error(413, "request body too large", streaming=streaming)
 
         # Check body policy before reading the credential. Convert policy and
@@ -351,49 +345,18 @@ def make_app(
         }
         if session_header:
             headers[session_header] = vertex_session
-        session = request.app[_SESSION]
-        url = f"{upstream}{request.path_qs}"
-        try:
-            async with session.request(
-                request.method,
-                url,
-                data=body or None,
-                headers=headers,
-                allow_redirects=False,
-            ) as up:
-                if is_redirect(up.status):
-                    log.warning(
-                        "vertex proxy: upstream %s answered %d, not followed",
-                        upstream,
-                        up.status,
-                    )
-                    return _error(
-                        502,
-                        "sandbox proxy does not follow redirects from its upstream",
-                        streaming=streaming,
-                    )
-                out = web.StreamResponse(
-                    status=up.status, headers=relayed_response_headers(up.headers)
-                )
-                try:
-                    # ``prepare`` can fail if the box disconnects while the
-                    # upstream is still working.
-                    await out.prepare(request)
-                    async for chunk in up.content.iter_chunked(_CHUNK):
-                        await out.write(chunk)
-                    await out.write_eof()
-                except (ConnectionResetError, BrokenPipeError) as e:
-                    # Don't report a downstream disconnect as an upstream error.
-                    log.debug("vertex proxy: downstream closed: %s", type(e).__name__)
-                return out
-        except ClientError as e:
-            # Return a readable failure instead of a retryable disconnect.
-            log.warning("vertex proxy: upstream %s unreachable: %s", upstream, e)
-            return _error(
-                502,
-                f"sandbox proxy cannot reach its upstream: {e}",
-                streaming=streaming,
-            )
+        return await forward(
+            request,
+            request.app[_SESSION],
+            url=f"{upstream}{request.path_qs}",
+            body=body,
+            headers=headers,
+            refuse=lambda status, message: _error(status, message, streaming=streaming),
+            logger=log,
+            label="vertex",
+            origin=upstream,
+            failure_detail=True,
+        )
 
     app = web.Application(client_max_size=MAX_BODY_BYTES + 1)
     app.router.add_route("*", "/{tail:.*}", handle)

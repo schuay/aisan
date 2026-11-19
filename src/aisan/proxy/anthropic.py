@@ -40,7 +40,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from aiohttp import ClientError, ClientSession, ClientTimeout, web
+from aiohttp import ClientSession, ClientTimeout, web
 
 from ..upstream import DIRECT, Transport
 from .http import (
@@ -49,10 +49,10 @@ from .http import (
     LogGate,
     RateLimit,
     bearer_token,
-    is_redirect,
+    forward,
     load_json_unambiguous,
     quoted_names,
-    relayed_response_headers,
+    read_capped_body,
     request_path,
     serve,
     token_matches,
@@ -66,7 +66,6 @@ __all__ = ["BodyPolicy", "HeaderAllowlist", "PathAllowlist", "make_app", "serve"
 
 _SESSION: web.AppKey[ClientSession] = web.AppKey("session")
 
-_CHUNK = 64 << 10
 _TIMEOUT = ClientTimeout(total=None, sock_read=600, sock_connect=30)
 
 # Store lowercase names because frozenset membership is case-sensitive.
@@ -477,11 +476,8 @@ def make_app(
             )
         if not limiter.allow():
             return _error(429, "rate_limit_error", "sandbox proxy rate limit exceeded")
-        try:
-            body = await request.read()
-        except web.HTTPRequestEntityTooLarge:
-            return _error(413, "request_too_large", "request body too large")
-        if len(body) > MAX_BODY_BYTES:
+        body = await read_capped_body(request)
+        if body is None:
             return _error(413, "request_too_large", "request body too large")
 
         # Check the body before reading the credential. ``count_tokens`` uses the
@@ -520,52 +516,20 @@ def make_app(
             ):
                 out.append((name, value))
 
-        session = request.app[_SESSION]
-        url = f"{base}{request.path_qs}"
-        try:
-            async with session.request(
-                request.method,
-                url,
-                data=body or None,
-                headers=out,
-                allow_redirects=False,
-            ) as up:
-                if is_redirect(up.status):
-                    log.warning(
-                        "anthropic proxy: upstream %s answered %d, not followed",
-                        base,
-                        up.status,
-                    )
-                    return _error(
-                        502,
-                        "api_error",
-                        "sandbox proxy does not follow redirects from its upstream",
-                    )
-                resp = web.StreamResponse(
-                    status=up.status, headers=relayed_response_headers(up.headers)
-                )
-                try:
-                    # ``prepare`` also writes and can fail if the box disconnects
-                    # while the upstream is still working.
-                    await resp.prepare(request)
-                    async for chunk in up.content.iter_chunked(_CHUNK):
-                        await resp.write(chunk)
-                    await resp.write_eof()
-                except (ConnectionResetError, BrokenPipeError) as e:
-                    # The agent exited or cancelled its turn. Catch failures from
-                    # both ``prepare`` and body writes so a downstream disconnect
-                    # isn't reported as an upstream failure.
-                    log.debug(
-                        "anthropic proxy: downstream closed: %s", type(e).__name__
-                    )
-                return resp
-        except ClientError as e:
-            # A local upstream may restart while the box is running. Return a
-            # readable error instead of a disconnected transport that gets retried.
-            log.warning("anthropic proxy: upstream %s unreachable: %s", base, e)
-            return _error(
-                502, "api_error", f"sandbox proxy cannot reach its upstream: {e}"
-            )
+        # A local upstream may restart while the box is running, so connection
+        # failures are reported with their detail.
+        return await forward(
+            request,
+            request.app[_SESSION],
+            url=f"{base}{request.path_qs}",
+            body=body,
+            headers=out,
+            refuse=lambda status, message: _error(status, "api_error", message),
+            logger=log,
+            label="anthropic",
+            origin=base,
+            failure_detail=True,
+        )
 
     app = web.Application(client_max_size=MAX_BODY_BYTES + 1)
     app.router.add_route("*", "/{tail:.*}", handle)
