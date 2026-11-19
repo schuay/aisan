@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -493,14 +494,19 @@ async def run_interactive(
     found_binary: Path | None = None
     if not explain_only:
         found_binary = binary()
-        if isinstance(spec, BoxSpec):
-            exe_grant = darwin_executable_grant(found_binary)
-            if exe_grant:
-                spec = (
-                    spec.with_binds(list(exe_grant.binds))
-                    .with_path_prefix(exe_grant.path)
-                    .with_env(exe_grant.env)
-                )
+    exe_candidate = (
+        (Path(hit) if (hit := shutil.which(executable)) else None)
+        if explain_only and is_darwin
+        else found_binary
+    )
+    if isinstance(spec, BoxSpec):
+        exe_grant = darwin_executable_grant(exe_candidate)
+        if exe_grant:
+            spec = (
+                spec.with_binds(list(exe_grant.binds))
+                .with_path_prefix(exe_grant.path)
+                .with_env(exe_grant.env)
+            )
     try:
         spec = flags.apply(spec)
     except LaunchRefused as e:
@@ -520,8 +526,13 @@ async def run_interactive(
             ),
         )
         if is_darwin and isinstance(spec, BoxSpec) and is_state_dir_locked(state):
+            exp_parent = (
+                str(state.parent)
+                if state.parent.is_dir() and os.access(state.parent, os.W_OK)
+                else "/private/tmp"
+            )
             with tempfile.TemporaryDirectory(
-                dir="/private/tmp", prefix="aisan-exp-"
+                dir=exp_parent, prefix="aisan-exp-"
             ) as tmp_raw:
                 tmp_state = Path(tmp_raw)
                 exp_box = Box(

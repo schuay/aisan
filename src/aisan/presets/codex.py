@@ -37,8 +37,12 @@ _CODEX_APP_CLI = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli")
 def _darwin_skills_binds(skills: Path, state: Path, home: Path) -> list[BindSpec]:
     """Expose host skills on Darwin without overwriting `$CODEX_HOME/skills/.system`."""
     agents_root = home / ".agents" / "skills"
-    if skills.resolve() == agents_root.resolve():
-        return [Bind(agents_root.resolve(), RO)]
+    if (
+        skills.resolve() == agents_root.resolve()
+        and not agents_root.is_symlink()
+        and not any(p.is_symlink() for p in agents_root.parents)
+    ):
+        return [Bind(agents_root, RO)]
     if not skills.is_dir():
         return [Bind(skills, RO)]
     entries: list[BindSpec] = []

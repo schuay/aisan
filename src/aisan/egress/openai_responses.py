@@ -113,14 +113,19 @@ class CodexBackend(Backend):
     def shared_client_env_description(self) -> dict[str, str]:
         return {CLIENT_KEY_ENV: SHARED_TOKEN_MARKER}
 
-    def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+    def box_binds_for_platform(
+        self, runtime_dir: Path, platform: str
+    ) -> list[BindSpec]:
         if self._codex_home is None:
             return []
         src = runtime_dir / _BOX_AUTH_NAME
         dst = self._codex_home / "auth.json"
-        if host_platform() == "darwin":
+        if platform == "darwin":
             return [PinnedSymlink(src, dst)]
         return [BindOver(src, dst)]
+
+    def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+        return self.box_binds_for_platform(runtime_dir, host_platform())
 
     def prepare(self, runtime_dir: Path) -> None:
         if self._codex_home is not None:
@@ -353,6 +358,11 @@ async def _refresh_chatgpt_login(command: tuple[str, ...], codex_home: Path) -> 
 
 
 async def _drive_account_read(command: tuple[str, ...], child: HostChild) -> None:
+    store_args = (
+        ("-c", 'cli_auth_credentials_store="file"')
+        if host_platform() == "darwin"
+        else ()
+    )
     process = await asyncio.create_subprocess_exec(
         *command,
         "app-server",
@@ -361,6 +371,7 @@ async def _drive_account_read(command: tuple[str, ...], child: HostChild) -> Non
         'model_provider="openai"',
         "-c",
         "analytics.enabled=false",
+        *store_args,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,

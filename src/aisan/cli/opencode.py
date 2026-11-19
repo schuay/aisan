@@ -179,8 +179,10 @@ async def _main(argv: list[str]) -> int:
             import shutil
 
             # Keep XDG config/cache/state directories sealed and reset ephemeral
-            # config between Darwin runs to match Linux's home tmpfs behavior.
+            # config and catalog cache between Darwin runs to match Linux's home
+            # tmpfs behavior.
             shutil.rmtree(state / "xdg-config", ignore_errors=True)
+            shutil.rmtree(state / "xdg-cache", ignore_errors=True)
             ensure_sealed_dir(state / "xdg-config")
             ensure_sealed_dir(state / "xdg-config" / "opencode")
             ensure_sealed_dir(state / "xdg-cache")

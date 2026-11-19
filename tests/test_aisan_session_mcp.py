@@ -316,10 +316,10 @@ async def test_real_codex_starts_an_imported_mcp_server_inside_the_box(
     server = tool / "bin" / "local-mcp"
     server.write_text(
         "#!/usr/bin/python3\n"
-        "import json, pathlib, sys\n"
+        "import json, os, pathlib, sys\n"
         "marker = pathlib.Path(sys.argv[1])\n"
         "marker.write_text(json.dumps({\n"
-        "    'host_only_visible': (pathlib.Path.home() / 'host-only').exists(),\n"
+        "    'host_only_visible': os.access(pathlib.Path.home() / 'host-only', os.R_OK),\n"
         "}))\n"
         "for line in sys.stdin:\n"
         "    request = json.loads(line)\n"
@@ -353,11 +353,13 @@ async def test_real_codex_starts_an_imported_mcp_server_inside_the_box(
     imported = codex_host_mcp(source, allow=ANY)
     state = tmp_path / "state"
     imported.write(state / "config.toml")
+    codex_exe = codex_binary()
+    assert codex_exe is not None
     base = codex(
         worktree,
         state=state,
         extra_ro=mcp_ro_binds(imported),
-        extra_env=(("PATH", f"{shim_dir}:/usr/bin"),),
+        extra_env=(("PATH", f"{shim_dir}:{codex_exe.parent}:/usr/bin:/bin"),),
     )
     spec = dataclasses.replace(
         base, limits=dataclasses.replace(base.limits, use_cgroup=False)

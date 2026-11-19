@@ -732,6 +732,7 @@ def test_live_pinned_symlink_and_write_regex(tmp_path):
         f"os.rename({str(state / 'cfg.tmp')!r}, {str(state / 'cfg.json')!r})\n"
         f"open({str(cache / 'store' / '.cpython.lock')!r}, 'w').write('l')\n"
         f"open({str(cache / 'store' / 'env1' / 'stamp')!r}, 'w').write('s')\n"
+        f"os.utime({str(cache / 'store' / 'env1' / 'stamp')!r}, None)\n"
         "for bad in [\n"
         f"    lambda: open({str(tok_dst)!r}, 'w'),\n"
         f"    lambda: os.unlink({str(tok_dst)!r}),\n"
@@ -740,6 +741,10 @@ def test_live_pinned_symlink_and_write_regex(tmp_path):
         f"    lambda: open({str(pyvenv)!r}, 'w'),\n"
         f"    lambda: open({str(cache / 'evil.lock')!r}, 'w'),\n"
         f"    lambda: open({str(sibling_cache)!r} + 'store/x/stamp', 'w'),\n"
+        f"    lambda: os.unlink({str(cache / 'store' / 'env1' / 'stamp')!r}),\n"
+        f"    lambda: os.symlink('/etc/passwd', {str(cache / 'store' / '.sym.lock')!r}),\n"
+        f"    lambda: os.mkfifo({str(cache / 'store' / '.fifo.lock')!r}),\n"
+        f"    lambda: os.mkdir({str(cache / 'store' / '.dir.lock')!r}),\n"
         "]:\n"
         "    try:\n"
         "        bad(); raise SystemExit('UNEXPECTED_WRITE')\n"
@@ -895,14 +900,49 @@ def test_live_host_ipc_keychain_procargs_and_tiocsti_are_blocked(tmp_path):
     assert proc_probe.returncode == 0, proc_probe.stderr
     assert "PROCARGS_BLOCKED" in proc_probe.stdout
 
-    # Verify TIOCSTI is blocked by Seatbelt (`hid-control`) even on a live PTY.
+    # Verify cross-terminal PTY isolation, in-box `openpty()`, and TIOCSTI denial.
+    with pytest.raises(ValueError, match="invalid controlling_tty"):
+        SeatbeltSandbox(root=wt, controlling_ttys=("/etc/passwd",))
+
     master_fd, slave_fd = pty.openpty()
     try:
         tty_name = os.ttyname(slave_fd)
+        # 1) Without `controlling_ttys`, opening another host PTY fails while
+        #    in-box `pty.openpty()` succeeds!
+        iso_probe = _run_sb(
+            sb,
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os, pty\n"
+                    "m, s = pty.openpty()\n"
+                    "in_tty = os.ttyname(s)\n"
+                    "fd = os.open(in_tty, os.O_RDWR)\n"
+                    "os.close(fd); os.close(m); os.close(s)\n"
+                    "try:\n"
+                    f"    os.open({tty_name!r}, os.O_RDWR | os.O_NONBLOCK)\n"
+                    "    raise SystemExit('HOST_TTY_EXPOSED')\n"
+                    "except PermissionError:\n"
+                    "    print('PTY_ISOLATED')\n"
+                ),
+            ],
+        )
+        assert iso_probe.returncode == 0, iso_probe.stderr
+        assert "PTY_ISOLATED" in iso_probe.stdout
+
+        # 2) On the box's own controlling TTY, reopening works while TIOCSTI stays denied.
+        sb_tty = SeatbeltSandbox(
+            root=wt,
+            binds=sb.binds,
+            env=sb.env,
+            unshare_net=True,
+            controlling_ttys=(tty_name,),
+        )
         tiocsti = getattr(termios, "TIOCSTI", 0x80017472)
         probe = subprocess.run(
             [
-                *sb.wrapper(),
+                *sb_tty.wrapper(),
                 sys.executable,
                 "-c",
                 (

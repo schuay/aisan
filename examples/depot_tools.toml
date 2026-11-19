@@ -17,9 +17,10 @@ ro = [
 ]
 
 overlay = [
-    # vpython locks this cache even for reads. The overlay supplies the warm host
-    # cache, keeps box writes private, and avoids an offline rebuild. Replace
-    # `.1000` with the local uid from `id -u`.
+    # Linux only (`overlay` uses bubblewrap overlayfs; on macOS use
+    # `--grant depot_tools` instead). vpython locks this cache even for reads.
+    # The overlay supplies the warm host cache, keeps box writes private, and
+    # avoids an offline rebuild. Replace `.1000` with the local uid from `id -u`.
     "~/.cache/vpython-root.1000",
 ]
 

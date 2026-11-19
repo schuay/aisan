@@ -19,6 +19,9 @@ same mount specifications before rendering platform-specific confinement rules:
 from __future__ import annotations
 
 import enum
+import fcntl
+import functools
+import os
 import re
 import sys
 from collections.abc import Iterable, Mapping
@@ -418,26 +421,119 @@ def bindable(p: Path) -> bool:
     return True
 
 
-def resolved_path(p: Path) -> Path:
-    """Return the canonical host path, or `p` when it cannot be resolved."""
+_FIRMLINKS_FILE = Path("/usr/share/firmlinks")
+_DEFAULT_FIRMLINKS: tuple[tuple[str, str], ...] = (
+    ("/Users", "Users"),
+    ("/Library", "Library"),
+    ("/Applications", "Applications"),
+    ("/System/Library/Caches", "System/Library/Caches"),
+    ("/private", "private"),
+    ("/opt", "opt"),
+    ("/AppleInternal", "AppleInternal"),
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _firmlinks() -> tuple[tuple[str, str], ...]:
+    """Return `(/System/Volumes/Data/<rel>, <synthetic_root>)` pairs, longest first."""
+    raw = list(_DEFAULT_FIRMLINKS)
     try:
-        return p.resolve()
+        lines = _FIRMLINKS_FILE.read_text().splitlines()
     except OSError:
-        return p
+        lines = []
+    for line in lines:
+        parts = line.strip().split("\t")
+        if len(parts) == 2 and parts[0].startswith("/") and parts[1]:
+            pair = (parts[0], parts[1])
+            if pair not in raw:
+                raw.append(pair)
+    mapped = [(f"/System/Volumes/Data/{rel.lstrip('/')}", root) for root, rel in raw]
+    return tuple(sorted(mapped, key=lambda item: -len(item[0])))
 
 
-def paths_overlap(a: Path, b: Path) -> bool:
+def _strip_firmlink(raw: str) -> str:
+    for data_prefix, synthetic in _firmlinks():
+        if raw == data_prefix:
+            return synthetic
+        if raw.startswith(data_prefix + "/"):
+            suffix = raw[len(data_prefix) :]
+            return suffix if synthetic == "/" else synthetic + suffix
+    return raw
+
+
+def _f_getpath(path: Path) -> str | None:
+    getpath = getattr(fcntl, "F_GETPATH", None)
+    if getpath is None:
+        return None
+    flags = getattr(os, "O_EVTONLY", os.O_RDONLY) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        buf = fcntl.fcntl(fd, getpath, bytes(1024))
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return buf.split(b"\x00", 1)[0].decode("utf-8", "surrogateescape")
+
+
+def _compare_parts(p: Path, *, casefold: bool | None = None) -> tuple[str, ...]:
+    fold = (host_platform() == "darwin") if casefold is None else casefold
+    return tuple(part.casefold() for part in p.parts) if fold else p.parts
+
+
+def _is_rel(child: Path, parent: Path, *, casefold: bool | None = None) -> bool:
+    cp = _compare_parts(child, casefold=casefold)
+    pp = _compare_parts(parent, casefold=casefold)
+    return len(cp) >= len(pp) and cp[: len(pp)] == pp
+
+
+def _rel_tail(child: Path, parent: Path, *, casefold: bool | None = None) -> Path:
+    pp = _compare_parts(parent, casefold=casefold)
+    return Path(*child.parts[len(pp) :])
+
+
+def resolved_path(p: Path) -> Path:
+    """Return the canonical host path, or `p` when it cannot be resolved.
+
+    On Darwin, also canonicalize existing prefixes via `F_GETPATH` (normalizing
+    APFS case-folding) and map `/System/Volumes/Data` firmlinks back to their
+    synthetic root paths so firmlink or case aliases cannot evade policy checks.
+    """
+    try:
+        resolved = p.resolve()
+    except OSError:
+        resolved = p
+    if host_platform() != "darwin":
+        return resolved
+    for anc in (resolved, *resolved.parents):
+        got = _f_getpath(anc)
+        if got is not None:
+            tail = resolved.relative_to(anc)
+            combined = got if str(tail) == "." else f"{got.rstrip('/')}/{tail}"
+            norm = _strip_firmlink(combined)
+            return Path("/" if norm == "/" else norm.rstrip("/"))
+    norm = _strip_firmlink(str(resolved))
+    return Path("/" if norm == "/" else norm.rstrip("/"))
+
+
+def paths_overlap(a: Path, b: Path, *, casefold: bool | None = None) -> bool:
     """Whether `a` and `b` are the same path or one is inside the other.
 
     Containment in either direction exposes protected data: mounting an ancestor
     exposes the whole store, while mounting a descendant exposes part of it.
-    Resolve both host paths so symlink aliases cannot evade the check.
+    Resolve both host paths (and case-fold on APFS/Darwin) so symlink, firmlink,
+    or case aliases cannot evade the check.
     """
     ra, rb = resolved_path(a), resolved_path(b)
-    return ra.is_relative_to(rb) or rb.is_relative_to(ra)
+    return _is_rel(ra, rb, casefold=casefold) or _is_rel(rb, ra, casefold=casefold)
 
 
-def reachable_through(mounts: Iterable[Mount], path: Path) -> tuple[Path, ...]:
+def reachable_through(
+    mounts: Iterable[Mount], path: Path, *, casefold: bool | None = None
+) -> tuple[Path, ...]:
     """Return mount sources that leave any part of `path` readable in the box.
 
     Process mounts in order because a later tmpfs, seal, or unrelated bind can
@@ -455,15 +551,19 @@ def reachable_through(mounts: Iterable[Mount], path: Path) -> tuple[Path, ...]:
     for m in mounts:
         if not m.covers:
             continue
-        for shadowed in [p for p in visible if p.is_relative_to(m.dst)]:
+        for shadowed in [p for p in visible if _is_rel(p, m.dst, casefold=casefold)]:
             del visible[shadowed]
         if m.src is None:
             continue
         src = resolved_path(m.src)
-        if not paths_overlap(target, src):
+        if not paths_overlap(target, src, casefold=casefold):
             continue
         # Preserve the protected path's offset when its ancestor is mounted.
-        inside = target.relative_to(src) if target.is_relative_to(src) else Path()
+        inside = (
+            _rel_tail(target, src, casefold=casefold)
+            if _is_rel(target, src, casefold=casefold)
+            else Path()
+        )
         visible[m.dst / inside] = m.src
     # Reassigning an existing key records the source of the winning mount.
     return tuple(visible.values())
@@ -473,14 +573,16 @@ def first_exposure(
     mounts: Iterable[Mount],
     paths: Iterable[Path],
     allowed_sources: Iterable[Path],
+    *,
+    casefold: bool | None = None,
 ) -> tuple[Path, Path] | None:
     """Return the first of `paths` readable through a source outside `allowed`."""
     materialized = list(mounts)
     allowed = tuple(resolved_path(p) for p in allowed_sources)
     for path in paths:
-        for source in reachable_through(materialized, path):
+        for source in reachable_through(materialized, path, casefold=casefold):
             resolved_source = resolved_path(source)
-            if any(resolved_source.is_relative_to(p) for p in allowed):
+            if any(_is_rel(resolved_source, p, casefold=casefold) for p in allowed):
                 continue
             return source, path
     return None

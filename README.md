@@ -19,10 +19,13 @@ The command starts an interactive Claude Code session. `aisan codex`,
 - **No network by default.** On Linux, the box gets its own network namespace
   with a loopback relay to the model proxy over a Unix socket; on macOS,
   Seatbelt denies `network*` and pins outbound traffic to the authenticated
-  host-loopback proxy port (plus local loopback TCP for harnesses that run an
-  in-box local server). `--net` opts back into host networking when a task
-  needs it; credential files stay inaccessible and model calls still pass
-  through the authenticated proxy.
+  host-loopback proxy port (`aisan claude`, `aisan codex`, and `depot_tools_job`
+  allow no other ports; `aisan agy` and `aisan opencode` additionally permit
+  `localhost:*` TCP for their in-box local servers, which on macOS can also
+  reach unauthenticated host loopback listeners while still blocking external
+  IPs and DNS). `--net` opts back into host networking when a task needs it;
+  credential files stay inaccessible and model calls still pass through the
+  authenticated proxy.
 - **Selected filesystem slices.** The repo is bound rw at its real absolute
   path, system directories ro, `$HOME` and `/tmp` isolated (tmpfs on Linux;
   `(deny default)` with a per-box scratch `TMPDIR` on macOS), and nothing else
@@ -154,12 +157,14 @@ returns policy refusals as gRPC errors.
 - **Mounts form a tree keyed by destination.** Order in a `BoxSpec` carries no
   meaning: an ancestor is mounted before its descendants, so the deeper entry
   wins. Two entries at one path must agree, or be identity binds, where the
-  stricter mode wins. A *guard* (the default for `Bind` and `Overlay`; always
-  for `Seal` and `BindOver`) admits only other guards below it, so a user bind
-  cannot reopen part of a policy mount. User bind files and `extra_ro` are
-  plain. The fixed system surface (`/usr`, `/etc`, `/proc`, `/dev`, the
-  journal socket) is in the tree too: a bind at one of its paths conflicts,
-  and a bind above one is refused because bwrap mounts the surface first.
+  stricter mode wins. A *guard* (the default for `Bind`, `Overlay`, and
+  `WriteRegex`; always for `Seal`, `BindOver`, and `PinnedSymlink`) admits only
+  other guards below it, so a user bind cannot reopen part of a policy mount.
+  User bind files and `extra_ro` are plain. The fixed system surface (`/usr`,
+  `/etc`, `/proc`, `/dev`, and the journal socket on Linux; `/System`, `/usr`,
+  `/Library`, and Homebrew formula roots on macOS) is in the tree too: a bind
+  at one of its paths conflicts, and a bind above one is refused because the
+  sandbox mounts the surface first.
 - **Credential-aware egress in both network modes.** On Linux, isolated boxes
   reach host proxies through Unix sockets and in-box loopback relays; on macOS,
   Seatbelt pins outbound TCP to the authenticated host-loopback proxy port (or
@@ -328,8 +333,9 @@ some tree needs inside a box with no network route.
 aisan claude /path/to/v8 --grant depot_tools
 ```
 
-The `depot_tools` grant finds the checkout through `autoninja`, overlays the
-vpython cache, and disables network-dependent updates and presubmit checks.
+The `depot_tools` grant finds the checkout through `autoninja`, confines writes
+to the vpython cache (`Overlay` on Linux; lock/stamp `WriteRegex` on macOS),
+and disables network-dependent updates, telemetry, and presubmit checks.
 These environment settings require a grant because bind files contain paths
 only. Grants apply before `--binds`, so user files retain precedence.
 

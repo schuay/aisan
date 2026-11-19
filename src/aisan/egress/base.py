@@ -101,11 +101,18 @@ class Backend(abc.ABC):
             )
         path = runtime_dir / f"{self.name}.sock"
         # The configurable private root and backend name are bounded separately,
-        # so check their combined byte length here.
-        if len(str(path).encode()) > _SUN_PATH_BYTES:
+        # so check their combined byte length here. On Darwin, boxed clients and
+        # Seatbelt canonicalize `/tmp/...` to `/private/tmp/...` (+8 bytes).
+        raw_len = len(str(path).encode())
+        effective_len = raw_len
+        if sys.platform == "darwin" and path.is_absolute() and ".." not in path.parts:
+            from ..seatbelt import seatbelt_lexpath
+
+            effective_len = max(raw_len, len(seatbelt_lexpath(path).encode()))
+        if effective_len > _SUN_PATH_BYTES:
             raise ValueError(
                 f"socket path is too long for AF_UNIX "
-                f"({len(str(path).encode())} bytes, limit {_SUN_PATH_BYTES}): "
+                f"({effective_len} bytes, limit {_SUN_PATH_BYTES}): "
                 f"{path}. Shorten the private root or the backend name."
             )
         return path
@@ -134,6 +141,12 @@ class Backend(abc.ABC):
         """Return extra mounts needed by the boxed client."""
         return []
 
+    def box_binds_for_platform(
+        self, runtime_dir: Path, platform: str
+    ) -> list[BindSpec]:
+        """Return extra mounts needed by the boxed client on `platform`."""
+        return self.box_binds(runtime_dir)
+
     def prepare(self, runtime_dir: Path) -> None:
         """Create bind sources before bubblewrap resolves the mount list."""
 
@@ -159,6 +172,10 @@ class Backend(abc.ABC):
         """
         raise NotImplementedError
         yield  # pragma: no cover - keep the abstract method an async generator
+
+    def serve_for_platform(self, runtime_dir: Path, platform: str):
+        """Run the isolated host service for `platform`."""
+        return self.serve(runtime_dir)
 
     @asynccontextmanager
     async def serve_shared(

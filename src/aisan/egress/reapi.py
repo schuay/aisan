@@ -142,6 +142,7 @@ class ReapiBackend(Backend):
     def direct_unix_client_env(self, runtime_dir: Path) -> dict[str, str]:
         """Configure Siso on Darwin to dial `rbe.sock` directly without BindOver."""
         return {
+            "SISO_PROJECT": self._project,
             "SISO_REAPI_ADDRESS": f"unix://{seatbelt_lexpath(self.socket_path(runtime_dir))}",
             "SISO_PATH": seatbelt_path(self.siso_wrapper_path(runtime_dir)),
             "RBE_service_no_security": "true",
@@ -178,20 +179,59 @@ class ReapiBackend(Backend):
             f"SISO_PROJECT={self._project}\nSISO_REAPI_INSTANCE={full_instance}\n"
         )
         fallback = shlex.quote(seatbelt_path(self._fallback_siso_binary()))
+        unix_addr = shlex.quote(
+            f"unix://{seatbelt_lexpath(self.socket_path(runtime_dir))}"
+        )
         wrapper = (
             "#!/bin/sh\n"
+            'cur=$(ulimit -Hn 2>/dev/null || printf "")\n'
+            'case "$cur" in\n'
+            "  unlimited) ulimit -Hn 65536 2>/dev/null; ulimit -Sn 65536 2>/dev/null ;;\n"
+            '  [0-9]*) [ "$cur" -gt 65536 ] 2>/dev/null && ulimit -Hn 65536 2>/dev/null && ulimit -Sn 65536 2>/dev/null ;;\n'
+            "esac\n"
             f"export SISO_PROJECT={shlex.quote(self._project)}\n"
             f"export SISO_REAPI_INSTANCE={shlex.quote(full_instance)}\n"
-            'd="$PWD"\n'
-            'while [ "$d" != "/" ]; do\n'
-            '  if [ -x "$d/third_party/siso/cipd/siso" ]; then\n'
-            '    exec "$d/third_party/siso/cipd/siso" "$@"\n'
+            f"export SISO_REAPI_ADDRESS={unix_addr}\n"
+            "export RBE_service_no_security=true\n"
+            'pwd_dir=$(/bin/pwd 2>/dev/null || printf "/")\n'
+            'target=""\n'
+            'prev=""\n'
+            'for arg in "$@"; do\n'
+            '  if [ "$prev" = "-C" ]; then\n'
+            '    target="$arg"\n'
+            "    break\n"
             "  fi\n"
-            '  if [ -x "$d/third_party/siso/siso" ]; then\n'
-            '    exec "$d/third_party/siso/siso" "$@"\n'
-            "  fi\n"
-            '  d=$(dirname "$d")\n'
+            '  case "$arg" in\n'
+            '    -C?*) target="${arg#-C}"; break ;;\n'
+            '    -C) prev="-C" ;;\n'
+            '    *) prev="" ;;\n'
+            "  esac\n"
             "done\n"
+            'case "$target" in\n'
+            '  "") candidates="$pwd_dir" ;;\n'
+            '  /*) candidates="$target\n$pwd_dir" ;;\n'
+            '  *) candidates="$pwd_dir/$target\n$pwd_dir" ;;\n'
+            "esac\n"
+            'OLD_IFS="$IFS"\n'
+            "IFS='\n'\n"
+            "for start in $candidates; do\n"
+            '  IFS="$OLD_IFS"\n'
+            '  d="$start"\n'
+            '  while [ -n "$d" ]; do\n'
+            '    if [ -x "$d/third_party/siso/cipd/siso" ]; then\n'
+            '      exec "$d/third_party/siso/cipd/siso" "$@"\n'
+            "    fi\n"
+            '    if [ -x "$d/third_party/siso/siso" ]; then\n'
+            '      exec "$d/third_party/siso/siso" "$@"\n'
+            "    fi\n"
+            '    [ "$d" = "/" ] && break\n'
+            '    next="${d%/*}"\n'
+            '    [ -z "$next" ] && next="/"\n'
+            '    [ "$next" = "$d" ] && break\n'
+            '    d="$next"\n'
+            "  done\n"
+            "done\n"
+            'IFS="$OLD_IFS"\n'
             f'exec {fallback} "$@"\n'
         )
         write_sealed(self.siso_wrapper_path(runtime_dir), wrapper, mode=0o700)
@@ -233,8 +273,13 @@ class ReapiBackend(Backend):
                 self.name, f"cannot mint a luci token: {e}", _FIX
             ) from e
 
+    def serve_for_platform(self, runtime_dir: Path, platform: str):
+        return self.serve(runtime_dir, direct_unix=(platform == "darwin"))
+
     @asynccontextmanager
-    async def serve(self, runtime_dir: Path) -> AsyncIterator[None]:
+    async def serve(
+        self, runtime_dir: Path, *, direct_unix: bool | None = None
+    ) -> AsyncIterator[None]:
         """Serve RBE for the duration of the box.
 
         Raise during startup so builds don't silently fall back to an offline
@@ -242,7 +287,10 @@ class ReapiBackend(Backend):
         """
         sock = self.socket_path(runtime_dir)
         sock.unlink(missing_ok=True)
-        if host_platform() == "darwin":
+        use_direct = (
+            (host_platform() == "darwin") if direct_unix is None else direct_unix
+        )
+        if use_direct:
             server = await serve_rbe_unix(sock, self._token, allow_unix_localhost=True)
         else:
             server = await serve_rbe_unix(sock, self._token)

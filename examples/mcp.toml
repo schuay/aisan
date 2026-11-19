@@ -14,8 +14,9 @@ include = [
 ]
 
 # nvim-mcp reaches a broker socket on the host, which is the point when a human
-# is at the editor and a hole when nobody is. The box connects but cannot
-# unlink or replace the socket, so the directory is ro.
+# is at the editor and a hole when nobody is. On Linux, the box connects over
+# AF_UNIX with `ro` alone (on macOS Seatbelt, external Unix sockets also
+# require `--net`) and cannot unlink or replace the socket.
 ro = [
     "~/misc/nvim-mcp",
 ]

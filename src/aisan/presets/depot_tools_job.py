@@ -25,6 +25,7 @@ from pathlib import Path
 from ..egress.base import Backend, EgressProfile
 from ..gitbinds import GC_ENV, external_symlink_targets, git_binds, git_host_files
 from ..sandbox import RO, Bind, BindSpec, Overlay, WriteRegex, host_platform
+from ..seatbelt import darwin_selected_xcode_app, seatbelt_path
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Grant, Limits
 
 _DARWIN_BASE_PATH = (
@@ -85,6 +86,18 @@ def depot_tools_root() -> Path | None:
     return Path(autoninja).parent if autoninja else None
 
 
+def _active_xcode_dev_dir() -> Path | None:
+    """Return `Contents/Developer` for the active Xcode bundle on Darwin."""
+    if _XCODE_DEV_DIR.is_dir():
+        return _XCODE_DEV_DIR
+    selected = darwin_selected_xcode_app()
+    if selected is not None:
+        dev = selected / "Contents" / "Developer"
+        if dev.is_dir():
+            return Path(seatbelt_path(dev))
+    return None
+
+
 def depot_tools_grant(depot_tools: Path | None = None) -> Grant:
     """Grant access to depot_tools and its copy-on-write caches.
 
@@ -100,8 +113,9 @@ def depot_tools_grant(depot_tools: Path | None = None) -> Grant:
     grant_env = list(_DEPOT_TOOLS_ENV)
     if is_darwin:
         grant_env.append(("DEPOT_TOOLS_BUILD_TELEMETRY", "0"))
-        if _XCODE_DEV_DIR.is_dir():
-            grant_env.append(("DEVELOPER_DIR", str(_XCODE_DEV_DIR)))
+        xcode_dev = _active_xcode_dev_dir()
+        if xcode_dev is not None:
+            grant_env.append(("DEVELOPER_DIR", str(xcode_dev)))
     return Grant(
         binds=(
             *_tool_cache_binds(is_darwin=is_darwin),

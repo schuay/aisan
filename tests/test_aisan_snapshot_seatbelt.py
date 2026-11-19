@@ -39,6 +39,7 @@ _PINNED_SYSTEM_SUBPATHS = (
 
 _PINNED_SYSTEM_LITERALS = (
     Path("/"),
+    Path("/dev"),
     Path("/private/etc/hosts"),
     Path("/private/etc/passwd"),
     Path("/private/etc/group"),
@@ -49,6 +50,7 @@ _PINNED_SYSTEM_LITERALS = (
     Path("/dev/random"),
     Path("/dev/urandom"),
     Path("/dev/tty"),
+    Path("/dev/ptmx"),
 )
 
 
@@ -98,6 +100,7 @@ def pinned_darwin_host(monkeypatch):
     monkeypatch.setattr(
         seatbelt_mod, "_DARWIN_SYSTEM_LITERALS", _PINNED_SYSTEM_LITERALS
     )
+    monkeypatch.setattr(seatbelt_mod, "darwin_controlling_ttys", lambda: ())
     # Stub existence checks on pinned system roots so hosts without `/opt/homebrew`
     # or `/Library/Developer` still render the identical snapshot surface.
     pinned_set = frozenset(_PINNED_SYSTEM_SUBPATHS) | frozenset(_PINNED_SYSTEM_LITERALS)
@@ -123,11 +126,7 @@ def pinned_darwin_host(monkeypatch):
         cache = work / "vpython-cache" / "vpython-root"
         cache.mkdir(parents=True)
         monkeypatch.setattr(preset_dt, "_vpython_cache", lambda: cache)
-        monkeypatch.setattr(
-            preset_dt,
-            "_XCODE_DEV_DIR",
-            Path("/Applications/NonexistentXcodeForSnapshot.app/Contents/Developer"),
-        )
+        monkeypatch.setattr(preset_dt, "_active_xcode_dev_dir", lambda: None)
         depot = work / "depot_tools"
         depot.mkdir()
         monkeypatch.setattr(preset_dt.shutil, "which", lambda cmd: str(depot / cmd))

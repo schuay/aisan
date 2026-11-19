@@ -33,8 +33,6 @@ It preserves `aisan`'s core guarantees through five rules:
 
 from __future__ import annotations
 
-import fcntl
-import functools
 import os
 import re
 from collections.abc import Callable, Iterable
@@ -55,6 +53,8 @@ from .policy_tree import (
     Seal,
     SymlinkDestination,
     WriteRegex,
+    _f_getpath,
+    _strip_firmlink,
     check_guards,
     check_surface,
     check_symlink_free,
@@ -69,6 +69,8 @@ from .spec import _validate_mach_profiles
 
 __all__ = [
     "SeatbeltSandbox",
+    "darwin_controlling_ttys",
+    "darwin_selected_xcode_app",
     "darwin_system_ro_roots",
     "seatbelt_lexpath",
     "seatbelt_path",
@@ -76,17 +78,8 @@ __all__ = [
 ]
 
 _PORT_PLACEHOLDER_RE = re.compile(r"^<PORT:[^>\x00\r\n\"]+>$")
-
-_FIRMLINKS_FILE = Path("/usr/share/firmlinks")
-_DEFAULT_FIRMLINKS: tuple[tuple[str, str], ...] = (
-    ("/Users", "Users"),
-    ("/Library", "Library"),
-    ("/Applications", "Applications"),
-    ("/System/Library/Caches", "System/Library/Caches"),
-    ("/private", "private"),
-    ("/opt", "opt"),
-    ("/AppleInternal", "AppleInternal"),
-)
+_DEV_TTYS_RE = re.compile(r"^/dev/ttys[0-9]+$")
+_XCODE_SELECT_LINK = Path("/private/var/db/xcode_select_link")
 
 # Signed immutable root symlinks on macOS.
 _DARWIN_ROOT_SYMLINKS: tuple[tuple[Path, Path], ...] = (
@@ -136,6 +129,7 @@ _DARWIN_HOMEBREW_SUBPATHS: tuple[Path, ...] = (
 
 _DARWIN_SYSTEM_LITERALS: tuple[Path, ...] = (
     Path("/"),
+    Path("/dev"),
     Path("/Library/Preferences/com.apple.dt.Xcode.plist"),
     Path("/private/var/db/xcode_select_link"),
     Path("/private/etc/hosts"),
@@ -150,6 +144,7 @@ _DARWIN_SYSTEM_LITERALS: tuple[Path, ...] = (
     Path("/dev/random"),
     Path("/dev/urandom"),
     Path("/dev/tty"),
+    Path("/dev/ptmx"),
 )
 
 _SYSCTL_NAMES: tuple[str, ...] = (
@@ -206,52 +201,6 @@ _SYSCTL_NAMES: tuple[str, ...] = (
     "sysctl.proc_cputype",
     "vm.loadavg",
 )
-
-
-@functools.lru_cache(maxsize=1)
-def _firmlinks() -> tuple[tuple[str, str], ...]:
-    """Return `(/System/Volumes/Data/<rel>, <synthetic_root>)` pairs, longest first."""
-    raw = list(_DEFAULT_FIRMLINKS)
-    try:
-        lines = _FIRMLINKS_FILE.read_text().splitlines()
-    except OSError:
-        lines = []
-    for line in lines:
-        parts = line.strip().split("\t")
-        if len(parts) == 2 and parts[0].startswith("/") and parts[1]:
-            pair = (parts[0], parts[1])
-            if pair not in raw:
-                raw.append(pair)
-    mapped = [(f"/System/Volumes/Data/{rel.lstrip('/')}", root) for root, rel in raw]
-    return tuple(sorted(mapped, key=lambda item: -len(item[0])))
-
-
-def _strip_firmlink(raw: str) -> str:
-    for data_prefix, synthetic in _firmlinks():
-        if raw == data_prefix:
-            return synthetic
-        if raw.startswith(data_prefix + "/"):
-            suffix = raw[len(data_prefix) :]
-            return suffix if synthetic == "/" else synthetic + suffix
-    return raw
-
-
-def _f_getpath(path: Path) -> str | None:
-    getpath = getattr(fcntl, "F_GETPATH", None)
-    if getpath is None:
-        return None
-    flags = getattr(os, "O_EVTONLY", os.O_RDONLY) | getattr(os, "O_NONBLOCK", 0)
-    try:
-        fd = os.open(path, flags)
-    except OSError:
-        return None
-    try:
-        buf = fcntl.fcntl(fd, getpath, bytes(1024))
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
-    return buf.split(b"\x00", 1)[0].decode("utf-8", "surrogateescape")
 
 
 def _check_clean_path(raw: str) -> None:
@@ -356,8 +305,42 @@ def _reject_host_symlinks(path: Path, *, include_self: bool) -> None:
             )
 
 
+def darwin_controlling_ttys() -> tuple[str, ...]:
+    """Return `/dev/ttys*` paths attached to stdio fds (0, 1, 2), if any."""
+    found: list[str] = []
+    for fd in (0, 1, 2):
+        try:
+            name = os.ttyname(fd)
+        except OSError:
+            continue
+        if _DEV_TTYS_RE.fullmatch(name) and name not in found:
+            found.append(name)
+    return tuple(found)
+
+
+def darwin_selected_xcode_app() -> Path | None:
+    """Return `/Applications/*.app` selected by `xcode-select`, if any."""
+    if not _XCODE_SELECT_LINK.exists():
+        return None
+    try:
+        target = Path(seatbelt_path(_XCODE_SELECT_LINK))
+    except OSError:
+        return None
+    for candidate in (target, *target.parents):
+        if (
+            candidate.parent == Path("/Applications")
+            and candidate.suffix == ".app"
+            and candidate.is_dir()
+        ):
+            return candidate
+    return None
+
+
 def _active_system_subpaths() -> tuple[Path, ...]:
-    present_dev = tuple(p for p in _DARWIN_DEVELOPER_SUBPATHS if p.exists())
+    present_dev = [p for p in _DARWIN_DEVELOPER_SUBPATHS if p.exists()]
+    selected_app = darwin_selected_xcode_app()
+    if selected_app is not None and selected_app not in present_dev:
+        present_dev.append(selected_app)
     present_brew = tuple(p for p in _DARWIN_HOMEBREW_SUBPATHS if p.exists())
     return (*_DARWIN_SYSTEM_SUBPATHS, *present_dev, *present_brew)
 
@@ -382,7 +365,7 @@ def _system_mounts() -> list[Mount]:
     lits = [
         Mount("ro", _canonical_path(p), _canonical_path(p))
         for p in _DARWIN_SYSTEM_LITERALS
-        if p != Path("/") and p.exists()
+        if p not in (Path("/"), Path("/dev")) and p.exists()
     ]
     return [*sub, *lits]
 
@@ -400,6 +383,7 @@ class SeatbeltSandbox:
     mach_profiles: tuple[str, ...] = ()
     tcp_ports: tuple[int | str, ...] = ()
     unix_sockets: tuple[Path, ...] = ()
+    controlling_ttys: tuple[str, ...] = ()
     profile_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -416,6 +400,9 @@ class SeatbeltSandbox:
             validate_destination(self.profile_path)
         for sock in self.unix_sockets:
             validate_destination(sock)
+        for tty in self.controlling_ttys:
+            if not _DEV_TTYS_RE.fullmatch(tty):
+                raise ValueError(f"invalid controlling_tty path: {tty!r}")
         for port in self.tcp_ports:
             if (
                 isinstance(port, int)
@@ -584,7 +571,9 @@ class SeatbeltSandbox:
         mounts = self._published()
         canon_allowed = tuple(_canonical_path(p) for p in allowed_sources)
         for orig in raw_paths:
-            hit = first_exposure(mounts, (_canonical_path(orig),), canon_allowed)
+            hit = first_exposure(
+                mounts, (_canonical_path(orig),), canon_allowed, casefold=True
+            )
             if hit is not None:
                 return hit[0], orig
         return None
@@ -597,7 +586,9 @@ class SeatbeltSandbox:
         mounts = self._published()
         for seal in seals:
             canon_allow = tuple(_canonical_path(p) for p in seal.allow)
-            hit = first_exposure(mounts, (_canonical_path(seal.path),), canon_allow)
+            hit = first_exposure(
+                mounts, (_canonical_path(seal.path),), canon_allow, casefold=True
+            )
             if hit is not None:
                 return hit[0], seal.path
         return None
@@ -641,6 +632,7 @@ class SeatbeltSandbox:
             "(deny default)",
             "(allow process*)",
             "(allow file-map-executable)",
+            "(allow pseudo-tty)",
             "(deny process-info*)",
             "(allow process-info* (target same-sandbox))",
             "(allow signal (target same-sandbox))",
@@ -747,11 +739,21 @@ class SeatbeltSandbox:
             for p in _active_system_subpaths()
         )
         lit_args = " ".join(f"(literal {_sbpl_quote(lit)})" for lit in lit_paths)
+        tty_lits = " ".join(
+            f"(literal {_sbpl_quote(t)})"
+            for t in (
+                "/dev/null",
+                "/dev/zero",
+                "/dev/tty",
+                "/dev/ptmx",
+                *self.controlling_ttys,
+            )
+        )
         return [
-            f"(allow file-read-metadata file-test-existence {meta_args})",
+            f'(allow file-read-metadata file-test-existence {meta_args} (regex #"^/dev/ttys[0-9]+$"))',
             f"(allow file-read* file-test-existence {sub_args} {lit_args})",
-            '(allow file-read* file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty"))',
-            r'(allow file-read* file-write* file-ioctl (regex #"^/dev/ttys[0-9]+$"))',
+            f"(allow file-read* file-write* file-ioctl {tty_lits})",
+            r'(allow file-read* file-write* file-ioctl (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))',
         ]
 
     def _render_policy_mounts(
@@ -814,10 +816,11 @@ class SeatbeltSandbox:
                     )
                     out.append(f"(deny file-write* (subpath {quoted}))")
                     for suffix in m.suffixes:
-                        pattern = f"^{_ere_escape(sb)}/({suffix[1:]})$"
+                        pattern = _sbpl_regex(f"^{_ere_escape(sb)}/({suffix[1:]})$")
                         out.append(
-                            f"(allow file-write* (regex {_sbpl_regex(pattern)}))"
+                            f"(allow file-write* (require-all (vnode-type REGULAR-FILE) (regex {pattern})))"
                         )
+                        out.append(f"(deny file-write-unlink (regex {pattern}))")
         for sym in symlinks:
             sym_quoted = _sbpl_quote(seatbelt_lexpath(sym.dst))
             out.append(f"(deny file-write* (literal {sym_quoted}))")

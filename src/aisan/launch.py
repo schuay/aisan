@@ -218,16 +218,18 @@ def exit_status(code: int) -> int:
 
 
 def _cap_darwin_nofile() -> None:
-    """Bound Darwin's soft `RLIMIT_NOFILE` so close-range loops do not stall."""
+    """Bound Darwin's `RLIMIT_NOFILE` so close-range and child `setrlimit` do not stall."""
     if sys.platform != "darwin":
         return
     import resource
 
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     cap = 65536 if hard == resource.RLIM_INFINITY else min(hard, 65536)
-    if soft == resource.RLIM_INFINITY or soft > cap:
+    new_soft = cap if (soft == resource.RLIM_INFINITY or soft > cap) else soft
+    new_hard = cap if (hard == resource.RLIM_INFINITY or hard > cap) else hard
+    if (new_soft, new_hard) != (soft, hard):
         with contextlib.suppress(ValueError, OSError):
-            resource.setrlimit(resource.RLIMIT_NOFILE, (cap, hard))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, new_hard))
 
 
 async def _run(runtime_dir: Path, cmd: list[str]) -> int:

@@ -670,12 +670,16 @@ async def test_darwin_depot_tools_job_and_reapi_unix_socket_wrapper(
         async with box:
             # Direct Unix-socket-only box needs no `aisan.launch` relay wrapper!
             assert box.launch_prefix() == []
+            act = box.activation(backend)
+            assert act.client_env["SISO_PROJECT"] == "rbe-chromium-untrusted"
+            assert act.client_env["SISO_REAPI_ADDRESS"].startswith("unix://")
             cmd = box.command(
                 [
                     "/bin/sh",
                     "-c",
                     (
-                        'SISO_REAPI_INSTANCE=default_instance "$SISO_PATH" ninja -C out/x d8 && '
+                        'cd / && PATH="" SISO_REAPI_ADDRESS=override:1234 SISO_REAPI_INSTANCE=default_instance '
+                        f'"$SISO_PATH" ninja -C {wt / "out" / "x"} d8 && '
                         f'"{sys.executable}" -c "'
                         "import os, socket; "
                         "sock_path = os.environ['SISO_REAPI_ADDRESS'].removeprefix('unix://'); "
@@ -706,10 +710,129 @@ async def test_darwin_depot_tools_job_and_reapi_unix_socket_wrapper(
                 in res.stdout
             )
             assert "ADDR=unix://" in res.stdout
+            assert "override:1234" not in res.stdout
             assert "rbe.sock" in res.stdout
-            assert "ARGS=ninja -C out/x d8" in res.stdout
+            assert f"ARGS=ninja -C {wt / 'out' / 'x'} d8" in res.stdout
     finally:
         unauth_srv.close()
         await unauth_srv.wait_closed()
         other_sock.unlink(missing_ok=True)
     assert not box.runtime_dir.exists()
+
+
+@needs_seatbelt
+def test_darwin_casefold_and_firmlink_credential_guards(tmp_path, monkeypatch):
+    from aisan.userbinds import load
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: fake_home))
+
+    for bad_toml in (
+        'ro = ["~/.SSH"]\n',
+        'ro = ["~/library/keychains"]\n',
+        'ro = ["~/.CODEX"]\n',
+        f'ro = ["/System/Volumes/Data{fake_home}/.ssh"]\n',
+        f'ro = ["/System/Volumes/Data{fake_home}/Library/Keychains"]\n',
+    ):
+        spec_file = tmp_path / "bad.toml"
+        spec_file.write_text(bad_toml)
+        with pytest.raises(ValueError):
+            load(spec_file, egress=())
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    upper_ssh = fake_home / ".SSH"
+    upper_ssh.mkdir()
+    with pytest.raises(ValueError, match="host key store"):
+        Box(
+            BoxSpec(
+                root=wt,
+                binds=(Bind(upper_ssh, RO, guard=False),),
+                tmpfs=(),
+                env=(),
+                egress=(),
+                unshare_net=True,
+            ),
+            box_id="casefold-ssh",
+        )._sandbox()
+
+
+@needs_seatbelt
+def test_darwin_socket_path_checks_canonical_private_tmp_length(monkeypatch):
+    from aisan.egress.reapi import ReapiBackend
+
+    backend = ReapiBackend(project="p", sisoenv=Path("/tmp/x"))
+    # `/tmp/<88 chars>/rbe.sock` is 102 bytes raw (<= 103) but `/private/tmp/...`
+    # is 110 bytes (> 103), so `socket_path()` must reject it upfront.
+    borderline = Path("/tmp") / ("a" * 88)
+    assert len(str(borderline / "rbe.sock").encode()) == 102
+    with pytest.raises(ValueError, match="too long for AF_UNIX"):
+        backend.socket_path(borderline)
+
+
+@needs_seatbelt
+def test_darwin_codex_symlinked_agents_skills_and_cross_platform_binds(
+    tmp_path, monkeypatch
+):
+    fake_home = tmp_path / "home"
+    dotfiles_skills = tmp_path / "dotfiles" / "skills"
+    (dotfiles_skills / "my-skill").mkdir(parents=True)
+    (fake_home / ".agents").mkdir(parents=True)
+    (fake_home / ".agents" / "skills").symlink_to(dotfiles_skills)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: fake_home))
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    spec = codex(wt, state=state, skills=fake_home / ".agents" / "skills")
+    assert (
+        PinnedSymlink(
+            (dotfiles_skills / "my-skill").resolve(), state / "skills" / "my-skill"
+        )
+        in spec.binds
+    )
+    with Box(spec, box_id="sym-agents-skills").staged() as box:
+        assert (state / "skills" / "my-skill").is_symlink()
+        assert box.wrapper()
+
+    # Simulated Linux host constructing `Box(..., platform="darwin")` gets PinnedSymlink.
+    from aisan.egress.antigravity_keyring import KeyringCredential
+
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
+    cx_backend = CodexBackend(credentials=tmp_path / "c.json", codex_home=state)
+    ag_backend = AntigravityBackend(
+        credential=KeyringCredential(), token_file=state / TOKEN_FILE
+    )
+    rt = tmp_path / "rt"
+    assert isinstance(cx_backend.box_binds_for_platform(rt, "darwin")[0], PinnedSymlink)
+    assert isinstance(ag_backend.box_binds_for_platform(rt, "darwin")[0], PinnedSymlink)
+
+
+@needs_seatbelt
+def test_darwin_explain_includes_executable_grant(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake_home = tmp_path / "home"
+    venv = fake_home / "tools" / "agy-venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr\n")
+    exe = venv / "bin" / "agy"
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    env = {
+        **os.environ,
+        "HOME": str(fake_home),
+        "PATH": f"{venv / 'bin'}:/usr/bin:/bin",
+    }
+    res = subprocess.run(
+        [sys.executable, "-m", "aisan.cli.main", "agy", "--explain", str(repo)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr
+    assert str(venv.resolve()) in res.stdout

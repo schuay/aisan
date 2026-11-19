@@ -26,6 +26,7 @@ from contextlib import AsyncExitStack, ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import Self
 
+from . import seatbelt as _seatbelt
 from .egress import known_credential_paths
 from .egress.base import Backend, BackendActivation, credential_overlap
 from .private import private_root
@@ -400,8 +401,15 @@ class Box:
                     shared_backends = True
                     client_env.update(activation.client_env)
                 else:
-                    await stack.enter_async_context(backend.serve(self.runtime_dir))
-                    activation = BackendActivation(backend.port, backend.client_env())
+                    await stack.enter_async_context(
+                        backend.serve_for_platform(self.runtime_dir, self.platform)
+                    )
+                    act_env = (
+                        backend.direct_unix_client_env(self.runtime_dir)
+                        if self.platform == "darwin"
+                        else backend.client_env()
+                    )
+                    activation = BackendActivation(backend.port, act_env)
                 activations[backend] = activation
             if shared_backends:
                 path = write_client_env(self.runtime_dir, client_env)
@@ -464,9 +472,8 @@ class Box:
         env = dict(self.spec.env)
         if self.platform == "darwin":
             if "TMPDIR" not in env:
-                sb_tmp = seatbelt_path(self.scratch_dir)
-                env["TMPDIR"] = sb_tmp
-                env.setdefault("CLAUDE_CODE_TMPDIR", sb_tmp)
+                env["TMPDIR"] = seatbelt_path(self.scratch_dir)
+            env.setdefault("CLAUDE_CODE_TMPDIR", env["TMPDIR"])
             env.setdefault("GIT_CONFIG_GLOBAL", "/dev/null")
         for backend in self.spec.egress:
             if not self._uses_shared_tcp(backend):
@@ -574,6 +581,7 @@ class Box:
                 mach_profiles=self.spec.mach_profiles,
                 tcp_ports=tcp_ports,
                 unix_sockets=unix_sockets,
+                controlling_ttys=_seatbelt.darwin_controlling_ttys(),
                 profile_path=self._staged_profile_path,
             )
         else:
@@ -612,6 +620,10 @@ class Box:
         # paths and still names the one it found.
         egress = self.spec.egress
         groups = [("path declared confidential", self.spec.confidential)]
+        if self.platform == "darwin":
+            from .userbinds import _refused_key_stores
+
+            groups.append(("host key store", _refused_key_stores()))
         groups += [(f"{b.name} backend's credential", b.credentials) for b in egress]
         for what, paths in groups:
             hit = sandbox.exposed_path(paths)
