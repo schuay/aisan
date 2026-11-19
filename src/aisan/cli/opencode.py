@@ -34,6 +34,7 @@ from aisan.sandbox import RO, Bind, BindOver, BindSpec, PinnedSymlink, host_plat
 from aisan.session import (
     LaunchRefused,
     git_config_binds,
+    git_config_env,
     interactive_parser,
     mcp_launcher_binds,
     parse_interactive_args,
@@ -44,6 +45,7 @@ from aisan.session import (
     upstream_transport,
 )
 from aisan.session_mcp import mcp_search_path, opencode_host_mcp
+from aisan.statedir import ensure_sealed_dir
 
 # Honor the host's XDG config location for global OpenCode instructions.
 USER_MEMORY = (
@@ -64,7 +66,11 @@ def user_memory_bind(source: Path, *, state: Path | None = None) -> list[BindSpe
     if not source.exists():
         return []
     if host_platform() == "darwin" and state is not None:
-        return [PinnedSymlink(source, state / "xdg-config" / "opencode" / "AGENTS.md")]
+        return [
+            PinnedSymlink(
+                source.resolve(), state / "xdg-config" / "opencode" / "AGENTS.md"
+            )
+        ]
     dst = Path.home() / ".config" / "opencode" / "AGENTS.md"
     if source.resolve() == dst.resolve():
         return [Bind(dst, RO)]
@@ -163,10 +169,26 @@ async def _main(argv: list[str]) -> int:
         unshare_net=not args.net,
     )
     # Bind the XDG-aware Git config file without its credential directory.
-    spec = spec.with_binds(git_config_binds())
+    spec = spec.with_binds(git_config_binds()).with_env(git_config_env())
     # A user bind file cannot make this writable: the stricter read-only mode
     # wins at the default path, and a bind-over conflicts with a user entry.
     spec = spec.with_binds(user_memory_bind(USER_MEMORY, state=state))
+
+    def prepare() -> None:
+        if host_platform() == "darwin":
+            import shutil
+
+            # Keep XDG config/cache/state directories sealed and reset ephemeral
+            # config between Darwin runs to match Linux's home tmpfs behavior.
+            shutil.rmtree(state / "xdg-config", ignore_errors=True)
+            ensure_sealed_dir(state / "xdg-config")
+            ensure_sealed_dir(state / "xdg-config" / "opencode")
+            ensure_sealed_dir(state / "xdg-cache")
+            ensure_sealed_dir(state / "xdg-cache" / "opencode")
+            ensure_sealed_dir(state / "xdg-state")
+        if mcp.enabled:
+            mcp.write(mcp_config)
+
     return await run_interactive(
         client="opencode",
         harness="opencode",
@@ -184,7 +206,7 @@ async def _main(argv: list[str]) -> int:
         binary=opencode_binary,
         flags=flags,
         explain_only=args.explain,
-        prepare=(lambda: mcp.write(mcp_config)) if mcp.enabled else None,
+        prepare=prepare,
         mcp=mcp,
     )
 

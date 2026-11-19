@@ -264,7 +264,14 @@ def mcp_search_path(local_bin: bool = True) -> str:
     Include ``~/.local/bin`` only when the box mounts home-installed launchers.
     """
     dirs = (
-        ["/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
         if host_platform() == "darwin"
         else ["/usr/bin", "/usr/local/bin"]
     )

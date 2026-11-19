@@ -30,22 +30,23 @@ from ..gitbinds import GC_ENV, git_binds, git_host_files
 from ..sandbox import RO, RW, Bind, BindOver, BindSpec, PinnedSymlink, host_platform
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
 
-_DARWIN_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+_DARWIN_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+_CODEX_APP_CLI = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli")
 
 
 def _darwin_skills_binds(skills: Path, state: Path, home: Path) -> list[BindSpec]:
     """Expose host skills on Darwin without overwriting `$CODEX_HOME/skills/.system`."""
     agents_root = home / ".agents" / "skills"
     if skills.resolve() == agents_root.resolve():
-        return [Bind(agents_root, RO)]
+        return [Bind(agents_root.resolve(), RO)]
     if not skills.is_dir():
         return [Bind(skills, RO)]
-    entries = [
-        PinnedSymlink(child, state / "skills" / child.name)
-        for child in sorted(skills.iterdir())
-        if child.name != ".system"
-    ]
-    return [Bind(skills, RO), *entries]
+    entries: list[BindSpec] = []
+    for child in sorted(skills.iterdir()):
+        if child.name == ".system" or not child.exists():
+            continue
+        entries.append(PinnedSymlink(child.resolve(), state / "skills" / child.name))
+    return entries
 
 
 def codex_binary() -> Path | None:
@@ -88,6 +89,11 @@ def codex(
     """Build a Codex confinement spec for ``worktree``."""
     home = Path.home()
     is_darwin = host_platform() == "darwin"
+    app_cli_binds: list[BindSpec] = []
+    darwin_path = _DARWIN_PATH
+    if is_darwin and (_CODEX_APP_CLI / "bin" / "codex").is_file():
+        app_cli_binds = [Bind(_CODEX_APP_CLI, RO, guard=False)]
+        darwin_path = f"{_CODEX_APP_CLI / 'bin'}:{_DARWIN_PATH}"
     skills_binds: list[BindSpec] = []
     if skills:
         skills_binds = (
@@ -97,6 +103,7 @@ def codex(
         )
     binds: list[BindSpec] = [
         *(Bind(p, RO, optional=True, guard=False) for p in extra_ro),
+        *app_cli_binds,
         # Keep shared Git objects writable, pin steering files read-only, and
         # hide sibling worktrees. Plain checkouts receive the same steering pins.
         #
@@ -119,7 +126,7 @@ def codex(
             *NESTING_ENV.items(),
             *GC_ENV,
             ("HOME", str(home)),
-            ("PATH", _DARWIN_PATH if is_darwin else "/usr/bin"),
+            ("PATH", darwin_path if is_darwin else "/usr/bin"),
             ("CODEX_HOME", str(state)),
             *extra_env,
         ),

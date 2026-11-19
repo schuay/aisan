@@ -32,7 +32,7 @@ from ..gitbinds import GC_ENV, git_binds, git_host_files
 from ..sandbox import RO, RW, Bind, BindOver, BindSpec, PinnedSymlink, host_platform
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
 
-_DARWIN_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+_DARWIN_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Disable network-dependent update and download retries. The network namespace
 # enforces isolation; these settings make offline failures return promptly.
@@ -55,7 +55,9 @@ def _catalog_bind(catalog: Path, *, state: Path, is_darwin: bool) -> list[BindSp
         return []
     if is_darwin:
         return [
-            PinnedSymlink(catalog, state / "xdg-cache" / "opencode" / "models.json")
+            PinnedSymlink(
+                catalog.resolve(), state / "xdg-cache" / "opencode" / "models.json"
+            )
         ]
     box_dst = Path.home() / ".cache" / "opencode" / "models.json"
     if catalog.resolve() == box_dst.resolve():

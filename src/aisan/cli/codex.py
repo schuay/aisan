@@ -32,6 +32,7 @@ from aisan.presets.codex import codex, codex_argv, codex_binary
 from aisan.session import (
     LaunchRefused,
     git_config_binds,
+    git_config_env,
     interactive_parser,
     mcp_launcher_binds,
     mirror_user_memory,
@@ -221,7 +222,7 @@ async def _main(argv: list[str]) -> int:
         unshare_net=not args.net,
     )
     # Bind the XDG-aware Git config file without its credential directory.
-    spec = spec.with_binds(git_config_binds())
+    spec = spec.with_binds(git_config_binds()).with_env(git_config_env())
     payload_args = tuple(payload)
     if mcp.enabled:
         payload_args = ("--profile", "aisan-host-mcp", *payload_args)

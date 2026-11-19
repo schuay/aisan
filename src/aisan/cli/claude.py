@@ -38,6 +38,7 @@ from aisan.presets.claude_code import claude_code, claude_code_binary
 from aisan.session import (
     LaunchRefused,
     git_config_binds,
+    git_config_env,
     interactive_parser,
     mcp_launcher_binds,
     mirror_user_memory,
@@ -277,7 +278,7 @@ async def _main(argv: list[str]) -> int:
         unshare_net=not args.net,
     )
     # Bind the XDG-aware Git config file without its credential directory.
-    spec = spec.with_binds(git_config_binds())
+    spec = spec.with_binds(git_config_binds()).with_env(git_config_env())
     command = claude_command(
         mcp_config=mcp_config if mcp.enabled else None,
         settings=settings,
@@ -287,6 +288,12 @@ async def _main(argv: list[str]) -> int:
     menu = [] if args.explain else await fetch_menu(backend)
 
     def prepare() -> None:
+        skills_dst = state / "skills"
+        if skills_dst.is_dir() and not skills_dst.is_symlink():
+            import contextlib
+
+            with contextlib.suppress(OSError):
+                skills_dst.rmdir()
         seed_state(state, menu=menu)
         seed_settings(state)
         seed_user_memory(state, USER_MEMORY)

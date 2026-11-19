@@ -14,9 +14,13 @@ imports so all seed writers can use it without creating an import cycle.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -62,7 +66,57 @@ EMPTY_CREDENTIAL_MOUNTPOINTS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _is_stale_runtime_symlink(path: Path, allowed_root: Path | None) -> bool:
+class StateBusyError(RuntimeError):
+    """Another live session currently holds the exclusive lock on `state`."""
+
+
+@contextmanager
+def lock_state_dir(state: Path) -> Iterator[None]:
+    """Acquire a non-blocking exclusive lock on `state` for a Darwin session.
+
+    Seatbelt has no private mount namespace, so `PinnedSymlink` entries live in
+    `state` on the host filesystem. Locking `state` prevents a second session
+    for the same `(client, repo)` from overwriting or unlinking the active
+    session's symlinks; concurrent sessions should use separate Git worktrees.
+    """
+    prepare_state_dir(state)
+    lock_path = state / ".aisan.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as e:
+            raise StateBusyError(
+                f"another aisan session is already running with state directory"
+                f" {state}; use a separate git worktree for concurrent sessions"
+            ) from e
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def is_state_dir_locked(state: Path) -> bool:
+    """Return whether a live session holds `lock_state_dir(state)`."""
+    lock_path = state / ".aisan.lock"
+    try:
+        fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def is_runtime_symlink(path: Path, allowed_root: Path | None) -> bool:
     """Return whether `path` is a symlink targeting aisan's private runtime tree."""
     if allowed_root is None:
         return False
@@ -72,7 +126,12 @@ def _is_stale_runtime_symlink(path: Path, allowed_root: Path | None) -> bool:
         return False
     if not target.is_absolute() or ".." in target.parts:
         return False
-    return target.is_relative_to(allowed_root)
+    if target.is_relative_to(allowed_root):
+        return True
+    try:
+        return target.resolve().is_relative_to(allowed_root.resolve())
+    except OSError:
+        return False
 
 
 def planted_credentials(
@@ -102,7 +161,7 @@ def planted_credentials(
         if name in EMPTY_CREDENTIAL_MOUNTPOINTS.get(client, ()):
             if stat.S_ISREG(info.st_mode) and info.st_size == 0:
                 continue
-            if stat.S_ISLNK(info.st_mode) and _is_stale_runtime_symlink(
+            if stat.S_ISLNK(info.st_mode) and is_runtime_symlink(
                 path, allowed_symlink_root
             ):
                 continue

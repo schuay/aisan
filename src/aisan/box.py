@@ -26,7 +26,8 @@ from contextlib import AsyncExitStack, ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import Self
 
-from .egress.base import Backend, BackendActivation
+from .egress import known_credential_paths
+from .egress.base import Backend, BackendActivation, credential_overlap
 from .private import private_root
 from .runtime import (
     cleanup_runtime_dir,
@@ -45,6 +46,8 @@ from .sandbox import (
     RO,
     RW,
     Bind,
+    BindOver,
+    BindSpec,
     Mount,
     PinnedSymlink,
     Sandbox,
@@ -52,8 +55,9 @@ from .sandbox import (
     Seal,
     host_platform,
 )
-from .seatbelt import SeatbeltSandbox, seatbelt_path
+from .seatbelt import SeatbeltSandbox, seatbelt_path, through_darwin_system_symlink
 from .spec import BoxSpec
+from .statedir import is_runtime_symlink
 
 
 def _rw_grant_covers(path: Path, spec: BoxSpec) -> bool:
@@ -125,6 +129,7 @@ class Box:
         *,
         box_id: str,
         platform: str | None = None,
+        state_remap: tuple[Path, Path] | None = None,
     ) -> None:
         resolved = _default_platform() if platform is None else platform
         if resolved not in _PLATFORMS:
@@ -135,6 +140,7 @@ class Box:
         self.spec = spec
         self.box_id = box_id
         self.platform = resolved
+        self._state_remap = state_remap
         self.runtime_dir = runtime_dir(box_id)
         self.scratch_dir = scratch_dir(box_id)
         self._staged_profile_path: Path | None = None
@@ -196,6 +202,30 @@ class Box:
         )
         return tcp_ports, unix_sockets
 
+    def _backend_binds(self, backend: Backend) -> list[BindSpec]:
+        """Adapt backend bind-over/symlink entries to `self.platform`."""
+        adapted: list[BindSpec] = []
+        for raw_spec in backend.box_binds(self.runtime_dir):
+            item = raw_spec
+            dst = getattr(item, "dst", None)
+            if (
+                dst is not None
+                and self._state_remap is not None
+                and dst.is_relative_to(self._state_remap[0])
+            ):
+                dst = self._state_remap[1] / dst.relative_to(self._state_remap[0])
+                if isinstance(item, BindOver):
+                    item = BindOver(item.src, dst)
+                elif isinstance(item, PinnedSymlink):
+                    item = PinnedSymlink(item.src, dst)
+            if self.platform == "darwin" and isinstance(item, BindOver):
+                adapted.append(PinnedSymlink(item.src, item.dst))
+            elif self.platform == "linux" and isinstance(item, PinnedSymlink):
+                adapted.append(BindOver(item.src, item.dst))
+            else:
+                adapted.append(item)
+        return adapted
+
     def _stage(self, stack: ExitStack | AsyncExitStack) -> None:
         """Create every on-disk source required before wrapper resolution.
 
@@ -217,12 +247,12 @@ class Box:
             self._staged_profile_path = prof
             stack.callback(self._clear_staged_profile)
             stack.callback(prof.unlink, missing_ok=True)
-        backend_binds = []
+        backend_binds: list[BindSpec] = []
         for backend in self.spec.egress:
             backend.prepare(self.runtime_dir)
             # Remove prepared bind-over sources owned by this runtime directory.
             # Sources outside it belong to the backend's caller and remain intact.
-            for spec in backend.box_binds(self.runtime_dir):
+            for spec in self._backend_binds(backend):
                 backend_binds.append(spec)
                 src = getattr(spec, "src", None)
                 if src is not None and src.parent == self.runtime_dir:
@@ -246,24 +276,30 @@ class Box:
         if not symlinks:
             return
         created_dirs: list[Path] = []
-        priv = private_root()
-        # Register directory removal BEFORE symlink removal so LIFO ExitStack
-        # unlinks staged symlinks first and then removes empty parent dirs.
         staged_links: list[tuple[Path, Path]] = []
+        priv = private_root()
+
+        def cleanup_staged() -> None:
+            for dst, src in reversed(staged_links):
+                _unlink_staged_symlink(dst, src)
+            if created_dirs:
+                _undo_host_paths((), tuple(created_dirs))
+
+        stack.callback(cleanup_staged)
         for sym in symlinks:
-            parent = sym.dst.parent
-            for p in (parent, *parent.parents):
-                if _rw_grant_covers(p, self.spec) and p.is_symlink():
+            norm_parent = through_darwin_system_symlink(sym.dst).parent
+            for p in (norm_parent, *norm_parent.parents):
+                if p.is_symlink():
                     raise ValueError(
                         f"{p} is a symlink; refusing to stage {sym.dst} through it"
                     )
-            cursor = parent
+            cursor = norm_parent
             while not cursor.exists():
                 created_dirs.append(cursor)
                 if cursor == cursor.parent:
                     break
                 cursor = cursor.parent
-            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            norm_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
             try:
                 info = os.lstat(sym.dst)
@@ -274,12 +310,7 @@ class Box:
                     sym.dst.unlink()
                 elif stat.S_ISLNK(info.st_mode):
                     target = Path(os.readlink(sym.dst))
-                    is_stale_runtime = (
-                        target.is_absolute()
-                        and ".." not in target.parts
-                        and target.is_relative_to(priv)
-                    )
-                    if target == sym.src or is_stale_runtime:
+                    if target == sym.src or is_runtime_symlink(sym.dst, priv):
                         sym.dst.unlink()
                     else:
                         raise FileExistsError(
@@ -291,10 +322,6 @@ class Box:
                     )
             sym.dst.symlink_to(sym.src)
             staged_links.append((sym.dst, sym.src))
-        if created_dirs:
-            stack.callback(_undo_host_paths, (), tuple(created_dirs))
-        for dst, src in staged_links:
-            stack.callback(_unlink_staged_symlink, dst, src)
 
     def _ensure_host_paths(self, stack: ExitStack | AsyncExitStack) -> None:
         """Create missing ensure-paths empty and register their cleanup.
@@ -435,19 +462,7 @@ class Box:
                 sb_tmp = seatbelt_path(self.scratch_dir)
                 env["TMPDIR"] = sb_tmp
                 env.setdefault("CLAUDE_CODE_TMPDIR", sb_tmp)
-            if "GIT_CONFIG_GLOBAL" not in env:
-                git_cfg = next(
-                    (
-                        seatbelt_path(b.path)
-                        for b in self.spec.binds
-                        if isinstance(b, Bind)
-                        and b.mode is RO
-                        and b.path.parts[-2:] == ("git", "config")
-                        and b.path.is_file()
-                    ),
-                    "/dev/null",
-                )
-                env["GIT_CONFIG_GLOBAL"] = git_cfg
+            env.setdefault("GIT_CONFIG_GLOBAL", "/dev/null")
         for backend in self.spec.egress:
             if not self._uses_shared_tcp(backend):
                 env.update(backend.client_env())
@@ -513,7 +528,31 @@ class Box:
         if self.spec.egress:
             binds.append(runtime_bind(self.box_id))
             for backend in self.spec.egress:
-                binds += backend.box_binds(self.runtime_dir)
+                binds += self._backend_binds(backend)
+
+        if self.platform == "darwin":
+            from .userbinds import _refused_key_stores
+
+            priv_resolved = private_root().resolve()
+            ext_sym_srcs = tuple(
+                b.src.resolve()
+                for b in binds
+                if isinstance(b, PinnedSymlink)
+                and not b.src.resolve().is_relative_to(priv_resolved)
+            )
+            if ext_sym_srcs:
+                ks_hit = credential_overlap(ext_sym_srcs, _refused_key_stores())
+                if ks_hit is not None:
+                    raise ValueError(
+                        f"box {self.box_id}: PinnedSymlink source {ks_hit[0]} would"
+                        f" expose host key store {ks_hit[1]}"
+                    )
+                cr_hit = credential_overlap(ext_sym_srcs, known_credential_paths())
+                if cr_hit is not None:
+                    raise ValueError(
+                        f"box {self.box_id}: PinnedSymlink source {cr_hit[0]} would"
+                        f" expose host credential {cr_hit[1]}"
+                    )
         sandbox: SandboxBackend
         if self.platform == "darwin":
             tcp_ports, unix_sockets = self._activated_endpoints()
@@ -595,6 +634,12 @@ class Box:
         the launcher without sockets or shared client state.
         """
         sandbox = self._sandbox()
+        if self.platform == "darwin" and not self.scratch_dir.is_dir():
+            raise ValueError(
+                f"box {self.box_id}: Darwin scratch dir {self.scratch_dir} does"
+                " not exist -- call wrapper() inside `async with box:` or"
+                " `with box.staged():`"
+            )
         if self.spec.egress:
             try:
                 sandbox.assert_runtime_visible(self.runtime_dir)

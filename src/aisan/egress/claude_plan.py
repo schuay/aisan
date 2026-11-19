@@ -72,6 +72,10 @@ _STDERR_TAIL = 800
 
 _FIX_EXPIRED = "claude auth login   (on the HOST -- Claude owns this file)"
 _FIX_MISSING = "claude auth login   (no readable credential at that path)"
+_FIX_KEYCHAIN_LOCKED = (
+    "unlock the macOS login keychain on the HOST (or run `claude auth login`)"
+)
+_SECURITY_EXIT_LOCKED = 36
 
 
 # The relay-token variable and the display-only plan label, used by presets
@@ -173,13 +177,17 @@ class PlanCredential:
     async def check(self, backend: str) -> None:
         try:
             await self._ensure_fresh(floor=_EXPIRY_MARGIN_S)
+        except PermissionError as e:
+            fix = _FIX_KEYCHAIN_LOCKED if "keychain" in str(e).lower() else _FIX_MISSING
+            raise PreflightError(backend, str(e), fix) from e
         except OSError as e:
             raise PreflightError(
                 backend, f"cannot read {self.path}: {e}", _FIX_MISSING
             ) from e
         except (KeyError, ValueError) as e:
+            detail = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
             raise PreflightError(
-                backend, f"credential file is not usable: {e}", _FIX_MISSING
+                backend, f"credential file is not usable: {detail}", _FIX_MISSING
             ) from e
         except CredentialRefreshError as e:
             raise PreflightError(
@@ -268,12 +276,20 @@ async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> N
             {
                 "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
                 "CLAUDE_CODE_MAX_RETRIES": "0",
-                "CLAUDE_CONFIG_DIR": str(config_dir),
                 "DISABLE_AUTOUPDATER": "1",
                 "NO_PROXY": bypass,
                 "no_proxy": bypass,
             }
         )
+        # Claude Code on macOS derives its Keychain service suffix from whether
+        # CLAUDE_CONFIG_DIR is set in `process.env`. Keep it unset when refreshing
+        # the default `~/.claude` store unless the host itself exported it.
+        default_dir = Path.home() / ".claude"
+        if config_dir != default_dir or os.environ.get("CLAUDE_CONFIG_DIR"):
+            env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+        else:
+            env.pop("CLAUDE_CONFIG_DIR", None)
+            env.pop("CLAUDE_SECURESTORAGE_CONFIG_DIR", None)
         # Keep the cwd until the child exits so ``getcwd`` remains valid.
         with neutral_child(env) as child:
             process = await asyncio.create_subprocess_exec(
@@ -316,15 +332,32 @@ async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> N
         await runner.cleanup()
 
 
+def _decode_security_secret(raw: str) -> str:
+    """Decode `security find-generic-password -w` text or hex-encoded output."""
+    stripped = raw.strip()
+    if stripped and not stripped.startswith("{") and len(stripped) % 2 == 0:
+        try:
+            return bytes.fromhex(stripped).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return stripped
+
+
 def _keychain_service(config_dir: Path) -> str:
+    override = os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR") or os.environ.get(
+        "CLAUDE_CONFIG_DIR"
+    )
+    if override:
+        digest = hashlib.sha256(override.encode("utf-8")).hexdigest()[:8]
+        return f"Claude Code-credentials-{digest}"
     default_dir = Path.home() / ".claude"
-    if config_dir.resolve() == default_dir.resolve():
+    if config_dir == default_dir:
         return "Claude Code-credentials"
     digest = hashlib.sha256(str(config_dir).encode("utf-8")).hexdigest()[:8]
     return f"Claude Code-credentials-{digest}"
 
 
-def _read_macos_keychain_text(config_dir: Path) -> str | None:
+def _read_macos_keychain_status(config_dir: Path) -> tuple[str | None, int | None]:
     service = _keychain_service(config_dir)
     try:
         res = subprocess.run(
@@ -336,22 +369,57 @@ def _read_macos_keychain_text(config_dir: Path) -> str | None:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return None, None
     if res.returncode != 0:
-        return None
-    text = res.stdout.strip()
-    return text or None
+        return None, res.returncode
+    text = _decode_security_secret(res.stdout)
+    return (text or None), 0
 
 
-def _read_oauth(path: Path, *, use_keychain: bool = False) -> dict:
-    raw = _read_macos_keychain_text(path.parent) if use_keychain else None
-    if raw is None:
-        raw = path.read_text()
+def _read_macos_keychain_text(config_dir: Path) -> str | None:
+    text, _ = _read_macos_keychain_status(config_dir)
+    return text
+
+
+def _parse_oauth_section(raw: str, source_label: Path) -> dict:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise ValueError(f"{path} is not valid JSON") from e
+        raise ValueError(f"{source_label} is not valid JSON") from e
     section = data.get("claudeAiOauth") if isinstance(data, dict) else None
     if not isinstance(section, dict):
-        raise KeyError(f"{path} has no claudeAiOauth section")
+        raise KeyError(f"{source_label} has no claudeAiOauth section")
     return section
+
+
+def _read_oauth(path: Path, *, use_keychain: bool = False) -> dict:
+    if not use_keychain:
+        return _parse_oauth_section(path.read_text(), path)
+
+    kc_text, kc_rc = _read_macos_keychain_status(path.parent)
+    candidates: list[dict] = []
+    last_err: Exception | None = None
+    if kc_text is not None:
+        try:
+            candidates.append(_parse_oauth_section(kc_text, path))
+        except (ValueError, KeyError) as e:
+            last_err = e
+    if path.is_file():
+        try:
+            candidates.append(_parse_oauth_section(path.read_text(), path))
+        except (OSError, ValueError, KeyError) as e:
+            last_err = e
+    if candidates:
+        return max(
+            candidates,
+            key=lambda sec: (
+                sec.get("expiresAt") if isinstance(sec.get("expiresAt"), int) else -1
+            ),
+        )
+    if kc_rc == _SECURITY_EXIT_LOCKED:
+        raise PermissionError(
+            f"the macOS login keychain is locked and {path} is absent"
+        )
+    if last_err is not None:
+        raise last_err
+    return _parse_oauth_section(path.read_text(), path)

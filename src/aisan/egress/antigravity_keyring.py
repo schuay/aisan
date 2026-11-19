@@ -167,6 +167,16 @@ _SECURITY_EXIT_LOCKED = 36
 _SECURITY_EXIT_MISSING = 44
 
 
+def _decode_security_output(raw: str) -> str:
+    stripped = raw.rstrip("\r\n")
+    if stripped and not stripped.startswith("{") and len(stripped) % 2 == 0:
+        try:
+            return bytes.fromhex(stripped).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return stripped
+
+
 def read_macos_keychain(
     attributes: tuple[tuple[str, str], ...] = KEYRING_ATTRIBUTES,
     *,
@@ -177,7 +187,8 @@ def read_macos_keychain(
 
     `security find-generic-password` fails immediately with exit 36 when the
     login keychain is locked (for example over headless SSH), where host `agy`
-    writes its `0600` fallback file instead.
+    writes its `0600` fallback file instead. When both sources exist, pick the
+    valid consumer login with the later expiry.
     """
     attrs = dict(attributes)
     service = attrs.get("service", "gemini")
@@ -197,17 +208,36 @@ def read_macos_keychain(
     except subprocess.TimeoutExpired as e:
         raise KeyringError("the macOS Keychain did not answer", _FIX_LOCKED) from e
 
-    if result is not None and result.returncode == 0:
-        return result.stdout.rstrip("\r\n")
-
+    kc_text = (
+        _decode_security_output(result.stdout)
+        if result is not None and result.returncode == 0
+        else None
+    )
     token_path = fallback_file if fallback_file is not None else default_credentials()
+    file_text: str | None = None
     if token_path.is_file():
         try:
-            return token_path.read_text()
+            file_text = token_path.read_text()
         except OSError as e:
-            raise KeyringError(
-                f"cannot read fallback token file {token_path}: {e}", _FIX_LOGIN
-            ) from e
+            if kc_text is None:
+                raise KeyringError(
+                    f"cannot read fallback token file {token_path}: {e}", _FIX_LOGIN
+                ) from e
+
+    if kc_text is not None and file_text is not None:
+        valid: list[tuple[float, str]] = []
+        for candidate in (kc_text, file_text):
+            try:
+                valid.append((parse_login(candidate).expires_at, candidate))
+            except KeyringError:
+                continue
+        if valid:
+            return max(valid, key=lambda item: item[0])[1]
+        return kc_text
+    if kc_text is not None:
+        return kc_text
+    if file_text is not None:
+        return file_text
 
     if result is None:
         raise KeyringError(

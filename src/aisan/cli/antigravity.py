@@ -27,6 +27,7 @@ from aisan.presets.antigravity import TOKEN_FILE, agy_argv, agy_binary, antigrav
 from aisan.session import (
     LaunchRefused,
     git_config_binds,
+    git_config_env,
     interactive_parser,
     mirror_user_memory,
     parse_interactive_args,
@@ -131,7 +132,7 @@ async def _main(argv: list[str]) -> int:
         unshare_net=not args.net,
     )
     # Bind the XDG-aware Git config file without its credential directory.
-    spec = spec.with_binds(git_config_binds())
+    spec = spec.with_binds(git_config_binds()).with_env(git_config_env())
 
     def prepare() -> None:
         for source in USER_MEMORY:

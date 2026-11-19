@@ -38,7 +38,7 @@ from ..sandbox import (
 )
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
 
-_DARWIN_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+_DARWIN_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Return promptly when the relay is unavailable. Testing reached no answer after
 # 180 seconds with retries and returned code 1 in one second with retries disabled.
@@ -103,7 +103,7 @@ def claude_code(
     skills_bind: list[BindSpec] = []
     if skills is not None:
         skills_bind = [
-            PinnedSymlink(skills, state / "skills")
+            PinnedSymlink(skills.resolve(), state / "skills")
             if is_darwin
             else BindOver(skills, state / "skills")
         ]

@@ -19,6 +19,7 @@ from .box import Box
 from .sandbox import Sandbox, Seal
 from .seatbelt import (
     SeatbeltSandbox,
+    _ere_escape,
     darwin_system_ro_roots,
     seatbelt_lexpath,
     seatbelt_path,
@@ -253,6 +254,9 @@ def _anc_eq(child: str, ancestor: str) -> bool:
         return False
 
 
+_ASSEMBLY_ERRORS = (ValueError, FileNotFoundError, FileExistsError, NotADirectoryError)
+
+
 def assembly_refusal(box: Box) -> Exception | None:
     """Return the error raised while assembling ``box``, if any.
 
@@ -263,7 +267,7 @@ def assembly_refusal(box: Box) -> Exception | None:
     try:
         box._sandbox()
         box.wrapper()
-    except (ValueError, FileNotFoundError) as exc:
+    except _ASSEMBLY_ERRORS as exc:
         return exc
     return None
 
@@ -286,13 +290,13 @@ def explain(
         out.write(f"\n== {title} ==\n")
 
     # Assembly failures have no wrapper arguments to inspect, so report the error.
-    refusal = assembly_refusal(box)
-    if refusal is not None:
+    try:
+        sandbox = box._sandbox()
+        wrapper = box.wrapper()
+    except _ASSEMBLY_ERRORS as refusal:
         section("BOX ASSEMBLY REFUSED")
         out.write(f"  {refusal}\n")
         return out.getvalue()
-    sandbox = box._sandbox()
-    wrapper = box.wrapper()
     is_seatbelt = isinstance(sandbox, SeatbeltSandbox)
     sbpl_text = ""
     if isinstance(sandbox, SeatbeltSandbox):
@@ -471,16 +475,17 @@ def normalise(
     # see every mount the box receives, including the system surface. A prefix
     # that is itself a system root gets no label, or every path under it would
     # be rewritten and the system surface would disappear from the report.
+    all_sys_roots = system_ro_roots() | darwin_system_ro_roots()
     prefixes = [
         (Path(p), name)
         for p, name in (
             (sys.prefix, "<AISAN PREFIX>"),
             (sys.base_prefix, "<AISAN BASE PREFIX>"),
         )
-        if Path(p).resolve() not in system_ro_roots()
+        if Path(p).resolve() not in all_sys_roots
     ]
 
-    subs = [
+    raw_subs = [
         *((str(Path(p).resolve()), name) for p, name in paths),
         *((seatbelt_path(Path(p)), name) for p, name in paths),
         (str(Path(sys.executable)), "<AISAN PYTHON>"),
@@ -498,9 +503,18 @@ def normalise(
         (seatbelt_path(private_root()), "<AISAN PRIVATE>"),
         # The nested private root contains the current uid.
         (_NESTED_ROOT, "<AISAN NESTED ROOT>"),
+        (seatbelt_path(Path(_NESTED_ROOT)), "<AISAN NESTED ROOT>"),
         (tempfile.gettempdir(), "<TMP>"),
         (seatbelt_path(Path(tempfile.gettempdir())), "<TMP>"),
     ]
+    subs: list[tuple[str, str]] = []
+    for pair in raw_subs:
+        if pair is None:
+            continue
+        subs.append(pair)
+        esc = _ere_escape(pair[0])
+        if esc != pair[0]:
+            subs.append((esc, pair[1]))
     # Replace nested paths before their parents.
     for pair in sorted([s for s in subs if s], key=lambda s: -len(s[0])):
         text = text.replace(*pair)

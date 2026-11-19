@@ -27,7 +27,7 @@ from ..gitbinds import GC_ENV, git_binds, git_host_files
 from ..sandbox import RO, RW, Bind, BindSpec, host_platform
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
 
-_DARWIN_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+_DARWIN_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Where agy keeps its login below its state directory when it has no keyring.
 TOKEN_FILE = Path("antigravity-cli") / "antigravity-oauth-token"

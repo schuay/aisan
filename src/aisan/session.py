@@ -13,9 +13,10 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import userbinds
@@ -23,14 +24,21 @@ from .box import Box
 from .egress import known_credential_paths
 from .egress.base import Backend, EgressProfile, PreflightError, credential_overlap
 from .explain import assembly_refusal, explain
-from .launch import exit_status
+from .launch import exit_status, interpreter_chain_dirs
 from .presets import EGRESS_PROFILES, GRANTS
 from .private import private_root
-from .sandbox import RO, Bind, BindOver, BindSpec, host_platform
+from .sandbox import RO, Bind, BindOver, BindSpec, PinnedSymlink, host_platform
 from .seatbelt import darwin_system_ro_roots, seatbelt_path
 from .session_mcp import MCPAllowlist, SessionMCP, _shared_roots, mcp_ro_binds
 from .spec import BoxSpec, Grant
-from .statedir import planted_credentials, prepare_state_dir, write_sealed
+from .statedir import (
+    StateBusyError,
+    is_state_dir_locked,
+    lock_state_dir,
+    planted_credentials,
+    prepare_state_dir,
+    write_sealed,
+)
 from .upstream import Transport
 
 _TERM_PASSTHROUGH = ("TERM", "COLORTERM", "LANG", "LC_ALL")
@@ -86,8 +94,26 @@ def git_config_binds() -> list[BindSpec]:
     return [BindOver(host, box_dst)]
 
 
+def git_config_env() -> tuple[tuple[str, str], ...]:
+    """Return `GIT_CONFIG_GLOBAL` on Darwin when `git_config_binds()` matches."""
+    if host_platform() != "darwin":
+        return ()
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    host = (Path(xdg) if xdg else Path.home() / ".config") / "git" / "config"
+    if not host.is_file():
+        return ()
+    return (("GIT_CONFIG_GLOBAL", seatbelt_path(host.resolve())),)
+
+
 _DARWIN_DEFAULT_BINS = frozenset(
-    {"/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"}
+    {
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    }
 )
 
 
@@ -95,9 +121,10 @@ def darwin_executable_grant(executable_path: Path | None) -> Grant:
     """Grant read-only visibility and PATH discovery for a Darwin client binary.
 
     Homebrew and system binaries sit inside Seatbelt's fixed read-only surface
-    and default PATH. Standalone installations (such as Codex bundled inside
-    `/Applications/ChatGPT.app`) need their self-contained root mounted and
-    their `bin` directory added to `PATH`.
+    and default PATH. Self-contained tool roots (`pyvenv.cfg`, `bin/python`, or
+    `/Applications/*.app`) mount their prefix; other locations mount only the
+    executable and its symlink chain directories so shared trees such as
+    `~/.cargo` or `~/.bun` are never mounted whole.
     """
     if host_platform() != "darwin" or executable_path is None:
         return Grant()
@@ -109,26 +136,41 @@ def darwin_executable_grant(executable_path: Path | None) -> Grant:
         canon = Path(seatbelt_path(target))
         return any(canon == r or canon.is_relative_to(r) for r in sys_roots)
 
+    refused_stores = (
+        *known_credential_paths(),
+        *userbinds._refused_key_stores(),
+    )
     mount_candidates: list[Path] = []
     if not covered_by_surface(executable_path):
-        mount_candidates.append(bin_dir)
+        for hop_dir in interpreter_chain_dirs(executable_path):
+            if not covered_by_surface(hop_dir):
+                mount_candidates.append(hop_dir)
     if not covered_by_surface(real):
         home = Path.home().resolve()
         shared = _shared_roots(home)
-        if (
-            len(real.parents) >= 2
+        root = real.parents[1] if len(real.parents) >= 2 else None
+        is_self_contained = (
+            root is not None
             and real.parent.name == "bin"
-            and real.parents[1] not in shared
-        ):
-            mount_candidates.append(real.parents[1])
-        else:
-            mount_candidates.append(real)
+            and root not in shared
+            and root != Path("/opt")
+            and (
+                str(real).startswith("/Applications/")
+                or (root / "pyvenv.cfg").is_file()
+                or (root / "bin" / "python").exists()
+            )
+            and credential_overlap((root,), refused_stores) is None
+        )
+        mount_candidates.append(
+            root if is_self_contained and root is not None else real
+        )
 
-    dedup_mounts = tuple(dict.fromkeys(mount_candidates))
-    if dedup_mounts and credential_overlap(dedup_mounts, known_credential_paths()):
-        return Grant()
-
-    binds = tuple(Bind(p, RO, guard=False) for p in dedup_mounts)
+    safe_mounts = tuple(
+        p
+        for p in dict.fromkeys(mount_candidates)
+        if credential_overlap((p,), refused_stores) is None
+    )
+    binds = tuple(Bind(p, RO, guard=False) for p in safe_mounts)
     path = (bin_dir,) if str(bin_dir) not in _DARWIN_DEFAULT_BINS else ()
     return Grant(binds=binds, path=path)
 
@@ -409,6 +451,28 @@ def resolve_launcher_flags(
     )
 
 
+def _retarget_state(spec: BoxSpec, old_state: Path, new_state: Path) -> BoxSpec:
+    """Redirect `old_state` binds and env values to `new_state` for locked `--explain`."""
+
+    def remap(p: Path) -> Path:
+        return (
+            new_state / p.relative_to(old_state) if p.is_relative_to(old_state) else p
+        )
+
+    new_binds: list[BindSpec] = []
+    for b in spec.binds:
+        if isinstance(b, Bind):
+            new_binds.append(replace(b, path=remap(b.path)))
+        elif isinstance(b, PinnedSymlink):
+            new_binds.append(PinnedSymlink(b.src, remap(b.dst)))
+        else:
+            new_binds.append(b)
+    old_s = str(old_state)
+    new_s = str(new_state)
+    new_env = tuple((k, v.replace(old_s, new_s)) for k, v in spec.env)
+    return replace(spec, binds=tuple(new_binds), env=new_env)
+
+
 async def run_interactive(
     *,
     client: str,
@@ -425,6 +489,18 @@ async def run_interactive(
     mcp: SessionMCP | None = None,
 ) -> int:
     """Apply launcher options, then explain or run the box."""
+    is_darwin = host_platform() == "darwin"
+    found_binary: Path | None = None
+    if not explain_only:
+        found_binary = binary()
+        if isinstance(spec, BoxSpec):
+            exe_grant = darwin_executable_grant(found_binary)
+            if exe_grant:
+                spec = (
+                    spec.with_binds(list(exe_grant.binds))
+                    .with_path_prefix(exe_grant.path)
+                    .with_env(exe_grant.env)
+                )
     try:
         spec = flags.apply(spec)
     except LaunchRefused as e:
@@ -433,52 +509,84 @@ async def run_interactive(
 
     notice = mcp_notice(mcp) if mcp is not None else None
     if explain_only:
-        box = Box(spec, box_id=box_id(client, repo))
-        # The report shows mounts; this notice attributes them to MCP imports.
         if notice:
             print(notice, file=sys.stderr)
-        with staged_directory(state), box.staged():
-            print(
-                explain(
-                    box,
-                    inputs=(
-                        ("harness", harness),
-                        ("repo", str(repo)),
-                        (
-                            "binds",
-                            ", ".join(map(str, flags.files))
-                            if flags.files
-                            else "(none)",
-                        ),
+        inputs = (
+            ("harness", harness),
+            ("repo", str(repo)),
+            (
+                "binds",
+                ", ".join(map(str, flags.files)) if flags.files else "(none)",
+            ),
+        )
+        if is_darwin and isinstance(spec, BoxSpec) and is_state_dir_locked(state):
+            with tempfile.TemporaryDirectory(
+                dir="/private/tmp", prefix="aisan-exp-"
+            ) as tmp_raw:
+                tmp_state = Path(tmp_raw)
+                exp_box = Box(
+                    _retarget_state(spec, state, tmp_state),
+                    box_id=box_id(client, repo),
+                    state_remap=(state, tmp_state),
+                )
+                try:
+                    with exp_box.staged():
+                        rendered = explain(
+                            exp_box, inputs=inputs, color=sys.stdout.isatty()
+                        )
+                        refused = assembly_refusal(exp_box) is not None
+                except (
+                    ValueError,
+                    FileNotFoundError,
+                    FileExistsError,
+                    NotADirectoryError,
+                ) as exc:
+                    rendered = f"\n== BOX ASSEMBLY REFUSED ==\n  {exc}\n"
+                    refused = True
+                rendered = rendered.replace(
+                    seatbelt_path(tmp_state), seatbelt_path(state)
+                ).replace(str(tmp_state), str(state))
+                print(rendered, end="")
+            return 2 if refused else 0
+
+        box = Box(spec, box_id=box_id(client, repo))
+        try:
+            with staged_directory(state), box.staged():
+                print(
+                    explain(
+                        box,
+                        inputs=inputs,
+                        color=sys.stdout.isatty(),
                     ),
-                    color=sys.stdout.isatty(),
-                ),
-                end="",
-            )
-            # Probe while generated bind-over sources still exist.
-            refused = assembly_refusal(box) is not None
+                    end="",
+                )
+                # Probe while generated bind-over sources still exist.
+                refused = assembly_refusal(box) is not None
+        except (
+            ValueError,
+            FileNotFoundError,
+            FileExistsError,
+            NotADirectoryError,
+        ) as exc:
+            print(f"\n== BOX ASSEMBLY REFUSED ==\n  {exc}\n", end="")
+            return 2
         return 2 if refused else 0
 
-    found_binary = binary()
     if found_binary is None:
-        tool = "sandbox-exec" if host_platform() == "darwin" else "bwrap"
+        tool = "sandbox-exec" if is_darwin else "bwrap"
         print(
             f"no `{executable}` on PATH: this would be an exec failure inside {tool}",
             file=sys.stderr,
         )
         return 2
-    if isinstance(spec, BoxSpec):
-        exe_grant = darwin_executable_grant(found_binary)
-        if exe_grant:
-            spec = (
-                spec.with_binds(list(exe_grant.binds))
-                .with_path_prefix(exe_grant.path)
-                .with_env(exe_grant.env)
-            )
     box = Box(spec, box_id=box_id(client, repo))
 
     # A credential planted in persistent state would enter every later box read-write.
-    planted = planted_credentials(state, client, allowed_symlink_root=private_root())
+    planted = planted_credentials(
+        state,
+        client,
+        allowed_symlink_root=private_root() if is_darwin else None,
+    )
     if planted:
         print(
             "refused: the state directory holds a credential written inside a"
@@ -492,32 +600,37 @@ async def run_interactive(
         )
         return 2
 
-    prepare_state_dir(state)
-    if prepare is not None:
-        prepare()
+    state_ctx = lock_state_dir(state) if is_darwin else contextlib.nullcontext()
     try:
-        async with box:
-            if not box.spec.unshare_net:
-                print(
-                    "WARNING: box shares host networking: internet, LAN/VPN, and"
-                    " host-local services are reachable; configured model"
-                    " credential files are not mounted.",
-                    file=sys.stderr,
+        with state_ctx:
+            prepare_state_dir(state)
+            if prepare is not None:
+                prepare()
+            async with box:
+                if not box.spec.unshare_net:
+                    print(
+                        "WARNING: box shares host networking: internet, LAN/VPN, and"
+                        " host-local services are reachable; configured model"
+                        " credential files are not mounted.",
+                        file=sys.stderr,
+                    )
+                if notice:
+                    print(notice, file=sys.stderr)
+                done = await asyncio.to_thread(
+                    subprocess.run,
+                    box.command(command(box)),
+                    env={**os.environ, **box.env},
+                    check=False,
                 )
-            if notice:
-                print(notice, file=sys.stderr)
-            done = await asyncio.to_thread(
-                subprocess.run,
-                box.command(command(box)),
-                env={**os.environ, **box.env},
-                check=False,
-            )
-            # Convert a negative signal return code to shell exit status.
-            return exit_status(done.returncode)
+                # Convert a negative signal return code to shell exit status.
+                return exit_status(done.returncode)
+    except StateBusyError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
     except PreflightError as e:
         print(f"refused: {e}", file=sys.stderr)
         return 3
-    except (ValueError, FileNotFoundError) as e:
+    except (ValueError, FileNotFoundError, FileExistsError, NotADirectoryError) as e:
         # Bind sources can disappear and mount resolution can still fail after preflight.
         print(f"refused: {e}", file=sys.stderr)
         return 2
