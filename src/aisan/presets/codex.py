@@ -27,8 +27,25 @@ from pathlib import Path
 
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
-from ..sandbox import RO, RW, Bind, BindOver, BindSpec
+from ..sandbox import RO, RW, Bind, BindOver, BindSpec, PinnedSymlink, host_platform
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
+
+_DARWIN_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def _darwin_skills_binds(skills: Path, state: Path, home: Path) -> list[BindSpec]:
+    """Expose host skills on Darwin without overwriting `$CODEX_HOME/skills/.system`."""
+    agents_root = home / ".agents" / "skills"
+    if skills.resolve() == agents_root.resolve():
+        return [Bind(agents_root, RO)]
+    if not skills.is_dir():
+        return [Bind(skills, RO)]
+    entries = [
+        PinnedSymlink(child, state / "skills" / child.name)
+        for child in sorted(skills.iterdir())
+        if child.name != ".system"
+    ]
+    return [Bind(skills, RO), *entries]
 
 
 def codex_binary() -> Path | None:
@@ -42,9 +59,11 @@ def codex_argv(
 ) -> list[str]:
     """Build arguments for Codex running in the outer sandbox."""
     config = [arg for value in overrides for arg in ("--config", value)]
+    daemon = ["--no-daemon"] if host_platform() == "darwin" else []
     return [
         "codex",
         "--dangerously-bypass-approvals-and-sandbox",
+        *daemon,
         *config,
         *extra,
     ]
@@ -68,6 +87,14 @@ def codex(
 ) -> BoxSpec:
     """Build a Codex confinement spec for ``worktree``."""
     home = Path.home()
+    is_darwin = host_platform() == "darwin"
+    skills_binds: list[BindSpec] = []
+    if skills:
+        skills_binds = (
+            _darwin_skills_binds(skills, state, home)
+            if is_darwin
+            else [BindOver(skills, home / ".agents" / "skills")]
+        )
     binds: list[BindSpec] = [
         *(Bind(p, RO, optional=True, guard=False) for p in extra_ro),
         # Keep shared Git objects writable, pin steering files read-only, and
@@ -79,9 +106,9 @@ def codex(
         *git_binds(worktree, pin_packs=unshare_net),
         *([] if state.is_relative_to(worktree) else [Bind(state, RW)]),
         # Codex 0.153.4 scans `$CODEX_HOME/skills`, `~/.agents/skills`, and two
-        # worktree roots. Use the home root: it needs no host mount point under
-        # the state directory, and it leaves the `.system` bundle writable.
-        *([BindOver(skills, home / ".agents" / "skills")] if skills else []),
+        # worktree roots. Use the home root on Linux; on Darwin link individual
+        # entries into `$CODEX_HOME/skills` while leaving `.system` writable.
+        *skills_binds,
     ]
     return BoxSpec(
         root=worktree,
@@ -92,7 +119,7 @@ def codex(
             *NESTING_ENV.items(),
             *GC_ENV,
             ("HOME", str(home)),
-            ("PATH", "/usr/bin"),
+            ("PATH", _DARWIN_PATH if is_darwin else "/usr/bin"),
             ("CODEX_HOME", str(state)),
             *extra_env,
         ),
@@ -105,6 +132,7 @@ def codex(
             tasks_max=tasks_max,
             slice_unit=cgroup_slice,
         ),
+        mach_profiles=("codex-cfprefs",) if is_darwin else (),
     )
 
 

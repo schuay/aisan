@@ -27,7 +27,7 @@ from ..proxy.antigravity import Profile, make_app
 from ..proxy.gemini import BodyPolicy
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
-from ..sandbox import BindOver, BindSpec
+from ..sandbox import BindOver, BindSpec, PinnedSymlink, host_platform
 from ..statedir import write_sealed
 from ..upstream import DIRECT, Transport
 from .base import (
@@ -128,7 +128,10 @@ class AntigravityBackend(Backend):
         return self._client_env(SHARED_PORT_MARKER)
 
     def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
-        return [BindOver(runtime_dir / _BOX_TOKEN_NAME, self._token_file)]
+        src = runtime_dir / _BOX_TOKEN_NAME
+        if host_platform() == "darwin":
+            return [PinnedSymlink(src, self._token_file)]
+        return [BindOver(src, self._token_file)]
 
     def prepare(self, runtime_dir: Path) -> None:
         self._write_box_token(runtime_dir, PLACEHOLDER_KEY)

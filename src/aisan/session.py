@@ -20,12 +20,15 @@ from pathlib import Path
 
 from . import userbinds
 from .box import Box
-from .egress.base import Backend, EgressProfile, PreflightError
+from .egress import known_credential_paths
+from .egress.base import Backend, EgressProfile, PreflightError, credential_overlap
 from .explain import assembly_refusal, explain
 from .launch import exit_status
 from .presets import EGRESS_PROFILES, GRANTS
-from .sandbox import RO, Bind, BindOver, BindSpec
-from .session_mcp import MCPAllowlist, SessionMCP, mcp_ro_binds
+from .private import private_root
+from .sandbox import RO, Bind, BindOver, BindSpec, host_platform
+from .seatbelt import darwin_system_ro_roots, seatbelt_path
+from .session_mcp import MCPAllowlist, SessionMCP, _shared_roots, mcp_ro_binds
 from .spec import BoxSpec, Grant
 from .statedir import planted_credentials, prepare_state_dir, write_sealed
 from .upstream import Transport
@@ -75,10 +78,59 @@ def git_config_binds() -> list[BindSpec]:
     host = (Path(xdg) if xdg else Path.home() / ".config") / "git" / "config"
     if not host.is_file():
         return []
+    if host_platform() == "darwin":
+        return [Bind(host.resolve(), RO)]
     box_dst = Path.home() / ".config" / "git" / "config"
     if host.resolve() == box_dst.resolve():
         return [Bind(box_dst, RO)]
     return [BindOver(host, box_dst)]
+
+
+_DARWIN_DEFAULT_BINS = frozenset(
+    {"/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"}
+)
+
+
+def darwin_executable_grant(executable_path: Path | None) -> Grant:
+    """Grant read-only visibility and PATH discovery for a Darwin client binary.
+
+    Homebrew and system binaries sit inside Seatbelt's fixed read-only surface
+    and default PATH. Standalone installations (such as Codex bundled inside
+    `/Applications/ChatGPT.app`) need their self-contained root mounted and
+    their `bin` directory added to `PATH`.
+    """
+    if host_platform() != "darwin" or executable_path is None:
+        return Grant()
+    bin_dir = executable_path.parent
+    real = executable_path.resolve()
+    sys_roots = darwin_system_ro_roots()
+
+    def covered_by_surface(target: Path) -> bool:
+        canon = Path(seatbelt_path(target))
+        return any(canon == r or canon.is_relative_to(r) for r in sys_roots)
+
+    mount_candidates: list[Path] = []
+    if not covered_by_surface(executable_path):
+        mount_candidates.append(bin_dir)
+    if not covered_by_surface(real):
+        home = Path.home().resolve()
+        shared = _shared_roots(home)
+        if (
+            len(real.parents) >= 2
+            and real.parent.name == "bin"
+            and real.parents[1] not in shared
+        ):
+            mount_candidates.append(real.parents[1])
+        else:
+            mount_candidates.append(real)
+
+    dedup_mounts = tuple(dict.fromkeys(mount_candidates))
+    if dedup_mounts and credential_overlap(dedup_mounts, known_credential_paths()):
+        return Grant()
+
+    binds = tuple(Bind(p, RO, guard=False) for p in dedup_mounts)
+    path = (bin_dir,) if str(bin_dir) not in _DARWIN_DEFAULT_BINS else ()
+    return Grant(binds=binds, path=path)
 
 
 def repo_key(repo: Path) -> str:
@@ -297,13 +349,32 @@ def resolve_launcher_flags(
             )
             continue
         # Each backend defines whether its transport is safe on host loopback.
-        stranded = [b.name for b in profile.backends if not b.supports_shared_net]
-        if stranded and not unshare_net:
-            raise LaunchRefused(
-                f"--egress {name} needs the box's own network: {', '.join(stranded)}"
-                " would otherwise answer on the host's loopback, unauthenticated."
-                " Drop --net."
-            )
+        is_darwin = host_platform() == "darwin"
+        if is_darwin:
+            unsupported = [
+                b.name
+                for b in profile.backends
+                if not b.supports_shared_net
+                and not (unshare_net and b.supports_direct_unix_socket)
+            ]
+            if unsupported:
+                if not unshare_net:
+                    raise LaunchRefused(
+                        f"--egress {name} needs an isolated box: {', '.join(unsupported)}"
+                        " cannot serve unauthenticated on host networking. Drop --net."
+                    )
+                raise LaunchRefused(
+                    f"--egress {name}: {', '.join(unsupported)} requires a Linux"
+                    " network namespace and is not supported on macOS Seatbelt."
+                )
+        else:
+            stranded = [b.name for b in profile.backends if not b.supports_shared_net]
+            if stranded and not unshare_net:
+                raise LaunchRefused(
+                    f"--egress {name} needs the box's own network: {', '.join(stranded)}"
+                    " would otherwise answer on the host's loopback, unauthenticated."
+                    " Drop --net."
+                )
         if profile.notice:
             print(profile.notice, file=sys.stderr)
         profiles.append((name, profile))
@@ -361,8 +432,8 @@ async def run_interactive(
         return e.code
 
     notice = mcp_notice(mcp) if mcp is not None else None
-    box = Box(spec, box_id=box_id(client, repo))
     if explain_only:
+        box = Box(spec, box_id=box_id(client, repo))
         # The report shows mounts; this notice attributes them to MCP imports.
         if notice:
             print(notice, file=sys.stderr)
@@ -388,15 +459,26 @@ async def run_interactive(
             refused = assembly_refusal(box) is not None
         return 2 if refused else 0
 
-    if binary() is None:
+    found_binary = binary()
+    if found_binary is None:
+        tool = "sandbox-exec" if host_platform() == "darwin" else "bwrap"
         print(
-            f"no `{executable}` on PATH: this would be an exec failure inside bwrap",
+            f"no `{executable}` on PATH: this would be an exec failure inside {tool}",
             file=sys.stderr,
         )
         return 2
+    if isinstance(spec, BoxSpec):
+        exe_grant = darwin_executable_grant(found_binary)
+        if exe_grant:
+            spec = (
+                spec.with_binds(list(exe_grant.binds))
+                .with_path_prefix(exe_grant.path)
+                .with_env(exe_grant.env)
+            )
+    box = Box(spec, box_id=box_id(client, repo))
 
     # A credential planted in persistent state would enter every later box read-write.
-    planted = planted_credentials(state, client)
+    planted = planted_credentials(state, client, allowed_symlink_root=private_root())
     if planted:
         print(
             "refused: the state directory holds a credential written inside a"

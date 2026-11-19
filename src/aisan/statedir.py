@@ -62,7 +62,25 @@ EMPTY_CREDENTIAL_MOUNTPOINTS: dict[str, tuple[str, ...]] = {
 }
 
 
-def planted_credentials(state: Path, client: str) -> list[Path]:
+def _is_stale_runtime_symlink(path: Path, allowed_root: Path | None) -> bool:
+    """Return whether `path` is a symlink targeting aisan's private runtime tree."""
+    if allowed_root is None:
+        return False
+    try:
+        target = Path(os.readlink(path))
+    except OSError:
+        return False
+    if not target.is_absolute() or ".." in target.parts:
+        return False
+    return target.is_relative_to(allowed_root)
+
+
+def planted_credentials(
+    state: Path,
+    client: str,
+    *,
+    allowed_symlink_root: Path | None = None,
+) -> list[Path]:
     """Find credentials left in client state by an earlier boxed session.
 
     The state directory is writable and persists across sessions for a
@@ -70,8 +88,9 @@ def planted_credentials(state: Path, client: str) -> list[Path]:
     token to later sessions without adding a credential mount.
 
     ``lstat`` counts symlinks because an occupied credential path is sufficient.
-    An empty regular bind-over mountpoint is the one exception; it contains no
-    credential and the runtime placeholder hides it inside the box.
+    An empty regular bind-over mountpoint (or a stale Seatbelt symlink into
+    aisan's private root) is the exception; it contains no credential and the
+    runtime placeholder replaces it inside the box.
     """
     found: list[Path] = []
     for name in BOXED_CREDENTIALS.get(client, ()):
@@ -80,12 +99,13 @@ def planted_credentials(state: Path, client: str) -> list[Path]:
             info = os.lstat(path)
         except OSError:
             continue
-        if (
-            name in EMPTY_CREDENTIAL_MOUNTPOINTS.get(client, ())
-            and stat.S_ISREG(info.st_mode)
-            and info.st_size == 0
-        ):
-            continue
+        if name in EMPTY_CREDENTIAL_MOUNTPOINTS.get(client, ()):
+            if stat.S_ISREG(info.st_mode) and info.st_size == 0:
+                continue
+            if stat.S_ISLNK(info.st_mode) and _is_stale_runtime_symlink(
+                path, allowed_symlink_root
+            ):
+                continue
         found.append(path)
     return found
 

@@ -81,7 +81,10 @@ async def _hello(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-def test_cli_config_pins_the_measured_route_and_disables_other_egress(tmp_path):
+def test_cli_config_pins_the_measured_route_and_disables_other_egress(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     backend = _backend(tmp_path, model="gpt-test", upstream="https://example.test/v1")
     assert backend.config_overrides() == (
         'model_provider="openai"',
@@ -99,7 +102,8 @@ def test_cli_config_pins_the_measured_route_and_disables_other_egress(tmp_path):
     assert backend.client_env() == {CLIENT_KEY_ENV: PLACEHOLDER_KEY}
 
 
-def test_cli_config_routes_account_usage_through_the_proxy(tmp_path):
+def test_cli_config_routes_account_usage_through_the_proxy(tmp_path, monkeypatch):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     state = tmp_path / "state"
     backend = _backend(
         tmp_path,
@@ -303,7 +307,8 @@ async def test_shared_backend_serves_the_activated_tcp_endpoint(tmp_path):
     assert reached == ["/v1/responses", "/v1/wham/usage"]
 
 
-def test_codex_preset_is_registered_and_uses_isolated_state(tmp_path):
+def test_codex_preset_is_registered_and_uses_isolated_state(tmp_path, monkeypatch):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     state = tmp_path / "state"
@@ -329,9 +334,10 @@ def test_codex_preset_is_registered_and_uses_isolated_state(tmp_path):
     ]
 
 
-def test_host_skills_mount_at_the_home_skill_root(tmp_path):
+def test_host_skills_mount_at_the_home_skill_root(tmp_path, monkeypatch):
     """`$CODEX_HOME/skills` holds the writable `.system` bundle, so use the
     home root Codex also scans."""
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     worktree = tmp_path / "wt"
     worktree.mkdir()
     state = tmp_path / "state"

@@ -26,7 +26,15 @@ from pathlib import Path
 
 from .proxy import relay
 from .runtime import CLIENT_ENV_NAME, read_client_env, read_manifest
-from .sandbox import RO, Bind, BindSpec, system_ro_roots, through_system_symlink
+from .sandbox import (
+    RO,
+    Bind,
+    BindSpec,
+    host_platform,
+    system_ro_roots,
+    through_system_symlink,
+)
+from .seatbelt import darwin_system_ro_roots, through_darwin_system_symlink
 
 # Forward terminal and supervisor termination signals to the payload.
 _FORWARD = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
@@ -123,6 +131,7 @@ def launcher_binds(
     prefixes: tuple[Path, Path] | None = None,
     *,
     home: Path | None = None,
+    platform: str | None = None,
 ) -> list[BindSpec]:
     """Return read-only binds for the in-box aisan launcher.
 
@@ -165,11 +174,17 @@ def launcher_binds(
         # cannot prove a prefix: a personal ~/bin would select the whole home.
         if alias.resolve(strict=True) == base.resolve(strict=True):
             roots.append(alias)
-    system = system_ro_roots()
+    active_platform = host_platform() if platform is None else platform
+    if active_platform == "darwin":
+        system = darwin_system_ro_roots()
+        rewrite = through_darwin_system_symlink
+    else:
+        system = system_ro_roots()
+        rewrite = through_system_symlink
     binds: list[BindSpec] = []
     seen: set[Path] = set()
     for hop in (*roots, *interpreter_chain_dirs(exe)):
-        path = through_system_symlink(hop)
+        path = rewrite(hop)
         # An alias is a separate publication, even when its source is /usr.
         if path in seen or path in system:
             continue
@@ -202,8 +217,22 @@ def exit_status(code: int) -> int:
     return code if code >= 0 else 128 - code
 
 
+def _cap_darwin_nofile() -> None:
+    """Bound Darwin's soft `RLIMIT_NOFILE` so close-range loops do not stall."""
+    if sys.platform != "darwin":
+        return
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    cap = 65536 if hard == resource.RLIM_INFINITY else min(hard, 65536)
+    if soft == resource.RLIM_INFINITY or soft > cap:
+        with contextlib.suppress(ValueError, OSError):
+            resource.setrlimit(resource.RLIMIT_NOFILE, (cap, hard))
+
+
 async def _run(runtime_dir: Path, cmd: list[str]) -> int:
     """Inject shared state and exec, or serve isolated relays around `cmd`."""
+    _cap_darwin_nofile()
     if (runtime_dir / CLIENT_ENV_NAME).exists():
         env = {**os.environ, **read_client_env(runtime_dir)}
         os.execvpe(cmd[0], cmd, env)  # noqa: S606 - argv exec, no shell

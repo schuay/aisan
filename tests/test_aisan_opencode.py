@@ -372,9 +372,12 @@ def test_no_bind_source_contains_the_credential(tmp_path):
         assert not DEFAULT_CREDENTIALS.is_relative_to(m.src), f"{m.src} would expose it"
 
 
-def test_the_state_dir_is_rw_and_the_catalog_substitutes_at_the_box_read_path(tmp_path):
+def test_the_state_dir_is_rw_and_the_catalog_substitutes_at_the_box_read_path(
+    tmp_path, monkeypatch
+):
     from aisan.sandbox import BindOver
 
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     spec = _spec(tmp_path)
     modes = {
         Path(b.path): (b.mode, b.optional) for b in spec.binds if hasattr(b, "mode")
@@ -419,7 +422,8 @@ def test_the_environment_names_the_state_dir_and_disables_the_fetchers(tmp_path)
         assert env[flag] == "1"
 
 
-def test_xdg_config_home_is_left_unset(tmp_path):
+def test_xdg_config_home_is_left_unset(tmp_path, monkeypatch):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     assert "XDG_CONFIG_HOME" not in dict(_spec(tmp_path).env)
 
 

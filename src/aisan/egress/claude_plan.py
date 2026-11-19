@@ -22,8 +22,11 @@ keychain, or path outside the transport allowlist.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,14 +80,17 @@ OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"  # noqa: S105 -- a variable name
 SUBSCRIPTION_ENV = "CLAUDE_CODE_SUBSCRIPTION_TYPE"
 
 
-def _read_subscription(path: Path) -> str | None:
+def _read_subscription(path: Path, *, use_keychain: bool = False) -> str | None:
     """Return the subscription name used in the box's status line.
 
     Missing or invalid credentials omit this display-only value. Tests showed
     that the setting doesn't change request headers, beta flags, or body fields.
     """
     try:
-        value = _read_oauth(path).get("subscriptionType")
+        data = (
+            _read_oauth(path, use_keychain=True) if use_keychain else _read_oauth(path)
+        )
+        value = data.get("subscriptionType")
     except (OSError, ValueError, KeyError):
         return None
     return value if isinstance(value, str) and value else None
@@ -96,6 +102,7 @@ class PlanCredential:
 
     path: Path
     claude_command: tuple[str, ...]
+    use_keychain: bool = False
     _flight: SingleFlight = field(
         default_factory=SingleFlight, init=False, repr=False, compare=False
     )
@@ -117,7 +124,7 @@ class PlanCredential:
     async def _ensure_fresh(self, *, floor: float) -> tuple[str, int]:
         """Refresh a near-expired token and determine success from the file."""
         return await ensure_fresh(
-            lambda: _read_plan_credential(self.path),
+            lambda: _read_plan_credential(self.path, use_keychain=self.use_keychain),
             _remaining_seconds,
             lambda: self._flight.join(self._attempt),
             margin=_EXPIRY_MARGIN_S,
@@ -158,7 +165,7 @@ class PlanCredential:
 
     def dress(self, token: str) -> dict[str, str]:
         env = {OAUTH_TOKEN_ENV: token}
-        plan = _read_subscription(self.path)
+        plan = _read_subscription(self.path, use_keychain=self.use_keychain)
         if plan is not None:
             env[SUBSCRIPTION_ENV] = plan
         return env
@@ -182,9 +189,9 @@ class PlanCredential:
             ) from e
 
 
-def _read_plan_credential(path: Path) -> tuple[str, int]:
+def _read_plan_credential(path: Path, *, use_keychain: bool = False) -> tuple[str, int]:
     """Read a mutually consistent access token and expiry from one snapshot."""
-    data = _read_oauth(path)
+    data = _read_oauth(path, use_keychain=True) if use_keychain else _read_oauth(path)
     token = data.get("accessToken")
     if not isinstance(token, str) or not token:
         raise KeyError(f"{path} has no claudeAiOauth.accessToken")
@@ -309,11 +316,39 @@ async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> N
         await runner.cleanup()
 
 
-def _read_oauth(path: Path) -> dict:
-    import json
+def _keychain_service(config_dir: Path) -> str:
+    default_dir = Path.home() / ".claude"
+    if config_dir.resolve() == default_dir.resolve():
+        return "Claude Code-credentials"
+    digest = hashlib.sha256(str(config_dir).encode("utf-8")).hexdigest()[:8]
+    return f"Claude Code-credentials-{digest}"
 
+
+def _read_macos_keychain_text(config_dir: Path) -> str | None:
+    service = _keychain_service(config_dir)
     try:
-        data = json.loads(path.read_text())
+        res = subprocess.run(
+            ["/usr/bin/security", "find-generic-password", "-s", service, "-w"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    text = res.stdout.strip()
+    return text or None
+
+
+def _read_oauth(path: Path, *, use_keychain: bool = False) -> dict:
+    raw = _read_macos_keychain_text(path.parent) if use_keychain else None
+    if raw is None:
+        raw = path.read_text()
+    try:
+        data = json.loads(raw)
     except json.JSONDecodeError as e:
         raise ValueError(f"{path} is not valid JSON") from e
     section = data.get("claudeAiOauth") if isinstance(data, dict) else None

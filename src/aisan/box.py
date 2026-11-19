@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 from collections.abc import Iterator
 from contextlib import AsyncExitStack, ExitStack, contextmanager, suppress
 from pathlib import Path
@@ -29,13 +30,29 @@ from .egress.base import Backend, BackendActivation
 from .private import private_root
 from .runtime import (
     cleanup_runtime_dir,
+    cleanup_scratch_dir,
     prepare_runtime_dir,
+    prepare_scratch_dir,
+    profile_path,
     runtime_bind,
     runtime_dir,
+    scratch_bind,
+    scratch_dir,
     write_client_env,
     write_manifest,
 )
-from .sandbox import RO, RW, Bind, Mount, Sandbox, SandboxBackend, Seal
+from .sandbox import (
+    RO,
+    RW,
+    Bind,
+    Mount,
+    PinnedSymlink,
+    Sandbox,
+    SandboxBackend,
+    Seal,
+    host_platform,
+)
+from .seatbelt import SeatbeltSandbox, seatbelt_path
 from .spec import BoxSpec
 
 
@@ -80,12 +97,19 @@ def _undo_host_paths(files: tuple[Path, ...], dirs: tuple[Path, ...]) -> None:
             d.rmdir()
 
 
+def _unlink_staged_symlink(dst: Path, expected_src: Path) -> None:
+    """Remove a staged `PinnedSymlink` only if it is still a link to `expected_src`."""
+    with suppress(OSError):
+        if dst.is_symlink() and Path(os.readlink(dst)) == expected_src:
+            dst.unlink(missing_ok=True)
+
+
 _PLATFORMS = frozenset({"linux", "darwin"})
 
 
 def _default_platform() -> str:
     """Return the active confinement platform identifier."""
-    return "linux"
+    return host_platform()
 
 
 class Box:
@@ -112,8 +136,13 @@ class Box:
         self.box_id = box_id
         self.platform = resolved
         self.runtime_dir = runtime_dir(box_id)
+        self.scratch_dir = scratch_dir(box_id)
+        self._staged_profile_path: Path | None = None
         self._stack: AsyncExitStack | None = None
         self._activations: dict[Backend, BackendActivation] = {}
+
+    def _clear_staged_profile(self) -> None:
+        self._staged_profile_path = None
 
     def _uses_shared_tcp(self, backend: Backend) -> bool:
         """Return whether `backend` serves authenticated TCP on host loopback.
@@ -170,23 +199,102 @@ class Box:
     def _stage(self, stack: ExitStack | AsyncExitStack) -> None:
         """Create every on-disk source required before wrapper resolution.
 
-        This includes ensure-paths, the runtime directory, and backend bind-over
-        sources. Both live boxes and `staged()` inspection use this method so the
-        inspector resolves the same profile. Every created resource registers
-        cleanup on the supplied stack.
+        This includes ensure-paths, the runtime directory, backend bind-over
+        sources, and Darwin scratch/symlink staging. Both live boxes and
+        `staged()` inspection use this method so the inspector resolves the
+        same profile. Every created resource registers cleanup on the supplied
+        stack.
         """
         self._ensure_host_paths(stack)
         prepare_runtime_dir(self.box_id)
         # Register cleanup before backend preparation can fail.
         stack.callback(cleanup_runtime_dir, self.box_id)
+        if self.platform == "darwin":
+            prepare_scratch_dir(self.box_id)
+            stack.callback(cleanup_scratch_dir, self.box_id)
+            prof = profile_path(self.box_id)
+            prof.unlink(missing_ok=True)
+            self._staged_profile_path = prof
+            stack.callback(self._clear_staged_profile)
+            stack.callback(prof.unlink, missing_ok=True)
+        backend_binds = []
         for backend in self.spec.egress:
             backend.prepare(self.runtime_dir)
             # Remove prepared bind-over sources owned by this runtime directory.
             # Sources outside it belong to the backend's caller and remain intact.
             for spec in backend.box_binds(self.runtime_dir):
+                backend_binds.append(spec)
                 src = getattr(spec, "src", None)
                 if src is not None and src.parent == self.runtime_dir:
                     stack.callback(src.unlink, missing_ok=True)
+        if self.platform == "darwin":
+            self._stage_pinned_symlinks(
+                stack,
+                tuple(
+                    b
+                    for b in (*self.spec.binds, *backend_binds)
+                    if isinstance(b, PinnedSymlink)
+                ),
+            )
+
+    def _stage_pinned_symlinks(
+        self,
+        stack: ExitStack | AsyncExitStack,
+        symlinks: tuple[PinnedSymlink, ...],
+    ) -> None:
+        """Stage `PinnedSymlink` entries without overwriting user-owned files."""
+        if not symlinks:
+            return
+        created_dirs: list[Path] = []
+        priv = private_root()
+        # Register directory removal BEFORE symlink removal so LIFO ExitStack
+        # unlinks staged symlinks first and then removes empty parent dirs.
+        staged_links: list[tuple[Path, Path]] = []
+        for sym in symlinks:
+            parent = sym.dst.parent
+            for p in (parent, *parent.parents):
+                if _rw_grant_covers(p, self.spec) and p.is_symlink():
+                    raise ValueError(
+                        f"{p} is a symlink; refusing to stage {sym.dst} through it"
+                    )
+            cursor = parent
+            while not cursor.exists():
+                created_dirs.append(cursor)
+                if cursor == cursor.parent:
+                    break
+                cursor = cursor.parent
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+            try:
+                info = os.lstat(sym.dst)
+            except FileNotFoundError:
+                info = None
+            if info is not None:
+                if stat.S_ISREG(info.st_mode) and info.st_size == 0:
+                    sym.dst.unlink()
+                elif stat.S_ISLNK(info.st_mode):
+                    target = Path(os.readlink(sym.dst))
+                    is_stale_runtime = (
+                        target.is_absolute()
+                        and ".." not in target.parts
+                        and target.is_relative_to(priv)
+                    )
+                    if target == sym.src or is_stale_runtime:
+                        sym.dst.unlink()
+                    else:
+                        raise FileExistsError(
+                            f"refusing to overwrite unexpected symlink at {sym.dst}"
+                        )
+                else:
+                    raise FileExistsError(
+                        f"refusing to overwrite existing path at {sym.dst}"
+                    )
+            sym.dst.symlink_to(sym.src)
+            staged_links.append((sym.dst, sym.src))
+        if created_dirs:
+            stack.callback(_undo_host_paths, (), tuple(created_dirs))
+        for dst, src in staged_links:
+            stack.callback(_unlink_staged_symlink, dst, src)
 
     def _ensure_host_paths(self, stack: ExitStack | AsyncExitStack) -> None:
         """Create missing ensure-paths empty and register their cleanup.
@@ -322,6 +430,24 @@ class Box:
         out of host process command lines.
         """
         env = dict(self.spec.env)
+        if self.platform == "darwin":
+            if "TMPDIR" not in env:
+                sb_tmp = seatbelt_path(self.scratch_dir)
+                env["TMPDIR"] = sb_tmp
+                env.setdefault("CLAUDE_CODE_TMPDIR", sb_tmp)
+            if "GIT_CONFIG_GLOBAL" not in env:
+                git_cfg = next(
+                    (
+                        seatbelt_path(b.path)
+                        for b in self.spec.binds
+                        if isinstance(b, Bind)
+                        and b.mode is RO
+                        and b.path.parts[-2:] == ("git", "config")
+                        and b.path.is_file()
+                    ),
+                    "/dev/null",
+                )
+                env["GIT_CONFIG_GLOBAL"] = git_cfg
         for backend in self.spec.egress:
             if not self._uses_shared_tcp(backend):
                 env.update(backend.client_env())
@@ -355,9 +481,14 @@ class Box:
         # unexpectedly downgrade that explicit grant. This matters when a box is
         # rooted at the aisan checkout and needs to edit its own source or venv.
         binds = list(self.spec.binds)
+        lb_items = (
+            launcher_binds()
+            if self.platform == host_platform()
+            else launcher_binds(platform=self.platform)
+        )
         binds += [
             b
-            for b in launcher_binds()
+            for b in lb_items
             if not (
                 isinstance(b, Bind)
                 and b.mode is RO
@@ -365,31 +496,53 @@ class Box:
             )
         ]
         # Hide the shared host-control namespace, then expose only this box's
-        # runtime directory. The root may not exist before the first box.
+        # runtime directory (and per-box scratch dir on Darwin).
+        holes: list[Path] = []
+        if self.platform == "darwin":
+            holes.append(self.scratch_dir)
+            binds.append(scratch_bind(self.box_id))
+        if self.spec.egress:
+            holes.append(self.runtime_dir)
         binds.append(
             Seal(
                 private_root(),
                 allow_missing=True,
-                allow=(self.runtime_dir,) if self.spec.egress else (),
+                allow=tuple(holes),
             )
         )
         if self.spec.egress:
             binds.append(runtime_bind(self.box_id))
             for backend in self.spec.egress:
                 binds += backend.box_binds(self.runtime_dir)
-        sandbox = Sandbox(
-            root=self.spec.root,
-            binds=tuple(binds),
-            tmpfs=self.spec.tmpfs,
-            env=tuple(self.env.items()),
-            memory_max=self.spec.limits.memory_max,
-            cpu_quota=self.spec.limits.cpu_quota,
-            tasks_max=self.spec.limits.tasks_max,
-            slice_unit=self.spec.limits.slice_unit,
-            use_cgroup=self.spec.limits.use_cgroup,
-            unshare_net=self.spec.unshare_net,
-            root_tmpfs=self.spec.root_tmpfs,
-        )
+        sandbox: SandboxBackend
+        if self.platform == "darwin":
+            tcp_ports, unix_sockets = self._activated_endpoints()
+            sandbox = SeatbeltSandbox(
+                root=self.spec.root,
+                binds=tuple(binds),
+                env=tuple(self.env.items()),
+                unshare_net=self.spec.unshare_net,
+                root_tmpfs=self.spec.root_tmpfs,
+                allow_local_loopback=self.spec.allow_local_loopback,
+                mach_profiles=self.spec.mach_profiles,
+                tcp_ports=tcp_ports,
+                unix_sockets=unix_sockets,
+                profile_path=self._staged_profile_path,
+            )
+        else:
+            sandbox = Sandbox(
+                root=self.spec.root,
+                binds=tuple(binds),
+                tmpfs=self.spec.tmpfs,
+                env=tuple(self.env.items()),
+                memory_max=self.spec.limits.memory_max,
+                cpu_quota=self.spec.limits.cpu_quota,
+                tasks_max=self.spec.limits.tasks_max,
+                slice_unit=self.spec.limits.slice_unit,
+                use_cgroup=self.spec.limits.use_cgroup,
+                unshare_net=self.spec.unshare_net,
+                root_tmpfs=self.spec.root_tmpfs,
+            )
 
         # Every seal states that its contents stay out of the box, so an alias
         # to a sealed directory is refused here rather than at `wrapper`. This
@@ -425,11 +578,13 @@ class Box:
         return sandbox
 
     def mounts(self) -> list[Mount]:
-        """The resolved mount list, in the order bwrap will apply it."""
+        """Return the resolved mount list for the active confinement backend."""
         sandbox = self._sandbox()
-        if not isinstance(sandbox, Sandbox):
-            raise TypeError("resolved mount lists belong to the bwrap backend")
-        return sandbox.resolve()
+        if isinstance(sandbox, Sandbox):
+            return sandbox.resolve()
+        if isinstance(sandbox, SeatbeltSandbox):
+            return sandbox._published()
+        raise TypeError(f"unsupported sandbox backend: {type(sandbox)!r}")
 
     def wrapper(self) -> list[str]:
         """Return the confinement wrapper argv prefix for a payload.

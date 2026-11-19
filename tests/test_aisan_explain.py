@@ -4,10 +4,17 @@
 
 from pathlib import Path
 
+import pytest
+
 from aisan import Box
 from aisan.explain import explain, normalise, parse_wrapper
 from aisan.sandbox import RO, RW, Bind, BindOver, Sandbox, Seal
 from aisan.spec import BoxSpec, Limits
+
+
+@pytest.fixture(autouse=True)
+def _linux_bwrap_platform(monkeypatch):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
 
 
 def _idx(prof, path: Path) -> int:

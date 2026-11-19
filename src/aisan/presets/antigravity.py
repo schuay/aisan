@@ -24,8 +24,10 @@ from pathlib import Path
 
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
-from ..sandbox import RO, RW, Bind, BindSpec
+from ..sandbox import RO, RW, Bind, BindSpec, host_platform
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
+
+_DARWIN_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Where agy keeps its login below its state directory when it has no keyring.
 TOKEN_FILE = Path("antigravity-cli") / "antigravity-oauth-token"
@@ -65,6 +67,7 @@ def antigravity(
 ) -> BoxSpec:
     """Build an Antigravity CLI confinement spec for ``worktree``."""
     home = Path.home()
+    is_darwin = host_platform() == "darwin"
     binds: list[BindSpec] = [
         *(Bind(p, RO, optional=True, guard=False) for p in extra_ro),
         # Keep shared Git objects writable, pin steering files read-only, and
@@ -84,7 +87,7 @@ def antigravity(
             *NESTING_ENV.items(),
             *GC_ENV,
             ("HOME", str(home)),
-            ("PATH", "/usr/bin"),
+            ("PATH", _DARWIN_PATH if is_darwin else "/usr/bin"),
             *extra_env,
         ),
         egress=egress,
@@ -96,6 +99,7 @@ def antigravity(
             tasks_max=tasks_max,
             slice_unit=cgroup_slice,
         ),
+        allow_local_loopback=is_darwin,
     )
 
 

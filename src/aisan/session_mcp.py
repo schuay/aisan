@@ -32,6 +32,7 @@ from .egress.claude_plan import claude_config_dir
 from .launch import interpreter_roots
 from .opencode_config import config_file as _opencode_config_file
 from .opencode_config import read_config as _read_jsonc
+from .sandbox import host_platform
 from .statedir import write_sealed
 from .userbinds import WILDCARD
 
@@ -262,7 +263,11 @@ def mcp_search_path(local_bin: bool = True) -> str:
 
     Include ``~/.local/bin`` only when the box mounts home-installed launchers.
     """
-    dirs = ["/usr/bin", "/usr/local/bin"]
+    dirs = (
+        ["/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        if host_platform() == "darwin"
+        else ["/usr/bin", "/usr/local/bin"]
+    )
     if local_bin:
         dirs.insert(0, str(Path.home() / ".local" / "bin"))
     return os.pathsep.join(dirs)
@@ -301,6 +306,10 @@ def _shared_roots(home: Path) -> frozenset[Path]:
             home / ".local" / "state",
             home / ".config",
             home / ".cache",
+            home / "Library",
+            home / "Library" / "Application Support",
+            home / "Library" / "Caches",
+            home / "Library" / "Preferences",
         }
     )
 

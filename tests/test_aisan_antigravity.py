@@ -112,7 +112,10 @@ def test_the_client_is_pointed_at_the_loopback_proxy(tmp_path):
     }
 
 
-def test_the_placeholder_login_is_bound_over_the_clients_token_file(tmp_path):
+def test_the_placeholder_login_is_bound_over_the_clients_token_file(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     backend = _backend(tmp_path)

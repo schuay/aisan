@@ -156,7 +156,10 @@ def test_launcher_binds_preserve_a_verified_home_alias(tmp_path, monkeypatch, sy
     monkeypatch.setattr(
         launch_mod, "system_ro_roots", lambda: frozenset({base} if system else ())
     )
-    paths = [b.path for b in launcher_binds(alias / "bin/python", (base, base))]
+    paths = [
+        b.path
+        for b in launcher_binds(alias / "bin/python", (base, base), platform="linux")
+    ]
     assert paths.count(alias) == 1
     assert (base in paths) is not system
 

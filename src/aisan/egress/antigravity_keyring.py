@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -45,8 +46,10 @@ __all__ = [
     "KeyringError",
     "Login",
     "default_credentials",
+    "default_reader",
     "parse_login",
     "read_keyring",
+    "read_macos_keychain",
 ]
 
 # The item as ``secret-tool lookup service gemini username antigravity``.
@@ -159,6 +162,78 @@ def read_keyring(
     return result.stdout
 
 
+_MACOS_SECURITY = "/usr/bin/security"
+_SECURITY_EXIT_LOCKED = 36
+_SECURITY_EXIT_MISSING = 44
+
+
+def read_macos_keychain(
+    attributes: tuple[tuple[str, str], ...] = KEYRING_ATTRIBUTES,
+    *,
+    security: str = _MACOS_SECURITY,
+    fallback_file: Path | None = None,
+) -> str:
+    """Read the Antigravity login from macOS Keychain or its fallback token file.
+
+    `security find-generic-password` fails immediately with exit 36 when the
+    login keychain is locked (for example over headless SSH), where host `agy`
+    writes its `0600` fallback file instead.
+    """
+    attrs = dict(attributes)
+    service = attrs.get("service", "gemini")
+    account = attrs.get("username", "antigravity")
+    result: subprocess.CompletedProcess[str] | None = None
+    try:
+        result = subprocess.run(
+            [security, "find-generic-password", "-s", service, "-a", account, "-w"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_READ_TIMEOUT_S,
+            check=False,
+        )
+    except OSError:
+        result = None
+    except subprocess.TimeoutExpired as e:
+        raise KeyringError("the macOS Keychain did not answer", _FIX_LOCKED) from e
+
+    if result is not None and result.returncode == 0:
+        return result.stdout.rstrip("\r\n")
+
+    token_path = fallback_file if fallback_file is not None else default_credentials()
+    if token_path.is_file():
+        try:
+            return token_path.read_text()
+        except OSError as e:
+            raise KeyringError(
+                f"cannot read fallback token file {token_path}: {e}", _FIX_LOGIN
+            ) from e
+
+    if result is None:
+        raise KeyringError(
+            f"cannot run {security} and {token_path} is absent", _FIX_LOGIN
+        )
+    if result.returncode == _SECURITY_EXIT_MISSING:
+        raise KeyringError(
+            "no Antigravity login in the macOS Keychain or fallback file", _FIX_LOGIN
+        )
+    if result.returncode == _SECURITY_EXIT_LOCKED:
+        raise KeyringError(
+            "the macOS login keychain is locked and no fallback token file exists",
+            _FIX_LOCKED,
+        )
+    detail = result.stderr.strip()[-_STDERR_TAIL:]
+    raise KeyringError(
+        f"reading the macOS Keychain failed (exit {result.returncode}): {detail}",
+        _FIX_LOCKED,
+    )
+
+
+def default_reader() -> Callable[[], str]:
+    """Return the host-native secret reader for Antigravity consumer logins."""
+    return read_macos_keychain if sys.platform == "darwin" else read_keyring
+
+
 @dataclass(frozen=True)
 class Login:
     access_token: str
@@ -215,10 +290,10 @@ class KeyringCredential:
         self,
         *,
         agy_command: tuple[str, ...] = ("agy",),
-        read: Callable[[], str] = read_keyring,
+        read: Callable[[], str] | None = None,
     ) -> None:
         self._agy_command = agy_command
-        self._read_secret = read
+        self._read_secret = default_reader() if read is None else read
         self._flight = SingleFlight()
         self._cached: Login | None = None
 

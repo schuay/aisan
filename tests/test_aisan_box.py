@@ -50,6 +50,11 @@ needs_bwrap = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _linux_bwrap_platform(monkeypatch):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
+
+
 def _spec(root: Path, *, egress=(), **kw) -> BoxSpec:
     return BoxSpec(
         root=root,

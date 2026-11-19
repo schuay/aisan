@@ -300,7 +300,10 @@ async def test_cli_explain_reads_config_but_never_credentials_or_network(
     assert "http://localhost:8080" in report
     assert "HOST_SECRET" not in report
     assert "/secret" not in report
-    assert "assigned at launch" in report if shared else "8714" in report
+    from aisan.sandbox import host_platform
+
+    uses_shared_tcp = shared or host_platform() == "darwin"
+    assert "assigned at launch" in report if uses_shared_tcp else "8714" in report
 
 
 async def test_cli_freezes_config_and_adds_standalone(host, monkeypatch):

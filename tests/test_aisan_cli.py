@@ -426,6 +426,7 @@ def test_claude_takes_its_skills_from_the_hosts_own_directory(tmp_path):
 def test_opencode_mounts_user_memory_where_the_box_reads_it(tmp_path, monkeypatch):
     from aisan.sandbox import RO, Bind
 
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     opencode = importlib.import_module("aisan.cli.opencode")
     source = tmp_path / "AGENTS.md"
     source.write_text("host memory\n")

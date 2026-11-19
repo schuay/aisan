@@ -17,6 +17,12 @@ from pathlib import Path
 
 from .box import Box
 from .sandbox import Sandbox, Seal
+from .seatbelt import (
+    SeatbeltSandbox,
+    darwin_system_ro_roots,
+    seatbelt_lexpath,
+    seatbelt_path,
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,7 @@ _KIND_ANSI = {
     "rw": "33",
     "tmpfs": "33",
     "overlay": "33",
+    "write-re": "33",
     "ro-pin": "32",
     "seal-ro": "32",
     "ro-sub": "36",
@@ -175,6 +182,69 @@ def parse_wrapper(argv: list[str], sb: Sandbox) -> Profile:
     return Profile(mounts=mounts, tmpfs=tmpfs, env=env, chdir=chdir)
 
 
+def parse_seatbelt(argv: list[str], sb: SeatbeltSandbox) -> tuple[Profile, str]:
+    """Parse a `SeatbeltSandbox` wrapper and resolved mounts into a `Profile`."""
+    env: dict[str, str] = {}
+    chdir = ""
+    i = 0
+    n = len(argv)
+    in_env = False
+    while i < n:
+        tok = argv[i]
+        if tok == "-C" and i + 1 < n and not in_env:
+            chdir = argv[i + 1]
+            i += 2
+        elif tok == "--" and not in_env:
+            in_env = True
+            i += 1
+        elif tok == "/usr/bin/sandbox-exec":
+            break
+        elif in_env and "=" in tok:
+            k, v = tok.split("=", 1)
+            env[k] = v
+            i += 1
+        else:
+            i += 1
+
+    mounts: list[MountLine] = []
+    idx = 0
+    for sys_root in sorted(darwin_system_ro_roots(), key=str):
+        if sys_root.exists():
+            mounts.append(MountLine("system", seatbelt_path(sys_root), idx))
+            idx += 1
+
+    resolved = [m for m in sb.resolve() if m.op != "seal-ro"]
+    writable = [
+        Path(seatbelt_path(m.dst)) for m in resolved if m.op in ("rw", "write-regex")
+    ]
+    root_sb = Path(seatbelt_path(sb.root))
+    for m in resolved:
+        dst_sb = seatbelt_path(m.dst)
+        dst_path = Path(dst_sb)
+        match m.op:
+            case "tmpfs":
+                mounts.append(MountLine("seal-ro", dst_sb, idx, guard=True))
+            case "rw":
+                kind = "rw-root" if dst_path == root_sb else "rw"
+                mounts.append(MountLine(kind, dst_sb, idx, guard=m.guard))
+            case "write-regex":
+                mounts.append(MountLine("write-re", dst_sb, idx, guard=m.guard))
+            case "ro":
+                is_pin = any(
+                    dst_path != w and dst_path.is_relative_to(w) for w in writable
+                )
+                kind = "ro-pin" if is_pin else "ro"
+                mounts.append(MountLine(kind, dst_sb, idx, guard=m.guard))
+        idx += 1
+
+    for sym in sb._pinned_symlinks():
+        label = f"{seatbelt_lexpath(sym.dst)} -> {seatbelt_path(sym.src)}"
+        mounts.append(MountLine("ro-sub", label, idx, guard=True))
+        idx += 1
+
+    return Profile(mounts=mounts, tmpfs=[], env=env, chdir=chdir), sb.render_sbpl()
+
+
 def _anc_eq(child: str, ancestor: str) -> bool:
     """Return whether resolved ``ancestor`` contains ``child``, including equality."""
     try:
@@ -223,7 +293,14 @@ def explain(
         return out.getvalue()
     sandbox = box._sandbox()
     wrapper = box.wrapper()
-    prof = parse_wrapper(wrapper, sandbox)
+    is_seatbelt = isinstance(sandbox, SeatbeltSandbox)
+    sbpl_text = ""
+    if isinstance(sandbox, SeatbeltSandbox):
+        prof, sbpl_text = parse_seatbelt(wrapper, sandbox)
+    elif isinstance(sandbox, Sandbox):
+        prof = parse_wrapper(wrapper, sandbox)
+    else:
+        raise TypeError(f"unsupported sandbox backend: {type(sandbox)!r}")
     isolated = box.spec.unshare_net
     shared_backends = [b for b in box.spec.egress if box._uses_shared_tcp(b)]
     shared_egress = bool(shared_backends)
@@ -235,8 +312,19 @@ def explain(
     section("inputs")
     for key, value in inputs:
         out.write(f"  {key:<9} {value}\n")
-    # Always report the network namespace, including boxes without backends.
-    if isolated:
+    # Always report the network confinement mode, including boxes without backends.
+    if is_seatbelt:
+        if isolated and box.spec.allow_local_loopback:
+            out.write(
+                "  network   macOS Seatbelt (deny network*, localhost TCP + pinned endpoints)\n"
+            )
+        elif isolated:
+            out.write(
+                "  network   macOS Seatbelt (deny network*, pinned endpoints only)\n"
+            )
+        else:
+            out.write("  network   shared host namespace (Seatbelt allow network*)\n")
+    elif isolated:
         out.write("  network   own namespace (no route off the machine)\n")
     else:
         out.write("  network   shared host namespace (full host network)\n")
@@ -245,7 +333,10 @@ def explain(
     out.write(f"  chdir     {prof.chdir}\n")
 
     if not shared_egress:
-        section("egress backends (host half on a socket, in-box on loopback)")
+        if is_seatbelt:
+            section("egress backends (direct Unix domain sockets)")
+        else:
+            section("egress backends (host half on a socket, in-box on loopback)")
     elif len(shared_backends) == len(box.spec.egress):
         section("egress backends (authenticated host-loopback TCP)")
     else:
@@ -254,7 +345,12 @@ def explain(
         for backend in box.spec.egress:
             if not box._uses_shared_tcp(backend):
                 sock = backend.socket_path(box.runtime_dir)
-                out.write(f"  {backend.name:<8} 127.0.0.1:{backend.port} -> {sock}\n")
+                if is_seatbelt:
+                    out.write(f"  {backend.name:<8} unix://{seatbelt_lexpath(sock)}\n")
+                else:
+                    out.write(
+                        f"  {backend.name:<8} 127.0.0.1:{backend.port} -> {sock}\n"
+                    )
             else:
                 out.write(f"  {backend.name:<8} 127.0.0.1:(assigned at launch)\n")
             if (route := backend.transport.describe()) is not None:
@@ -296,11 +392,19 @@ def explain(
         for b in sandbox.binds:
             if not isinstance(b, Seal):
                 continue
-            prior = holes.get(str(b.path))
+            key = seatbelt_path(b.path) if is_seatbelt else str(b.path)
+            allow_items = (
+                tuple(Path(seatbelt_path(h)) for h in b.allow)
+                if is_seatbelt
+                else b.allow
+            )
+            prior = holes.get(key)
             # Two seals may share a destination, and each refuses on its own
             # list. A hole is effective only where every one of them allows it.
-            holes[str(b.path)] = (
-                b.allow if prior is None else tuple(h for h in prior if h in b.allow)
+            holes[key] = (
+                allow_items
+                if prior is None
+                else tuple(h for h in prior if h in allow_items)
             )
         for m in sealed:
             allow = holes.get(m.path, ())
@@ -314,11 +418,19 @@ def explain(
             out.write(f"  {path}\n")
 
     if not shared_egress:
-        section("environment (the box's complete environment; --clearenv first)")
+        if is_seatbelt:
+            section("environment (the box's complete environment; env -i first)")
+        else:
+            section("environment (the box's complete environment; --clearenv first)")
     else:
         section("effective environment (backend values injected by launcher)")
     for k in sorted(effective_env):
         out.write(f"  {k}={effective_env[k]}\n")
+
+    if is_seatbelt and sbpl_text:
+        section("seatbelt profile (SBPL)")
+        for sb_line in sbpl_text.splitlines():
+            out.write(f"  {sb_line}\n")
 
     if argv:
         # Show direct exec arguments one per line, without shell quoting.
@@ -370,15 +482,24 @@ def normalise(
 
     subs = [
         *((str(Path(p).resolve()), name) for p, name in paths),
+        *((seatbelt_path(Path(p)), name) for p, name in paths),
         (str(Path(sys.executable)), "<AISAN PYTHON>"),
         *((str(p), name) for p, name in prefixes),
+        *((seatbelt_path(p), name) for p, name in prefixes),
         (str(own_source_root()), "<AISAN SRC>") if own_source_root() else None,
+        (seatbelt_path(own_source_root()), "<AISAN SRC>")
+        if own_source_root()
+        else None,
         (str(root.resolve()), "<ROOT>") if root else None,
+        (seatbelt_path(root), "<ROOT>") if root else None,
         (str(Path.home()), "<HOME>"),
+        (seatbelt_path(Path.home()), "<HOME>"),
         (str(private_root()), "<AISAN PRIVATE>"),
+        (seatbelt_path(private_root()), "<AISAN PRIVATE>"),
         # The nested private root contains the current uid.
         (_NESTED_ROOT, "<AISAN NESTED ROOT>"),
         (tempfile.gettempdir(), "<TMP>"),
+        (seatbelt_path(Path(tempfile.gettempdir())), "<TMP>"),
     ]
     # Replace nested paths before their parents.
     for pair in sorted([s for s in subs if s], key=lambda s: -len(s[0])):

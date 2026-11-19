@@ -29,8 +29,10 @@ from pathlib import Path
 
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
-from ..sandbox import RO, RW, Bind, BindOver, BindSpec
+from ..sandbox import RO, RW, Bind, BindOver, BindSpec, PinnedSymlink, host_platform
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
+
+_DARWIN_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Disable network-dependent update and download retries. The network namespace
 # enforces isolation; these settings make offline failures return promptly.
@@ -47,10 +49,14 @@ def _default_catalog() -> Path:
     return Path(cache) / "opencode" / "models.json"
 
 
-def _catalog_bind(catalog: Path) -> list[BindSpec]:
-    """Bind an existing host catalog at the box's default cache path."""
+def _catalog_bind(catalog: Path, *, state: Path, is_darwin: bool) -> list[BindSpec]:
+    """Bind an existing host catalog at the box's cache path."""
     if not catalog.is_file():
         return []
+    if is_darwin:
+        return [
+            PinnedSymlink(catalog, state / "xdg-cache" / "opencode" / "models.json")
+        ]
     box_dst = Path.home() / ".cache" / "opencode" / "models.json"
     if catalog.resolve() == box_dst.resolve():
         return [Bind(catalog, RO)]
@@ -85,7 +91,17 @@ def opencode(
     optional host catalog selected through ``XDG_CACHE_HOME``.
     """
     home = Path.home()
+    is_darwin = host_platform() == "darwin"
     catalog = models if models is not None else _default_catalog()
+    darwin_xdg_env = (
+        (
+            ("XDG_CACHE_HOME", str(state / "xdg-cache")),
+            ("XDG_STATE_HOME", str(state / "xdg-state")),
+            ("XDG_CONFIG_HOME", str(state / "xdg-config")),
+        )
+        if is_darwin
+        else ()
+    )
     binds: list[BindSpec] = [
         *(Bind(p, RO, optional=True, guard=False) for p in extra_ro),
         # Keep shared Git objects writable, pin steering files read-only, and
@@ -97,8 +113,8 @@ def opencode(
         *git_binds(worktree, pin_packs=unshare_net),
         # Mount persistent state after read-only paths so it remains writable.
         *([] if state.is_relative_to(worktree) else [Bind(state, RW)]),
-        # Substitute the host's XDG-aware catalog at the box's default cache path.
-        *_catalog_bind(catalog),
+        # Substitute the host's XDG-aware catalog at the box's cache path.
+        *_catalog_bind(catalog, state=state, is_darwin=is_darwin),
     ]
     return BoxSpec(
         root=worktree,
@@ -110,9 +126,10 @@ def opencode(
             *NESTING_ENV.items(),
             *GC_ENV,
             ("HOME", str(home)),
-            ("PATH", "/usr/bin"),
+            ("PATH", _DARWIN_PATH if is_darwin else "/usr/bin"),
             # Persist sessions, logs, and the database.
             ("XDG_DATA_HOME", str(state)),
+            *darwin_xdg_env,
             *_DISABLE_ENV,
             *extra_env,
         ),
@@ -125,6 +142,7 @@ def opencode(
             tasks_max=tasks_max,
             slice_unit=cgroup_slice,
         ),
+        allow_local_loopback=is_darwin,
     )
 
 

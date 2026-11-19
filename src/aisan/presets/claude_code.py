@@ -26,8 +26,19 @@ from pathlib import Path
 
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
-from ..sandbox import RO, RW, Bind, BindOver, BindSpec, EnsurePath
+from ..sandbox import (
+    RO,
+    RW,
+    Bind,
+    BindOver,
+    BindSpec,
+    EnsurePath,
+    PinnedSymlink,
+    host_platform,
+)
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
+
+_DARWIN_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Return promptly when the relay is unavailable. Testing reached no answer after
 # 180 seconds with retries and returned code 1 in one second with retries disabled.
@@ -88,6 +99,14 @@ def claude_code(
 ) -> BoxSpec:
     """Build a Claude Code confinement spec for ``worktree``."""
     home = Path.home()
+    is_darwin = host_platform() == "darwin"
+    skills_bind: list[BindSpec] = []
+    if skills is not None:
+        skills_bind = [
+            PinnedSymlink(skills, state / "skills")
+            if is_darwin
+            else BindOver(skills, state / "skills")
+        ]
     binds: list[BindSpec] = [
         *(Bind(p, RO, optional=True, guard=False) for p in extra_ro),
         # Keep shared Git objects writable, pin steering files read-only, and
@@ -106,7 +125,7 @@ def claude_code(
         # Claude Code 2.1.259 resolves user skills as `$CLAUDE_CONFIG_DIR/skills`,
         # so host skills reach the box only inside the state directory. They stay
         # read-only there, below the writable state bind.
-        *([BindOver(skills, state / "skills")] if skills is not None else []),
+        *skills_bind,
     ]
     return BoxSpec(
         root=worktree,
@@ -118,7 +137,7 @@ def claude_code(
             *NESTING_ENV.items(),
             *GC_ENV,
             ("HOME", str(home)),
-            ("PATH", "/usr/bin"),
+            ("PATH", _DARWIN_PATH if is_darwin else "/usr/bin"),
             # Claude Code stores sessions and reads user instructions here.
             ("CLAUDE_CONFIG_DIR", str(state)),
             *_RETRY_ENV,
@@ -131,8 +150,12 @@ def claude_code(
         ensure=(
             *git_host_files(worktree, pin_packs=unshare_net),
             # bwrap would otherwise create this mount point on the host through
-            # the writable state bind.
-            *([EnsurePath(state / "skills", is_dir=True)] if skills else []),
+            # the writable state bind. On Darwin `Box._stage` creates a symlink.
+            *(
+                [EnsurePath(state / "skills", is_dir=True)]
+                if skills and not is_darwin
+                else []
+            ),
         ),
         limits=Limits(
             memory_max=memory_max,

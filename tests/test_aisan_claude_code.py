@@ -72,8 +72,9 @@ def test_the_config_dir_is_optional(tmp_path):
     assert all(Path(b.path) != tmp_path / "config" for b in _spec(tmp_path).binds)
 
 
-def test_host_skills_mount_inside_the_redirected_config_dir(tmp_path):
+def test_host_skills_mount_inside_the_redirected_config_dir(tmp_path, monkeypatch):
     """Claude Code reads `$CLAUDE_CONFIG_DIR/skills`, never `~/.claude/skills`."""
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     skills = tmp_path / "host-skills"
     (skills / "demo").mkdir(parents=True)
     (skills / "demo" / "SKILL.md").write_text("---\nname: demo\n---\n")
@@ -88,7 +89,8 @@ def test_host_skills_mount_inside_the_redirected_config_dir(tmp_path):
     assert mounts.index(at_skills[0]) > mounts.index(at_state[-1])
 
 
-def test_the_skills_mount_point_is_created_on_the_host(tmp_path):
+def test_the_skills_mount_point_is_created_on_the_host(tmp_path, monkeypatch):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     skills = tmp_path / "host-skills"
     skills.mkdir()
     ensured = {e.path: e.is_dir for e in _spec(tmp_path, skills=skills).ensure}

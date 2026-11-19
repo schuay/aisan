@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import enum
 import re
+import sys
 from collections.abc import Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -392,6 +393,11 @@ class SandboxBackend(Protocol):
     def wrapper(self) -> list[str]:
         """Return the command prefix that confines a payload."""
         ...
+
+
+def host_platform() -> str:
+    """Return the native confinement platform (`'darwin'` or `'linux'`)."""
+    return "darwin" if sys.platform == "darwin" else "linux"
 
 
 def bindable(p: Path) -> bool:

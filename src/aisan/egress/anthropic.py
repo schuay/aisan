@@ -22,6 +22,7 @@ variables and is served by either source.
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -145,7 +146,9 @@ class AnthropicBackend(Backend):
             _ApiKeyCredential(api_key)
             if api_key is not None
             else PlanCredential(
-                credentials or default_credentials(), claude_command=claude_command
+                credentials or default_credentials(),
+                claude_command=claude_command,
+                use_keychain=credentials is None and sys.platform == "darwin",
             )
         )
         # Box mount checks must keep these host credential files hidden.

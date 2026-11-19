@@ -17,13 +17,16 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 from .private import prepare_private_dir, private_root
-from .sandbox import RO, Bind
+from .sandbox import RO, RW, Bind
 
 # Identify aisan directories within the private root.
 _DIR_PREFIX = "proxy-"
+_TMP_PREFIX = "tmp-"
+_SBPL_PREFIX = "sb-"
 
 # The Box writes this manifest for the in-box launcher.
 MANIFEST_NAME = "relays.json"
@@ -80,6 +83,33 @@ def runtime_bind(box_id: str) -> Bind:
     on declared entries, so an absent directory still forbids binds below it.
     """
     return Bind(runtime_dir(box_id), RO, optional=True)
+
+
+def scratch_dir(box_id: str) -> Path:
+    """Return the per-box writable scratch directory used as `$TMPDIR` on Darwin."""
+    digest = hashlib.sha256(box_id.encode()).hexdigest()[:16]
+    return private_root() / f"{_TMP_PREFIX}{digest}"
+
+
+def prepare_scratch_dir(box_id: str) -> Path:
+    """Create the per-box scratch directory with mode `0o700`."""
+    return prepare_private_dir(scratch_dir(box_id))
+
+
+def cleanup_scratch_dir(box_id: str) -> None:
+    """Remove the per-box scratch directory and any temporary files inside it."""
+    shutil.rmtree(scratch_dir(box_id), ignore_errors=True)
+
+
+def scratch_bind(box_id: str) -> Bind:
+    """Return the writable guard bind for the per-box scratch directory."""
+    return Bind(scratch_dir(box_id), RW, optional=True)
+
+
+def profile_path(box_id: str) -> Path:
+    """Return the host-only Seatbelt profile file path inside `private_root()`."""
+    digest = hashlib.sha256(box_id.encode()).hexdigest()[:16]
+    return private_root() / f"{_SBPL_PREFIX}{digest}.sb"
 
 
 def write_manifest(directory: Path, entries: list[dict[str, object]]) -> Path:

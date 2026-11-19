@@ -37,7 +37,7 @@ from ..hostproc import HostChild, neutral_child
 from ..proxy.http import RateLimit, serve_tcp
 from ..proxy.http import serve as serve_proxy
 from ..proxy.openai_responses import BOX_ACCOUNT_ID, PathAllowlist, make_app
-from ..sandbox import BindOver, BindSpec
+from ..sandbox import BindOver, BindSpec, PinnedSymlink, host_platform
 from ..statedir import write_sealed
 from ..upstream import DIRECT, Transport
 from .base import (
@@ -116,7 +116,11 @@ class CodexBackend(Backend):
     def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
         if self._codex_home is None:
             return []
-        return [BindOver(runtime_dir / _BOX_AUTH_NAME, self._codex_home / "auth.json")]
+        src = runtime_dir / _BOX_AUTH_NAME
+        dst = self._codex_home / "auth.json"
+        if host_platform() == "darwin":
+            return [PinnedSymlink(src, dst)]
+        return [BindOver(src, dst)]
 
     def prepare(self, runtime_dir: Path) -> None:
         if self._codex_home is not None:
@@ -152,6 +156,8 @@ class CodexBackend(Backend):
             ),
             ("features.enable_request_compression", False),
         ]
+        if host_platform() == "darwin":
+            values.append(("cli_auth_credentials_store", "file"))
         if self._codex_home is not None:
             values.append(
                 (

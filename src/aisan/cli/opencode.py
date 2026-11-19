@@ -30,7 +30,7 @@ from aisan.egress.openai_compat import DEFAULT_CATALOG, OpenAICompatBackend
 from aisan.opencode_config import config_file, read_config, select_model
 from aisan.opencode_provider import resolve_provider
 from aisan.presets.opencode import opencode, opencode_binary
-from aisan.sandbox import RO, Bind, BindOver, BindSpec
+from aisan.sandbox import RO, Bind, BindOver, BindSpec, PinnedSymlink, host_platform
 from aisan.session import (
     LaunchRefused,
     git_config_binds,
@@ -53,18 +53,23 @@ USER_MEMORY = (
 )
 
 
-def user_memory_bind(source: Path) -> list[BindSpec]:
-    """Bind host instructions at the default path used inside the box.
+def user_memory_bind(source: Path, *, state: Path | None = None) -> list[BindSpec]:
+    """Bind host instructions at the config path read inside the box.
 
-    The host source honors ``XDG_CONFIG_HOME``. The box leaves that variable
-    unset to preserve Git config lookup, so use ``BindOver`` only when the
-    source differs from the default destination.
+    The host source honors ``XDG_CONFIG_HOME``. On Darwin, OpenCode receives a
+    per-box ``XDG_CONFIG_HOME`` inside ``state`` so ``AGENTS.md`` is staged as a
+    ``PinnedSymlink``; on Linux ``BindOver`` is used only when the source
+    differs from the default destination.
     """
     if not source.exists():
         return []
+    if host_platform() == "darwin" and state is not None:
+        return [PinnedSymlink(source, state / "xdg-config" / "opencode" / "AGENTS.md")]
     dst = Path.home() / ".config" / "opencode" / "AGENTS.md"
     if source.resolve() == dst.resolve():
         return [Bind(dst, RO)]
+    if host_platform() == "darwin":
+        return [Bind(source.resolve(), RO)]
     return [BindOver(source, dst)]
 
 
@@ -161,7 +166,7 @@ async def _main(argv: list[str]) -> int:
     spec = spec.with_binds(git_config_binds())
     # A user bind file cannot make this writable: the stricter read-only mode
     # wins at the default path, and a bind-over conflicts with a user entry.
-    spec = spec.with_binds(user_memory_bind(USER_MEMORY))
+    spec = spec.with_binds(user_memory_bind(USER_MEMORY, state=state))
     return await run_interactive(
         client="opencode",
         harness="opencode",

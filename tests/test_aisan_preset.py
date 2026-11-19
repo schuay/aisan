@@ -21,6 +21,11 @@ from aisan.spec import Grant
 depot_tools_job_module = importlib.import_module("aisan.presets.depot_tools_job")
 
 
+@pytest.fixture(autouse=True)
+def _linux_bwrap_platform(monkeypatch):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
+
+
 def _fake_checkout(tmp_path) -> tuple[Path, Path]:
     main = tmp_path / "main"
     wt = tmp_path / "wt"
