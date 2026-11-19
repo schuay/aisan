@@ -100,14 +100,33 @@ def test_firmlink_and_root_symlink_normalization():
     )
 
 
-def test_control_characters_in_paths_are_rejected(tmp_path):
+def test_control_characters_and_invalid_endpoints_are_rejected(tmp_path):
     with pytest.raises(ValueError, match="control character"):
         seatbelt_path(Path("/tmp/bad\nline"))
+    with pytest.raises(ValueError, match="absolute"):
+        seatbelt_lexpath(Path("."))
+    with pytest.raises(ValueError, match="absolute"):
+        seatbelt_lexpath(Path("/tmp/a/.."))
+    with pytest.raises(ValueError, match="absolute"):
+        SeatbeltSandbox(root=tmp_path, profile_path=Path("relative.sb"))
+    with pytest.raises(ValueError, match="absolute"):
+        SeatbeltSandbox(root=tmp_path, unix_sockets=(Path("rel.sock"),))
+    with pytest.raises(ValueError, match="invalid Seatbelt tcp_port"):
+        SeatbeltSandbox(root=tmp_path, tcp_ports=("*",))
+    with pytest.raises(ValueError, match="invalid Seatbelt tcp_port"):
+        SeatbeltSandbox(root=tmp_path, tcp_ports=(0,))
+    with pytest.raises(ValueError, match="invalid Seatbelt tcp_port"):
+        SeatbeltSandbox(root=tmp_path, tcp_ports=(True,))
+    with pytest.raises(ValueError, match="unknown mach_profiles"):
+        SeatbeltSandbox(root=tmp_path, mach_profiles=("securityd",))
+
+
+@needs_seatbelt
+def test_quote_escaping_in_rendered_sbpl(tmp_path):
     sb = SeatbeltSandbox(
         root=tmp_path,
         binds=(Bind(Path('/tmp/quote"inject'), RO, optional=True),),
     )
-    # Optional nonexistent bind drops cleanly; verify mandatory quote escaping.
     quoted_dir = tmp_path / 'dir"with\\quotes'
     quoted_dir.mkdir()
     rendered = SeatbeltSandbox(
@@ -153,6 +172,8 @@ def test_write_regex_validates_anchored_suffixes(tmp_path):
     with pytest.raises(ValueError, match="at least one suffix"):
         WriteRegex(tmp_path, ())
     with pytest.raises(ValueError, match="POSIX ERE"):
+        WriteRegex(tmp_path, ("/",))
+    with pytest.raises(ValueError, match="POSIX ERE"):
         WriteRegex(tmp_path, ("relative.lock",))
     with pytest.raises(ValueError, match="POSIX ERE"):
         WriteRegex(tmp_path, ("/bad\nregex",))
@@ -160,6 +181,10 @@ def test_write_regex_validates_anchored_suffixes(tmp_path):
         WriteRegex(tmp_path, ('/bad"quote',))
     with pytest.raises(ValueError, match="POSIX ERE"):
         WriteRegex(tmp_path, ("/(?:noncapturing)",))
+    with pytest.raises(ValueError, match="POSIX ERE"):
+        WriteRegex(tmp_path, ("/store/../evil",))
+    with pytest.raises(ValueError, match="POSIX ERE"):
+        WriteRegex(tmp_path, ("/*.lock",))
     with pytest.raises(ValueError, match="cannot contain '\"'"):
         WriteRegex(tmp_path / 'dir"quote', ("/stamp",))
 
@@ -181,22 +206,58 @@ def test_mach_profiles_and_grants_validate_known_names(tmp_path):
     assert bool(Grant(mach_profiles=("codex-cfprefs",)))
 
 
-def test_tree_invariants_hold_on_seatbelt(tmp_path):
+@needs_seatbelt
+def test_tree_invariants_apfs_case_folding_and_write_regex_merges(tmp_path):
     wt = tmp_path / "wt"
     wt.mkdir()
     shared = tmp_path / "shared"
     shared.mkdir()
 
-    # Stricter mode wins (RO over RW).
+    # Stricter mode wins: RO beats WriteRegex, and WriteRegex beats RW.
     sb = SeatbeltSandbox(
         root=wt,
-        binds=(Bind(shared, RW, guard=False), Bind(shared, RO, guard=False)),
+        binds=(
+            Bind(shared, RW, guard=False),
+            WriteRegex(shared, (r"/\.lock",), guard=False),
+            Bind(shared, RO, guard=False),
+        ),
     )
-    assert [
-        m.op for m in sb.resolve() if m.dst == through_darwin_system_symlink(shared)
-    ] == ["ro"]
+    assert [m.op for m in sb.resolve() if m.dst == Path(seatbelt_path(shared))] == [
+        "ro"
+    ]
 
-    # Plain bind below guard is refused.
+    sb_wr = SeatbeltSandbox(
+        root=wt,
+        binds=(
+            Bind(shared, RW, guard=False),
+            WriteRegex(shared, (r"/\.lock",), guard=False),
+        ),
+    )
+    assert [m.op for m in sb_wr.resolve() if m.dst == Path(seatbelt_path(shared))] == [
+        "write-regex"
+    ]
+
+    # Distinct WriteRegex suffix sets at the same path conflict rather than widening.
+    with pytest.raises(MountConflict):
+        SeatbeltSandbox(
+            root=wt,
+            binds=(
+                WriteRegex(shared, (r"/\.lock",)),
+                WriteRegex(shared, (r"/stamp",), guard=False),
+            ),
+        ).tree()
+
+    # WriteRegex on system surface or regular file fails cleanly.
+    with pytest.raises(MountConflict):
+        SeatbeltSandbox(
+            root=wt, binds=(WriteRegex(Path("/usr"), (r"/\.lock",)),)
+        ).tree()
+    reg_file = tmp_path / "regular.txt"
+    reg_file.write_text("x")
+    with pytest.raises(NotADirectoryError):
+        SeatbeltSandbox(root=wt, binds=(WriteRegex(reg_file, (r"/\.lock",)),)).resolve()
+
+    # Plain bind below guard is refused, including via APFS case variation.
     guarded = tmp_path / "guarded"
     (guarded / "sub").mkdir(parents=True)
     with pytest.raises(GuardViolation):
@@ -204,6 +265,16 @@ def test_tree_invariants_hold_on_seatbelt(tmp_path):
             root=wt,
             binds=(Bind(guarded, RO), Bind(guarded / "sub", RW, guard=False)),
         ).tree()
+    upper_guarded = tmp_path / "GUARDED"
+    if upper_guarded.exists():  # case-insensitive APFS
+        with pytest.raises(GuardViolation):
+            SeatbeltSandbox(
+                root=wt,
+                binds=(
+                    Bind(guarded, RO),
+                    Bind(upper_guarded / "sub", RW, guard=False),
+                ),
+            ).tree()
 
     # Mount conflict (Seal vs RW).
     with pytest.raises(MountConflict):
@@ -212,15 +283,65 @@ def test_tree_invariants_hold_on_seatbelt(tmp_path):
             binds=(Seal(shared), Bind(shared, RW)),
         ).tree()
 
-    # Symlink inside RW root refused for descendant pin.
+    # Symlinks refused both inside RW root and for unmounted RW/PinnedSymlink ancestors.
     outside = tmp_path / "outside"
     outside.mkdir()
     (wt / "link").symlink_to(outside)
     with pytest.raises(SymlinkDestination):
         SeatbeltSandbox(root=wt, binds=(Bind(wt / "link" / "cfg", RO),)).resolve()
+    unmounted_link = tmp_path / "unmounted_link"
+    unmounted_link.symlink_to(guarded)
+    with pytest.raises(SymlinkDestination):
+        SeatbeltSandbox(
+            root=wt, binds=(Bind(unmounted_link, RW, guard=False),)
+        ).resolve()
+    with pytest.raises(GuardViolation):
+        SeatbeltSandbox(
+            root=wt,
+            binds=(Bind(guarded, RO), Bind(unmounted_link / "sub", RO, guard=False)),
+        ).tree()
+    with pytest.raises(SymlinkDestination):
+        SeatbeltSandbox(
+            root=wt,
+            binds=(PinnedSymlink(reg_file, wt / "link" / "auth.json"),),
+        ).resolve()
+
+    # Colliding, nested, sealed, or unstaged PinnedSymlinks are refused.
+    other_file = tmp_path / "other.txt"
+    other_file.write_text("y")
+    with pytest.raises(MountConflict):
+        SeatbeltSandbox(
+            root=wt,
+            binds=(
+                PinnedSymlink(reg_file, wt / "auth.json"),
+                PinnedSymlink(other_file, wt / "auth.json"),
+            ),
+        ).tree()
+    with pytest.raises(MountConflict):
+        SeatbeltSandbox(
+            root=wt,
+            binds=(
+                PinnedSymlink(shared, wt / "skills"),
+                PinnedSymlink(reg_file, wt / "skills" / "a"),
+            ),
+        ).tree()
+    sealed_dir = tmp_path / "sealed_sym"
+    sealed_dir.mkdir()
+    with pytest.raises(GuardViolation):
+        SeatbeltSandbox(
+            root=wt,
+            binds=(Seal(sealed_dir), PinnedSymlink(reg_file, sealed_dir / "a")),
+        ).tree()
+    (wt / "not_a_symlink.json").write_text("plain")
+    with pytest.raises(ValueError, match="staged as a symlink"):
+        SeatbeltSandbox(
+            root=wt,
+            binds=(PinnedSymlink(reg_file, wt / "not_a_symlink.json"),),
+        ).render_sbpl()
 
 
-def test_exposure_and_seal_checks_catch_leaks_including_pinned_symlink_and_write_regex(
+@needs_seatbelt
+def test_exposure_and_seal_checks_catch_leaks_including_case_and_system_literals(
     tmp_path,
 ):
     wt = tmp_path / "wt"
@@ -230,12 +351,21 @@ def test_exposure_and_seal_checks_catch_leaks_including_pinned_symlink_and_write
     cred = secret_dir / "token.json"
     cred.write_text("{}")
 
-    # Direct or ancestor exposure via WriteRegex and PinnedSymlink.
+    # Direct or ancestor exposure via WriteRegex, PinnedSymlink, and system literals.
     sb_regex = SeatbeltSandbox(root=wt, binds=(WriteRegex(secret_dir, (r"/\.lock",)),))
     assert sb_regex.exposed_path((cred,)) is not None
 
     sb_sym = SeatbeltSandbox(root=wt, binds=(PinnedSymlink(cred, wt / "auth.json"),))
     assert sb_sym.exposed_path((cred,)) is not None
+
+    sb_base = SeatbeltSandbox(root=wt)
+    assert sb_base.exposed_path((Path("/private/etc/hosts"),)) is not None
+    assert sb_base.exposed_path((cred,)) is None
+
+    upper_secret = tmp_path / "SECRETS"
+    if upper_secret.exists():  # case-insensitive APFS
+        sb_case = SeatbeltSandbox(root=wt, binds=(Bind(upper_secret, RO),))
+        assert sb_case.exposed_path((cred,)) is not None
 
     # Alias republishing a sealed directory is refused.
     sealed = tmp_path / "sealed"
@@ -250,6 +380,7 @@ def test_exposure_and_seal_checks_catch_leaks_including_pinned_symlink_and_write
         sb_seal_leak.render_sbpl()
 
 
+@needs_seatbelt
 def test_security_server_and_securityd_are_never_in_rendered_sbpl(tmp_path):
     for unshare in (True, False):
         sbpl = SeatbeltSandbox(
@@ -260,6 +391,7 @@ def test_security_server_and_securityd_are_never_in_rendered_sbpl(tmp_path):
         ).render_sbpl()
         assert "SecurityServer" not in sbpl
         assert "securityd" not in sbpl
+        assert "(deny process-info*)" in sbpl
         assert "com.apple.cfprefsd.agent" in sbpl
         if unshare:
             assert "trustd" not in sbpl
@@ -267,7 +399,8 @@ def test_security_server_and_securityd_are_never_in_rendered_sbpl(tmp_path):
             assert "com.apple.trustd.agent" in sbpl
 
 
-def test_wrapper_deduplicates_env_and_supports_profile_file(tmp_path):
+@needs_seatbelt
+def test_wrapper_deduplicates_env_guards_env_flags_and_supports_profile_file(tmp_path):
     wt = tmp_path / "wt"
     wt.mkdir()
     prof_file = tmp_path / "box.sb"
@@ -277,11 +410,15 @@ def test_wrapper_deduplicates_env_and_supports_profile_file(tmp_path):
         profile_path=prof_file,
     )
     argv = sb.wrapper()
-    assert argv[:4] == ["/usr/bin/env", "-i", "-C", seatbelt_path(wt)]
+    assert argv[:5] == ["/usr/bin/env", "-i", "-C", seatbelt_path(wt), "--"]
     assert "A=override" in argv
     assert "A=1" not in argv
     assert argv[-3:] == ["/usr/bin/sandbox-exec", "-f", str(prof_file)]
     assert prof_file.stat().st_mode & 0o777 == 0o600
+
+    for bad_key in ("", "-S/bin/sh", "-C/tmp", "BAD=KEY", "BAD\x00KEY"):
+        with pytest.raises(ValueError, match="invalid environment"):
+            SeatbeltSandbox(root=wt, env=((bad_key, "1"),)).wrapper()
 
 
 # --- Live macOS `sandbox-exec` enforcement tests ---
@@ -382,7 +519,7 @@ def test_live_seal_hides_siblings_blocks_existence_probe_and_allows_c_realpath(
     scratch = tmp_path / "scratch"
     sealed = tmp_path / "worktrees"
     sib = sealed / "sibling"
-    hole = sealed / "current"
+    hole = sealed / "nested" / "current"
     for d in (wt, scratch, sib, hole):
         d.mkdir(parents=True)
     secret = sib / "config.worktree"
@@ -407,6 +544,7 @@ def test_live_seal_hides_siblings_blocks_existence_probe_and_allows_c_realpath(
         f"assert not os.access({str(sib)!r}, os.F_OK)\n"
         "for bad in [\n"
         f"    lambda: os.listdir({str(sealed)!r}),\n"
+        f"    lambda: os.listdir({str(sealed / 'nested')!r}),\n"
         f"    lambda: os.stat({str(secret)!r}),\n"
         f"    lambda: os.mkdir({str(sealed / 'planted')!r}),\n"
         "]:\n"
@@ -559,8 +697,9 @@ def test_live_pinned_symlink_and_write_regex(tmp_path):
     state = tmp_path / "state"
     rt = tmp_path / "rt"
     cache = tmp_path / "cache"
+    sibling_cache = tmp_path / "cache_sibling"
     (cache / "store" / "env1").mkdir(parents=True)
-    for d in (wt, state, rt):
+    for d in (wt, state, rt, sibling_cache):
         d.mkdir()
 
     tok_src = rt / "token.json"
@@ -580,14 +719,14 @@ def test_live_pinned_symlink_and_write_regex(tmp_path):
             PinnedSymlink(tok_src, tok_dst),
             WriteRegex(
                 cache,
-                (r"/store/\.[^/]+\.lock", r"/store/[^/]+/stamp"),
+                (r"/store/\.[^/]+\.lock|store/[^/]+/stamp",),
             ),
         ),
         env=_box_env(state),
         unshare_net=True,
     )
     code = (
-        "import os\n"
+        "import os, stat\n"
         f"assert 'placeholder' in open({str(tok_dst)!r}).read()\n"
         f"open({str(state / 'cfg.tmp')!r}, 'w').write('ok')\n"
         f"os.rename({str(state / 'cfg.tmp')!r}, {str(state / 'cfg.json')!r})\n"
@@ -596,13 +735,15 @@ def test_live_pinned_symlink_and_write_regex(tmp_path):
         "for bad in [\n"
         f"    lambda: open({str(tok_dst)!r}, 'w'),\n"
         f"    lambda: os.unlink({str(tok_dst)!r}),\n"
+        f"    lambda: os.lchflags({str(tok_dst)!r}, stat.UF_IMMUTABLE),\n"
         f"    lambda: os.rename({str(state / 'cfg.json')!r}, {str(tok_dst)!r}),\n"
         f"    lambda: open({str(pyvenv)!r}, 'w'),\n"
         f"    lambda: open({str(cache / 'evil.lock')!r}, 'w'),\n"
+        f"    lambda: open({str(sibling_cache)!r} + 'store/x/stamp', 'w'),\n"
         "]:\n"
         "    try:\n"
         "        bad(); raise SystemExit('UNEXPECTED_WRITE')\n"
-        "    except PermissionError:\n"
+        "    except (PermissionError, FileNotFoundError):\n"
         "        pass\n"
         "print('SYM_AND_REGEX_OK')\n"
     )
@@ -686,11 +827,15 @@ def test_live_network_tcp_port_unix_socket_and_local_loopback(tmp_path):
             "srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen(1)\n"
             "c = socket.create_connection(('127.0.0.1', srv.getsockname()[1]), 2)\n"
             "a, _ = srv.accept(); c.close(); a.close(); srv.close()\n"
-            "try:\n"
-            "    socket.create_connection(('1.1.1.1', 443), 1)\n"
-            "    raise SystemExit('EXT_LEAK')\n"
-            "except OSError:\n"
-            "    print('LOCAL_LOOPBACK_OK')\n"
+            "for bad in [\n"
+            "    lambda: socket.create_connection(('1.1.1.1', 443), 1),\n"
+            "    lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', ('127.0.0.1', 53)),\n"
+            "]:\n"
+            "    try:\n"
+            "        bad(); raise SystemExit('LOOPBACK_LEAK')\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "print('LOCAL_LOOPBACK_OK')\n"
         )
         res_lo = _run_sb(sb_lo, [sys.executable, "-c", lo_code])
         assert res_lo.returncode == 0, res_lo.stderr
@@ -703,7 +848,7 @@ def test_live_network_tcp_port_unix_socket_and_local_loopback(tmp_path):
 
 
 @needs_seatbelt
-def test_live_host_ipc_keychain_and_tiocsti_are_blocked(tmp_path):
+def test_live_host_ipc_keychain_procargs_and_tiocsti_are_blocked(tmp_path):
     wt = tmp_path / "wt"
     scratch = tmp_path / "scratch"
     wt.mkdir()
@@ -722,6 +867,33 @@ def test_live_host_ipc_keychain_and_tiocsti_are_blocked(tmp_path):
         ["/usr/bin/security", "find-generic-password", "-s", "aisan-nonexistent"],
     ):
         assert _run_sb(sb, cmd).returncode != 0
+
+    if Path("/etc/resolv.conf").exists():
+        assert _run_sb(sb, ["/bin/cat", "/etc/resolv.conf"]).returncode == 0
+
+    # Verify host process KERN_PROCARGS2 inspection is denied (`process-info*`).
+    host_pid = os.getpid()
+    proc_probe = _run_sb(
+        sb,
+        [
+            sys.executable,
+            "-c",
+            (
+                "import ctypes, os\n"
+                "libc = ctypes.CDLL(None, use_errno=True)\n"
+                "def procargs(pid):\n"
+                "    mib = (ctypes.c_int * 3)(1, 49, pid)\n"  # CTL_KERN=1, KERN_PROCARGS2=49
+                "    sz = ctypes.c_size_t(65536)\n"
+                "    buf = ctypes.create_string_buffer(65536)\n"
+                "    return libc.sysctl(mib, 3, buf, ctypes.byref(sz), None, 0)\n"
+                "assert procargs(os.getpid()) == 0\n"
+                f"assert procargs({host_pid}) != 0\n"
+                "print('PROCARGS_BLOCKED')\n"
+            ),
+        ],
+    )
+    assert proc_probe.returncode == 0, proc_probe.stderr
+    assert "PROCARGS_BLOCKED" in proc_probe.stdout
 
     # Verify TIOCSTI is blocked by Seatbelt (`hid-control`) even on a live PTY.
     master_fd, slave_fd = pty.openpty()

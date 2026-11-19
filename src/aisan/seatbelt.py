@@ -12,18 +12,19 @@ It preserves `aisan`'s core guarantees through five rules:
 
 * `(deny default)` hides the host home directory and every undeclared path;
   only the fixed macOS runtime surface and declared `Bind` trees are readable.
-* Every path emitted into SBPL is canonicalized to XNU's `F_GETPATH` spelling
-  (resolving `/tmp`, `/var`, `/etc` -> `/private/...` and mapping APFS
+* Every path emitted into SBPL and checked for guard, conflict, or credential
+  exposure is canonicalized to XNU's `F_GETPATH` spelling (resolving symlinks,
+  APFS case-folding, `/tmp`/`/var`/`/etc` -> `/private/...`, and mapping APFS
   `/System/Volumes/Data` firmlinks back to their synthetic root paths).
 * Policy mounts are emitted in canonical path-depth order: `RO` mounts emit an
   explicit `(deny file-write*)` so pins inside writable trees cannot be edited,
   and `Seal` directories deny read, existence-testing, and write access while
-  permitting `file-read-metadata` on the sealed root itself so `realpath(3)`
-  succeeds inside allowed holes.
-* Every writable directory above a pin, seal, or `PinnedSymlink` receives a
-  final `(deny file-write-unlink file-write-create (literal ...))` rule, giving
-  Seatbelt the rename-and-recreate protection that VFS mount points provide on
-  Linux.
+  permitting `file-read-metadata` along the exact ancestor chain to allowed
+  holes so `realpath(3)` succeeds inside them.
+* Every mount point and every writable directory above a mount or
+  `PinnedSymlink` receives a final `(deny file-write-unlink file-write-create
+  (literal ...))` rule, giving Seatbelt the rename-and-recreate protection that
+  VFS mount points provide on Linux.
 * Network isolation (`unshare_net=True`) denies `network*` and opens only the
   activated host-proxy TCP ports and Unix domain sockets (plus localhost TCP
   when `allow_local_loopback=True`). Neither `com.apple.SecurityServer` nor
@@ -35,7 +36,8 @@ from __future__ import annotations
 import fcntl
 import functools
 import os
-from collections.abc import Iterable
+import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,7 +46,9 @@ from .policy_tree import (
     BindOver,
     BindSpec,
     Entry,
+    GuardViolation,
     Mount,
+    MountConflict,
     Op,
     Overlay,
     PinnedSymlink,
@@ -59,7 +63,9 @@ from .policy_tree import (
     merge_entries,
     mount_for,
     resolved_path,
+    validate_destination,
 )
+from .spec import _validate_mach_profiles
 
 __all__ = [
     "SeatbeltSandbox",
@@ -68,6 +74,8 @@ __all__ = [
     "seatbelt_path",
     "through_darwin_system_symlink",
 ]
+
+_PORT_PLACEHOLDER_RE = re.compile(r"^<PORT:[^>\x00\r\n\"]+>$")
 
 _FIRMLINKS_FILE = Path("/usr/share/firmlinks")
 _DEFAULT_FIRMLINKS: tuple[tuple[str, str], ...] = (
@@ -232,8 +240,9 @@ def _f_getpath(path: Path) -> str | None:
     getpath = getattr(fcntl, "F_GETPATH", None)
     if getpath is None:
         return None
+    flags = getattr(os, "O_EVTONLY", os.O_RDONLY) | getattr(os, "O_NONBLOCK", 0)
     try:
-        fd = os.open(path, os.O_RDONLY)
+        fd = os.open(path, flags)
     except OSError:
         return None
     try:
@@ -297,8 +306,9 @@ def seatbelt_path(path: Path) -> str:
     """Return XNU's canonical `vn_getpath` spelling for `path`.
 
     Resolves symlinks (including `/tmp`, `/var`, `/etc`), queries `F_GETPATH`
-    on the deepest existing prefix when running on Darwin, and maps APFS
-    `/System/Volumes/Data` firmlinks back to their synthetic root paths.
+    on the deepest existing prefix when running on Darwin (normalizing APFS
+    case-folding), and maps APFS `/System/Volumes/Data` firmlinks back to their
+    synthetic root paths.
     """
     _check_clean_path(str(path))
     resolved = resolved_path(path)
@@ -313,17 +323,37 @@ def seatbelt_path(path: Path) -> str:
     return norm if norm == "/" else norm.rstrip("/")
 
 
+def _canonical_path(path: Path) -> Path:
+    return Path(seatbelt_path(path))
+
+
 def seatbelt_lexpath(path: Path) -> str:
     """Canonicalize `path`'s parent while preserving a symlink at `path.name`.
 
     Operations on a symlink vnode itself (`unlink`, `rename` over a link,
     `readlink`) check the symlink's own directory path rather than its target.
     """
+    validate_destination(path)
     _check_clean_path(str(path))
-    if path == path.parent:
+    if path == Path("/"):
         return "/"
     parent = seatbelt_path(path.parent)
     return f"/{path.name}" if parent == "/" else f"{parent}/{path.name}"
+
+
+def _reject_host_symlinks(path: Path, *, include_self: bool) -> None:
+    """Reject symlinks in `path.parents` (and `path` when `include_self=True`)."""
+    candidates = (path, *path.parents) if include_self else tuple(path.parents)
+    for candidate in candidates:
+        if candidate.is_symlink():
+            try:
+                target = f" -> {candidate.readlink()}"
+            except OSError:
+                target = ""
+            raise SymlinkDestination(
+                f"mount destination {path} passes through the symlink {candidate}"
+                f"{target}; sandbox-exec requires the resolved path"
+            )
 
 
 def _active_system_subpaths() -> tuple[Path, ...]:
@@ -334,15 +364,27 @@ def _active_system_subpaths() -> tuple[Path, ...]:
 
 def darwin_system_ro_roots() -> frozenset[Path]:
     """Return identity-mounted Darwin system roots that need no duplicate bind."""
-    return frozenset(_active_system_subpaths())
+    return frozenset(_canonical_path(p) for p in _active_system_subpaths())
 
 
-def _surface_entries() -> tuple[Entry, ...]:
-    return tuple(Entry(p, Op.RO, p, fixed=True) for p in _active_system_subpaths())
+def _surface_entries(norm: Callable[[Path], Path]) -> tuple[Entry, ...]:
+    return tuple(
+        Entry(norm(p), Op.RO, norm(p), fixed=True) for p in _active_system_subpaths()
+    )
 
 
 def _system_mounts() -> list[Mount]:
-    return [Mount("ro", p, p) for p in _active_system_subpaths() if p.exists()]
+    sub = [
+        Mount("ro", _canonical_path(p), _canonical_path(p))
+        for p in _active_system_subpaths()
+        if p.exists()
+    ]
+    lits = [
+        Mount("ro", _canonical_path(p), _canonical_path(p))
+        for p in _DARWIN_SYSTEM_LITERALS
+        if p != Path("/") and p.exists()
+    ]
+    return [*sub, *lits]
 
 
 @dataclass(frozen=True)
@@ -361,6 +403,7 @@ class SeatbeltSandbox:
     profile_path: Path | None = None
 
     def __post_init__(self) -> None:
+        validate_destination(self.root)
         if self.root_tmpfs < 0:
             raise ValueError(f"root_tmpfs must not be negative: {self.root_tmpfs}")
         if self.root_tmpfs > 0:
@@ -368,22 +411,28 @@ class SeatbeltSandbox:
                 f"root_tmpfs ({self.root_tmpfs} bytes at {self.root}) is not"
                 " supported on macOS Seatbelt"
             )
+        _validate_mach_profiles(self.mach_profiles)
+        if self.profile_path is not None:
+            validate_destination(self.profile_path)
+        for sock in self.unix_sockets:
+            validate_destination(sock)
+        for port in self.tcp_ports:
+            if (
+                isinstance(port, int)
+                and not isinstance(port, bool)
+                and 1 <= port <= 65535
+            ):
+                continue
+            if isinstance(port, str) and _PORT_PLACEHOLDER_RE.fullmatch(port):
+                continue
+            raise ValueError(f"invalid Seatbelt tcp_port: {port!r}")
 
     def _pinned_symlinks(self) -> tuple[PinnedSymlink, ...]:
         return tuple(b for b in self.binds if isinstance(b, PinnedSymlink))
 
-    def _write_regexes(self) -> dict[Path, list[str]]:
-        out: dict[Path, list[str]] = {}
-        for b in self.binds:
-            if isinstance(b, WriteRegex):
-                dst = through_darwin_system_symlink(b.path)
-                out.setdefault(dst, []).extend(b.suffixes)
-        return out
-
-    def entries(self) -> list[Entry]:
-        """Return every declared mount as a normalized destination-tree entry."""
-        out = list(_surface_entries())
-        root_dst = through_darwin_system_symlink(self.root)
+    def _entries_with(self, norm: Callable[[Path], Path]) -> list[Entry]:
+        out = list(_surface_entries(norm))
+        root_dst = norm(self.root)
         out.append(Entry(root_dst, Op.RW, root_dst, fixed=True))
         for spec in self.binds:
             match spec:
@@ -395,19 +444,27 @@ class SeatbeltSandbox:
                     raise ValueError(
                         f"Overlay ({p}) is not supported on macOS Seatbelt"
                     )
-                case WriteRegex(path=p, guard=guard):
-                    dst = through_darwin_system_symlink(p)
-                    out.append(Entry(dst, Op.RO, dst, guard=guard))
+                case WriteRegex(path=p, suffixes=suffixes, guard=guard):
+                    dst = norm(p)
+                    out.append(
+                        Entry(
+                            dst,
+                            Op.WRITE_REGEX,
+                            dst,
+                            guard=guard,
+                            suffixes=suffixes,
+                        )
+                    )
                 case PinnedSymlink(src=src):
-                    src_dst = through_darwin_system_symlink(src)
+                    src_dst = norm(src)
                     out.append(Entry(src_dst, Op.RO, src_dst, guard=True))
                 case Bind(path=p, mode=mode, optional=optional, guard=guard):
-                    dst = through_darwin_system_symlink(p)
+                    dst = norm(p)
                     out.append(
                         Entry(dst, Op(mode.value), dst, guard=guard, optional=optional)
                     )
                 case Seal(path=p, allow_missing=allow_missing):
-                    dst = through_darwin_system_symlink(p)
+                    dst = norm(p)
                     out.append(
                         Entry(
                             dst,
@@ -421,38 +478,83 @@ class SeatbeltSandbox:
                     out.append(entry_for(spec))
         return out
 
+    def entries(self) -> list[Entry]:
+        """Return every declared mount normalized to canonical vnode paths."""
+        return self._entries_with(_canonical_path)
+
+    def _lexical_tree(self) -> dict[Path, Entry]:
+        """Build the pre-symlink lexical tree so `check_symlink_free` sees links."""
+        lex_entries = self._entries_with(through_darwin_system_symlink)
+        lex_surface = frozenset(
+            e.dst for e in _surface_entries(through_darwin_system_symlink)
+        )
+        lex_tree = merge_entries(lex_entries)
+        check_surface(lex_tree, lex_surface, tool="sandbox-exec")
+        check_guards(lex_tree)
+        return lex_tree
+
     def tree(self) -> dict[Path, Entry]:
-        """Return the merged, guard-checked destination tree."""
-        surface = frozenset(e.dst for e in _surface_entries())
+        """Return the merged, guard-checked canonical destination tree."""
+        self._lexical_tree()
+        surface = frozenset(e.dst for e in _surface_entries(_canonical_path))
         tree = merge_entries(self.entries())
         check_surface(tree, surface, tool="sandbox-exec")
         check_guards(tree)
+
+        seen_syms: dict[Path, Path] = {}
         for sym in self._pinned_symlinks():
-            dst = through_darwin_system_symlink(sym.dst)
+            dst = Path(seatbelt_lexpath(sym.dst))
+            src = _canonical_path(sym.src)
+            prior_src = seen_syms.get(dst)
+            if prior_src is not None and prior_src != src:
+                raise MountConflict(
+                    f"conflicting PinnedSymlink targets at {dst}: {prior_src} vs {src}"
+                )
+            for other_sym_dst in seen_syms:
+                if other_sym_dst != dst and (
+                    dst.is_relative_to(other_sym_dst)
+                    or other_sym_dst.is_relative_to(dst)
+                ):
+                    raise MountConflict(
+                        f"nested PinnedSymlink destinations: {dst} and {other_sym_dst}"
+                    )
+            seen_syms[dst] = src
+
             if dst in tree:
-                raise ValueError(
+                raise MountConflict(
                     f"PinnedSymlink destination {sym.dst} collides with mount at {dst}"
                 )
             for other_dst, other in tree.items():
-                if other_dst.is_relative_to(dst) and not other.guard:
-                    raise ValueError(
-                        f"plain mount at {other_dst} lies below PinnedSymlink"
+                if other_dst.is_relative_to(dst) and (not other.guard or other.fixed):
+                    raise GuardViolation(
+                        f"mount at {other_dst} cannot sit below PinnedSymlink"
                         f" guard at {sym.dst}"
                     )
+            for parent in dst.parents:
+                above = tree.get(parent)
+                if above is not None:
+                    if above.op is Op.SEAL:
+                        raise GuardViolation(
+                            f"PinnedSymlink {sym.dst} lies directly inside sealed"
+                            f" directory {parent}"
+                        )
+                    break
         return tree
 
     def resolve(self) -> list[Mount]:
         """Validate host paths and return resolved mounts in tree depth order."""
+        lex_tree = self._lexical_tree()
+        check_symlink_free(lex_tree, tool="sandbox-exec")
+        for e in lex_tree.values():
+            if e.op in (Op.RW, Op.SEAL, Op.WRITE_REGEX):
+                _reject_host_symlinks(e.dst, include_self=True)
+        for sym in self._pinned_symlinks():
+            _reject_host_symlinks(
+                through_darwin_system_symlink(sym.dst), include_self=False
+            )
+
         tree = self.tree()
-        check_symlink_free(tree, tool="sandbox-exec")
-        for e in tree.values():
-            if e.op in (Op.RW, Op.SEAL) and e.dst.is_symlink():
-                raise SymlinkDestination(
-                    f"mount destination {e.dst} is a symlink; sandbox-exec"
-                    " requires the resolved directory path for writable and"
-                    " sealed roots"
-                )
-        surface = frozenset(e.dst for e in _surface_entries())
+        surface = frozenset(e.dst for e in _surface_entries(_canonical_path))
         mounts: list[Mount] = []
         seal_ro: list[Mount] = []
         for e in sorted(tree.values(), key=lambda item: item.dst.parts):
@@ -476,10 +578,16 @@ class SeatbeltSandbox:
         allowed_sources: Iterable[Path] = (),
     ) -> tuple[Path, Path] | None:
         """Return the first protected path left readable in the box, if any."""
-        paths = tuple(paths)
-        if not paths:
+        raw_paths = tuple(paths)
+        if not raw_paths:
             return None
-        return first_exposure(self._published(), paths, allowed_sources)
+        mounts = self._published()
+        canon_allowed = tuple(_canonical_path(p) for p in allowed_sources)
+        for orig in raw_paths:
+            hit = first_exposure(mounts, (_canonical_path(orig),), canon_allowed)
+            if hit is not None:
+                return hit[0], orig
+        return None
 
     def sealed_exposure(self) -> tuple[Path, Path] | None:
         """Return the first mount source republishing a sealed directory."""
@@ -488,14 +596,15 @@ class SeatbeltSandbox:
             return None
         mounts = self._published()
         for seal in seals:
-            hit = first_exposure(mounts, (seal.path,), seal.allow)
+            canon_allow = tuple(_canonical_path(p) for p in seal.allow)
+            hit = first_exposure(mounts, (_canonical_path(seal.path),), canon_allow)
             if hit is not None:
-                return hit
+                return hit[0], seal.path
         return None
 
     def assert_runtime_visible(self, runtime_dir: Path) -> None:
         """Verify that `runtime_dir` survived resolution as a read-only mount."""
-        expected = through_darwin_system_symlink(runtime_dir)
+        expected = _canonical_path(runtime_dir)
         if not any(m.dst == expected and m.op == "ro" for m in self.resolve()):
             raise ValueError(
                 f"spec has egress backends but does not bind the runtime dir"
@@ -519,12 +628,20 @@ class SeatbeltSandbox:
         for sym in symlinks:
             if not sym.src.exists():
                 raise FileNotFoundError(f"PinnedSymlink source missing: {sym.src}")
+            if not sym.dst.is_symlink() or seatbelt_path(sym.dst) != seatbelt_path(
+                sym.src
+            ):
+                raise ValueError(
+                    f"PinnedSymlink destination {sym.dst} must be staged as a"
+                    f" symlink to {sym.src} before rendering SBPL"
+                )
 
         lines: list[str] = [
             "(version 1)",
             "(deny default)",
             "(allow process*)",
             "(allow file-map-executable)",
+            "(deny process-info*)",
             "(allow process-info* (target same-sandbox))",
             "(allow signal (target same-sandbox))",
             "(allow ipc-posix-sem)",
@@ -532,7 +649,7 @@ class SeatbeltSandbox:
             '(allow sysctl-write (sysctl-name "kern.grade_cputype"))',
             *self._render_mach(),
             *self._render_surface_and_ancestors(mounts, symlinks),
-            *self._render_policy_mounts(mounts),
+            *self._render_policy_mounts(mounts, symlinks),
             *self._render_anti_rename_pins(mounts, symlinks),
             *self._render_network(),
         ]
@@ -552,7 +669,7 @@ class SeatbeltSandbox:
         if "codex-cfprefs" in self.mach_profiles:
             services.extend(("com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon"))
         if not self.unshare_net:
-            services.append("com.apple.trustd.agent")
+            services.extend(("com.apple.trustd.agent", "com.apple.dnssd.service"))
         quoted = " ".join(f"(global-name {_sbpl_quote(s)})" for s in services)
         out = [f"(allow mach-lookup {quoted})"]
         if "codex-cfprefs" in self.mach_profiles:
@@ -582,20 +699,45 @@ class SeatbeltSandbox:
             "/System/Volumes/Data/Users",
             "/System/Volumes/Preboot",
         }
+        raw_bind_paths = [
+            b.path
+            for b in self.binds
+            if isinstance(b, Bind | WriteRegex)
+            and (not getattr(b, "optional", False) or b.path.exists())
+        ]
         all_paths: list[Path] = [
             *_active_system_subpaths(),
             *_DARWIN_SYSTEM_LITERALS,
             *(m.dst for m in mounts),
+            *raw_bind_paths,
             *(sym.src for sym in symlinks),
             *(sym.dst for sym in symlinks),
+            *self.unix_sockets,
         ]
         for p in all_paths:
-            for anc in Path(seatbelt_path(p)).parents:
+            for anc in _canonical_path(p).parents:
                 metadata_literals.add(str(anc))
-            for anc in p.parents:
-                metadata_literals.add(_strip_firmlink(str(anc)))
-            if p.is_symlink():
-                metadata_literals.add(seatbelt_lexpath(p))
+            lex_p = through_darwin_system_symlink(p)
+            for anc in lex_p.parents:
+                metadata_literals.add(seatbelt_lexpath(anc))
+            if lex_p.is_symlink():
+                metadata_literals.add(seatbelt_lexpath(lex_p))
+        for sym in symlinks:
+            metadata_literals.add(seatbelt_lexpath(sym.dst))
+        for sock in self.unix_sockets:
+            metadata_literals.add(seatbelt_lexpath(sock))
+
+        lit_paths: list[str] = []
+        for p in _DARWIN_SYSTEM_LITERALS:
+            for candidate in (_strip_firmlink(str(p)), seatbelt_path(p)):
+                if candidate not in lit_paths:
+                    lit_paths.append(candidate)
+        if not self.unshare_net:
+            mdns = "/private/var/run/mDNSResponder"
+            if mdns not in lit_paths:
+                lit_paths.append(mdns)
+            for anc in Path(mdns).parents:
+                metadata_literals.add(str(anc))
 
         meta_args = " ".join(
             f"(literal {_sbpl_quote(lit)})" for lit in sorted(metadata_literals)
@@ -604,10 +746,7 @@ class SeatbeltSandbox:
             f"(subpath {_sbpl_quote(seatbelt_path(p))})"
             for p in _active_system_subpaths()
         )
-        lit_args = " ".join(
-            f"(literal {_sbpl_quote(_strip_firmlink(str(p)))})"
-            for p in _DARWIN_SYSTEM_LITERALS
-        )
+        lit_args = " ".join(f"(literal {_sbpl_quote(lit)})" for lit in lit_paths)
         return [
             f"(allow file-read-metadata file-test-existence {meta_args})",
             f"(allow file-read* file-test-existence {sub_args} {lit_args})",
@@ -615,25 +754,43 @@ class SeatbeltSandbox:
             r'(allow file-read* file-write* file-ioctl (regex #"^/dev/ttys[0-9]+$"))',
         ]
 
-    def _render_policy_mounts(self, mounts: list[Mount]) -> list[str]:
-        write_regexes = self._write_regexes()
+    def _render_policy_mounts(
+        self,
+        mounts: list[Mount],
+        symlinks: tuple[PinnedSymlink, ...],
+    ) -> list[str]:
         ordered = sorted(
             mounts,
-            key=lambda m: (len(Path(seatbelt_path(m.dst)).parts), seatbelt_path(m.dst)),
+            key=lambda m: (len(_canonical_path(m.dst).parts), seatbelt_path(m.dst)),
         )
+        deeper_paths = [
+            *(_canonical_path(m.dst) for m in ordered),
+            *(_canonical_path(sym.src) for sym in symlinks),
+            *(Path(seatbelt_lexpath(sym.dst)) for sym in symlinks),
+        ]
         out: list[str] = []
         for m in ordered:
             sb = seatbelt_path(m.dst)
+            sb_path = Path(sb)
             quoted = _sbpl_quote(sb)
             match m.op:
                 case "tmpfs":
                     # `mount_for(Op.SEAL)` produces `Mount("tmpfs", ..., guard=True)`.
                     # Regular `self.tmpfs` is not passed to `SeatbeltSandbox`.
+                    seal_meta = {sb}
+                    for target in deeper_paths:
+                        if target != sb_path and target.is_relative_to(sb_path):
+                            for anc in target.parents:
+                                if anc.is_relative_to(sb_path):
+                                    seal_meta.add(str(anc))
+                    meta_lits = " ".join(
+                        f"(literal {_sbpl_quote(p)})" for p in sorted(seal_meta)
+                    )
                     out.append(
                         f"(deny file-read* file-test-existence file-write* (subpath {quoted}))"
                     )
                     out.append(
-                        f"(allow file-read-metadata file-test-existence (literal {quoted}))"
+                        f"(allow file-read-metadata file-test-existence {meta_lits})"
                     )
                 case "rw":
                     kind = (
@@ -651,11 +808,19 @@ class SeatbeltSandbox:
                         f"(allow file-read* file-test-existence ({kind} {quoted}))"
                     )
                     out.append(f"(deny file-write* ({kind} {quoted}))")
-                    for suffix in write_regexes.get(m.dst, ()):
-                        pattern = f"^{_ere_escape(sb)}({suffix})$"
+                case "write-regex":
+                    out.append(
+                        f"(allow file-read* file-test-existence (subpath {quoted}))"
+                    )
+                    out.append(f"(deny file-write* (subpath {quoted}))")
+                    for suffix in m.suffixes:
+                        pattern = f"^{_ere_escape(sb)}/({suffix[1:]})$"
                         out.append(
                             f"(allow file-write* (regex {_sbpl_regex(pattern)}))"
                         )
+        for sym in symlinks:
+            sym_quoted = _sbpl_quote(seatbelt_lexpath(sym.dst))
+            out.append(f"(deny file-write* (literal {sym_quoted}))")
         return out
 
     def _render_anti_rename_pins(
@@ -663,20 +828,18 @@ class SeatbeltSandbox:
         mounts: list[Mount],
         symlinks: tuple[PinnedSymlink, ...],
     ) -> list[str]:
-        rw_roots = [Path(seatbelt_path(m.dst)) for m in mounts if m.op == "rw"]
+        rw_roots = [
+            _canonical_path(m.dst) for m in mounts if m.op in ("rw", "write-regex")
+        ]
         pinned: set[str] = {seatbelt_path(self.root)}
         protected_targets: list[Path] = []
         for m in mounts:
-            sb = Path(seatbelt_path(m.dst))
-            if m.op == "tmpfs":  # Seal
+            sb = _canonical_path(m.dst)
+            if m.op in ("tmpfs", "rw", "write-regex"):
                 pinned.add(str(sb))
                 protected_targets.append(sb)
             elif m.op == "ro":
                 protected_targets.append(sb)
-            elif m.op == "rw" and m.guard:
-                # Guarded RW holes inside Seals (such as a linked worktree's
-                # private gitdir) must not be renamed or deleted either.
-                pinned.add(str(sb))
         for sym in symlinks:
             sym_lex = Path(seatbelt_lexpath(sym.dst))
             pinned.add(str(sym_lex))
@@ -712,9 +875,9 @@ class SeatbeltSandbox:
                 f"(allow network-outbound (remote unix-socket (path-literal {_sbpl_quote(sb_sock)})))"
             )
         if self.allow_local_loopback:
-            out.append('(allow network-bind (local ip "localhost:*"))')
-            out.append('(allow network-inbound (local ip "localhost:*"))')
-            out.append('(allow network-outbound (remote ip "localhost:*"))')
+            out.append('(allow network-bind (local tcp "localhost:*"))')
+            out.append('(allow network-inbound (local tcp "localhost:*"))')
+            out.append('(allow network-outbound (remote tcp "localhost:*"))')
         return out
 
     def wrapper(self) -> list[str]:
@@ -724,7 +887,7 @@ class SeatbeltSandbox:
         # bwrap's ordered `--setenv` semantics (`BoxSpec.with_env`).
         dedup_env: dict[str, str] = {}
         for k, v in self.env:
-            if "=" in k or "\x00" in k or "\x00" in v:
+            if not k or k.startswith("-") or "=" in k or "\x00" in k or "\x00" in v:
                 raise ValueError(f"invalid environment entry for key {k!r}")
             dedup_env[k] = v
         env_args = [f"{k}={v}" for k, v in dedup_env.items()]
@@ -734,11 +897,9 @@ class SeatbeltSandbox:
                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
                 0o600,
             )
-            try:
-                os.fchmod(fd, 0o600)
-                os.write(fd, sbpl.encode("utf-8"))
-            finally:
-                os.close(fd)
+            with os.fdopen(fd, "wb") as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(sbpl.encode("utf-8"))
             sb_args = ["-f", str(self.profile_path)]
         else:
             sb_args = ["-p", sbpl]
@@ -747,6 +908,7 @@ class SeatbeltSandbox:
             "-i",
             "-C",
             seatbelt_path(self.root),
+            "--",
             *env_args,
             "/usr/bin/sandbox-exec",
             *sb_args,

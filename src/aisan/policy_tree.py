@@ -185,14 +185,22 @@ class WriteRegex:
         for suffix in self.suffixes:
             if (
                 not suffix.startswith("/")
+                or len(suffix) < 2
                 or any(c in suffix for c in '\x00\r\n"')
                 or "(?" in suffix
+                or any(seg == ".." for seg in suffix.split("/"))
             ):
                 raise ValueError(
-                    f"WriteRegex suffix {suffix!r} must be a POSIX ERE starting"
-                    " with '/' with no quotes, control lines, or '(?' groups"
+                    f"WriteRegex suffix {suffix!r} must be a non-empty POSIX ERE"
+                    " starting with '/' with no quotes, '..', control lines, or"
+                    " '(?' groups"
                 )
-            re.compile(suffix)
+            try:
+                re.compile(suffix[1:])
+            except re.error as e:
+                raise ValueError(
+                    f"WriteRegex suffix {suffix!r} is not a valid POSIX ERE: {e}"
+                ) from e
 
 
 BindSpec = Bind | BindOver | Overlay | Seal | PinnedSymlink | WriteRegex
@@ -244,11 +252,12 @@ class Op(enum.Enum):
     DEV = "dev"
     RO = "ro"
     OVERLAY = "overlay"
+    WRITE_REGEX = "write-regex"
     RW = "rw"
 
 
 # Identity binds that may merge at one destination, strictest first.
-_MERGEABLE = (Op.RO, Op.OVERLAY, Op.RW)
+_MERGEABLE = (Op.RO, Op.OVERLAY, Op.WRITE_REGEX, Op.RW)
 
 
 @dataclass(frozen=True)
@@ -279,10 +288,11 @@ class Entry:
     fixed: bool = False
     size: int = 0
     allow_missing: bool = False
+    suffixes: tuple[str, ...] = ()
 
     @property
     def _identity(self) -> tuple[object, ...]:
-        return (self.op, self.src, self.size, self.allow_missing)
+        return (self.op, self.src, self.size, self.allow_missing, self.suffixes)
 
     def merge(self, other: Entry) -> Entry:
         """Return the entry that wins where `self` and `other` share `dst`.
@@ -301,21 +311,29 @@ class Entry:
             guard = fixed.guard if fixed else (self.guard or other.guard)
             return Entry(
                 self.dst, self.op, self.src, guard, optional, fixed is not None,
-                self.size, self.allow_missing,
+                self.size, self.allow_missing, self.suffixes,
             )  # fmt: skip
         mergeable = (
             not self.fixed
             and not other.fixed
             and self.op in _MERGEABLE
             and other.op in _MERGEABLE
+            and not (self.op is Op.WRITE_REGEX and other.op is Op.WRITE_REGEX)
         )
         if not mergeable:
             raise MountConflict(
                 f"mount conflict at {self.dst}: {self._describe()} and"
                 f" {other._describe()} cannot both apply; remove one"
             )
-        op = min(self.op, other.op, key=_MERGEABLE.index)
-        return Entry(self.dst, op, self.dst, self.guard or other.guard, optional)
+        winner = min(self, other, key=lambda item: _MERGEABLE.index(item.op))
+        return Entry(
+            self.dst,
+            winner.op,
+            self.dst,
+            self.guard or other.guard,
+            optional,
+            suffixes=winner.suffixes,
+        )
 
     def _describe(self) -> str:
         if self.src is None:
@@ -334,11 +352,12 @@ class Mount:
     confinement policy.
     """
 
-    op: str  # ro | rw | tmpfs | overlay | seal-ro
+    op: str  # ro | rw | tmpfs | overlay | write-regex | seal-ro
     dst: Path
     src: Path | None = None
     size: int = 0
     guard: bool = False
+    suffixes: tuple[str, ...] = ()
 
     @property
     def covers(self) -> bool:
@@ -487,7 +506,7 @@ def entry_for(spec: BindSpec) -> Entry:
             return Entry(
                 p, Op.SEAL, guard=True, fixed=True, allow_missing=allow_missing
             )
-    raise TypeError(f"not a bind spec: {spec!r}")
+    raise TypeError(f"unsupported bind spec for entry_for: {spec!r}")
 
 
 def merge_entries(entries: Iterable[Entry]) -> dict[Path, Entry]:
@@ -607,6 +626,17 @@ def mount_for(e: Entry) -> Mount | None:
             if not e.src.is_dir():
                 raise FileNotFoundError(f"tmp-overlay source missing: {e.src}")
             return Mount("overlay", e.dst, e.src, guard=e.guard)
+        case Op.WRITE_REGEX:
+            assert e.src is not None
+            if not e.src.exists():
+                raise FileNotFoundError(f"write-regex source missing: {e.src}")
+            if not e.src.is_dir():
+                raise NotADirectoryError(
+                    f"write-regex source is not a directory: {e.src}"
+                )
+            return Mount(
+                "write-regex", e.dst, e.src, guard=e.guard, suffixes=e.suffixes
+            )
     assert e.src is not None
     if e.src != e.dst:
         if not e.src.exists():
