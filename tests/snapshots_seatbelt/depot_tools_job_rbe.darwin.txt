@@ -1,0 +1,170 @@
+
+== inputs ==
+  preset    depot_tools_job
+  network   macOS Seatbelt (deny network*, pinned endpoints only)
+  box_id    snapshot
+  HOME(env) <HOME>
+  chdir     <ROOT>
+
+== egress backends (direct Unix domain sockets) ==
+  rbe      unix://<AISAN PRIVATE>/proxy-16a0eeb0791b6c92/rbe.sock
+
+== tmpfs mounts (intended writable scratch; binds below land on top) ==
+  (none)
+
+== binds by destination (deeper wins; * marks a guard: nothing plain below) ==
+  system    /Library/Apple /Library/Developer /System /bin /dev/fd /opt/homebrew/Cellar /opt/homebrew/bin /opt/homebrew/lib /private/etc/ssl /private/var/db/timezone /private/var/select /sbin /usr
+  [..] seal-ro * <AISAN PRIVATE>
+  [..] ro      * <AISAN PRIVATE>/proxy-16a0eeb0791b6c92
+  [..] rw      * <AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+  [..] ro      * <AISAN PREFIX>
+  [..] ro      * <AISAN SRC>
+  [..] ro      * <DEPOT_TOOLS>
+  [..] rw      * <MAIN>/.git
+  [..] ro-pin  * <MAIN>/.git/config
+  [..] ro-pin  * <MAIN>/.git/config.worktree
+  [..] ro-pin  * <MAIN>/.git/hooks
+  [..] rw      * <MAIN>/.git/objects
+  [..] rw      * <MAIN>/.git/objects/info
+  [..] ro-pin  * <MAIN>/.git/objects/info/alternates
+  [..] ro-pin  * <MAIN>/.git/objects/pack
+  [..] seal-ro * <MAIN>/.git/worktrees
+  [..] rw      * <MAIN>/.git/worktrees/wt
+  [..] ro-pin  * <MAIN>/.git/worktrees/wt/commondir
+  [..] ro-pin  * <MAIN>/.git/worktrees/wt/config.worktree
+  [..] ro      * <MAIN>/build
+  [..] ro      * <MAIN>/third_party/icu
+  [..] write-re* <VPYTHON_CACHE>/vpython-root
+  [..] rw-root   <ROOT>
+  [..] ro-pin  * <ROOT>/.git
+
+== sealed directories (empty in the box, nothing creatable, no alias elsewhere) ==
+  <AISAN PRIVATE>
+    hole <AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+    hole <AISAN PRIVATE>/proxy-16a0eeb0791b6c92
+  <MAIN>/.git/worktrees
+    hole <MAIN>/.git/worktrees/wt
+
+== environment (the box's complete environment; env -i first) ==
+  AISAN_PRIVATE_ROOT=<AISAN NESTED ROOT>
+  AI_AGENT=aisan
+  CLAUDE_CODE_TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+  DEBIAN_FRONTEND=noninteractive
+  DEPOT_TOOLS_BUILD_TELEMETRY=0
+  DEPOT_TOOLS_UPDATE=0
+  GIT_CONFIG_COUNT=3
+  GIT_CONFIG_GLOBAL=/dev/null
+  GIT_CONFIG_KEY_0=gc.auto
+  GIT_CONFIG_KEY_1=gc.pruneExpire
+  GIT_CONFIG_KEY_2=gc.worktreePruneExpire
+  GIT_CONFIG_VALUE_0=0
+  GIT_CONFIG_VALUE_1=never
+  GIT_CONFIG_VALUE_2=never
+  GIT_PAGER=cat
+  GIT_TERMINAL_PROMPT=0
+  HOME=<HOME>
+  PAGER=cat
+  PATH=<DEPOT_TOOLS>:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+  PRESUBMIT_SKIP_NETWORK=1
+  RBE_service_no_security=true
+  SISO_PATH=<AISAN PRIVATE>/proxy-16a0eeb0791b6c92/siso-wrapper
+  SISO_REAPI_ADDRESS=unix://<AISAN PRIVATE>/proxy-16a0eeb0791b6c92/rbe.sock
+  TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+
+== seatbelt profile (SBPL) ==
+  (version 1)
+  (deny default)
+  (allow process*)
+  (allow file-map-executable)
+  (deny process-info*)
+  (allow process-info* (target same-sandbox))
+  (allow signal (target same-sandbox))
+  (allow ipc-posix-sem)
+  (allow sysctl-read (sysctl-name "hw.activecpu" "hw.busfrequency_compat" "hw.byteorder" "hw.cacheconfig" "hw.cachelinesize" "hw.cachelinesize_compat" "hw.cpufamily" "hw.cpufrequency_compat" "hw.cpusubfamily" "hw.cputhreadtype" "hw.cputype" "hw.l1dcachesize" "hw.l1dcachesize_compat" "hw.l1icachesize" "hw.l1icachesize_compat" "hw.l2cachesize" "hw.l2cachesize_compat" "hw.l3cachesize" "hw.l3cachesize_compat" "hw.logicalcpu" "hw.logicalcpu_max" "hw.machine" "hw.memsize" "hw.ncpu" "hw.nperflevels" "hw.packages" "hw.pagesize" "hw.pagesize_compat" "hw.physicalcpu" "hw.physicalcpu_max" "hw.tbfrequency_compat" "hw.vectorunit" "kern.argmax" "kern.bootargs" "kern.hostname" "kern.maxfiles" "kern.maxfilesperproc" "kern.maxproc" "kern.ngroups" "kern.osproductversion" "kern.osrelease" "kern.ostype" "kern.osvariant_status" "kern.osversion" "kern.secure_kernel" "kern.usrstack64" "kern.version" "kern.wq_limit_cooperative_threads" "machdep.cpu.brand_string" "security.mac.lockdown_mode_state" "sysctl.proc_cputype" "vm.loadavg") (sysctl-name-prefix "hw.optional.") (sysctl-name-prefix "hw.perflevel") (sysctl-name-prefix "kern.proc.pid."))
+  (allow sysctl-write (sysctl-name "kern.grade_cputype"))
+  (allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
+  (allow file-read-metadata file-test-existence (literal "/") (literal "/Library") (literal "/System") (literal "/System/Volumes") (literal "/System/Volumes/Data") (literal "/System/Volumes/Data/Users") (literal "/System/Volumes/Data/private") (literal "/System/Volumes/Preboot") (literal "/dev") (literal "/etc") (literal "/opt") (literal "/opt/homebrew") (literal "/private") (literal "/private/etc") (literal "<TMP>") (literal "<AISAN PRIVATE>") (literal "<AISAN PRIVATE>/proxy-16a0eeb0791b6c92") (literal "<AISAN PRIVATE>/proxy-16a0eeb0791b6c92/rbe.sock") (literal "<CASE_TMP>") (literal "<MAIN>") (literal "<MAIN>/.git") (literal "<MAIN>/.git/objects") (literal "<MAIN>/.git/objects/info") (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt") (literal "<MAIN>/third_party") (literal "<VPYTHON_CACHE>") (literal "<ROOT>") (literal "/private/var") (literal "/private/var/db") (literal "/tmp") (literal "/var"))
+  (allow file-read* file-test-existence (subpath "/bin") (subpath "/sbin") (subpath "/usr") (subpath "/System") (subpath "/Library/Apple") (subpath "/private/etc/ssl") (subpath "/private/var/select") (subpath "/private/var/db/timezone") (subpath "/dev/fd") (subpath "/Library/Developer") (subpath "/opt/homebrew/bin") (subpath "/opt/homebrew/lib") (subpath "/opt/homebrew/Cellar") (literal "/") (literal "/private/etc/hosts") (literal "/private/etc/passwd") (literal "/private/etc/group") (literal "/private/etc/services") (literal "/private/etc/protocols") (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/tty"))
+  (allow file-read* file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty"))
+  (allow file-read* file-write* file-ioctl (regex #"^/dev/ttys[0-9]+$"))
+  (deny file-read* file-test-existence file-write* (subpath "<AISAN PRIVATE>"))
+  (allow file-read-metadata file-test-existence (literal "<AISAN PRIVATE>"))
+  (allow file-read* file-test-existence (subpath "<AISAN PRIVATE>/proxy-16a0eeb0791b6c92"))
+  (deny file-write* (subpath "<AISAN PRIVATE>/proxy-16a0eeb0791b6c92"))
+  (allow file-read* file-test-existence file-write* (subpath "<AISAN PRIVATE>/tmp-16a0eeb0791b6c92"))
+  (allow file-read* file-test-existence (subpath "<AISAN PREFIX>"))
+  (deny file-write* (subpath "<AISAN PREFIX>"))
+  (allow file-read* file-test-existence (subpath "<AISAN SRC>"))
+  (deny file-write* (subpath "<AISAN SRC>"))
+  (allow file-read* file-test-existence (subpath "<DEPOT_TOOLS>"))
+  (deny file-write* (subpath "<DEPOT_TOOLS>"))
+  (allow file-read* file-test-existence file-write* (subpath "<ROOT>"))
+  (allow file-read* file-test-existence file-write* (subpath "<MAIN>/.git"))
+  (allow file-read* file-test-existence (subpath "<MAIN>/build"))
+  (deny file-write* (subpath "<MAIN>/build"))
+  (allow file-read* file-test-existence (subpath "<VPYTHON_CACHE>/vpython-root"))
+  (deny file-write* (subpath "<VPYTHON_CACHE>/vpython-root"))
+  (allow file-write* (regex #"^<VPYTHON_CACHE>/vpython-root/(store/\.[^/]+\.lock)$"))
+  (allow file-write* (regex #"^<VPYTHON_CACHE>/vpython-root/(store/[^/]+/stamp)$"))
+  (allow file-read* file-test-existence (literal "<ROOT>/.git"))
+  (deny file-write* (literal "<ROOT>/.git"))
+  (allow file-read* file-test-existence (literal "<MAIN>/.git/config"))
+  (deny file-write* (literal "<MAIN>/.git/config"))
+  (allow file-read* file-test-existence (literal "<MAIN>/.git/config.worktree"))
+  (deny file-write* (literal "<MAIN>/.git/config.worktree"))
+  (allow file-read* file-test-existence (subpath "<MAIN>/.git/hooks"))
+  (deny file-write* (subpath "<MAIN>/.git/hooks"))
+  (allow file-read* file-test-existence file-write* (subpath "<MAIN>/.git/objects"))
+  (deny file-read* file-test-existence file-write* (subpath "<MAIN>/.git/worktrees"))
+  (allow file-read-metadata file-test-existence (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt"))
+  (allow file-read* file-test-existence (subpath "<MAIN>/third_party/icu"))
+  (deny file-write* (subpath "<MAIN>/third_party/icu"))
+  (allow file-read* file-test-existence file-write* (subpath "<MAIN>/.git/objects/info"))
+  (allow file-read* file-test-existence (subpath "<MAIN>/.git/objects/pack"))
+  (deny file-write* (subpath "<MAIN>/.git/objects/pack"))
+  (allow file-read* file-test-existence file-write* (subpath "<MAIN>/.git/worktrees/wt"))
+  (allow file-read* file-test-existence (literal "<MAIN>/.git/objects/info/alternates"))
+  (deny file-write* (literal "<MAIN>/.git/objects/info/alternates"))
+  (allow file-read* file-test-existence (literal "<MAIN>/.git/worktrees/wt/commondir"))
+  (deny file-write* (literal "<MAIN>/.git/worktrees/wt/commondir"))
+  (allow file-read* file-test-existence (literal "<MAIN>/.git/worktrees/wt/config.worktree"))
+  (deny file-write* (literal "<MAIN>/.git/worktrees/wt/config.worktree"))
+  (deny file-write-unlink file-write-create (literal "<AISAN PRIVATE>") (literal "<AISAN PRIVATE>/tmp-16a0eeb0791b6c92") (literal "<MAIN>/.git") (literal "<MAIN>/.git/objects") (literal "<MAIN>/.git/objects/info") (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt") (literal "<VPYTHON_CACHE>/vpython-root") (literal "<ROOT>"))
+  (deny network*)
+  (allow system-socket (socket-domain AF_UNIX))
+  (allow network-outbound (remote unix-socket (path-literal "<AISAN PRIVATE>/proxy-16a0eeb0791b6c92/rbe.sock")))
+
+== argv (exactly what is exec'd, one token per line) ==
+  /usr/bin/env
+  -i
+  -C
+  <ROOT>
+  --
+  DEBIAN_FRONTEND=noninteractive
+  GIT_PAGER=cat
+  PAGER=cat
+  GIT_TERMINAL_PROMPT=0
+  AI_AGENT=aisan
+  AISAN_PRIVATE_ROOT=<AISAN NESTED ROOT>
+  HOME=<HOME>
+  PATH=<DEPOT_TOOLS>:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+  GIT_CONFIG_COUNT=3
+  GIT_CONFIG_KEY_0=gc.auto
+  GIT_CONFIG_VALUE_0=0
+  GIT_CONFIG_KEY_1=gc.pruneExpire
+  GIT_CONFIG_VALUE_1=never
+  GIT_CONFIG_KEY_2=gc.worktreePruneExpire
+  GIT_CONFIG_VALUE_2=never
+  DEPOT_TOOLS_UPDATE=0
+  PRESUBMIT_SKIP_NETWORK=1
+  DEPOT_TOOLS_BUILD_TELEMETRY=0
+  TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+  CLAUDE_CODE_TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+  GIT_CONFIG_GLOBAL=/dev/null
+  SISO_REAPI_ADDRESS=unix://<AISAN PRIVATE>/proxy-16a0eeb0791b6c92/rbe.sock
+  SISO_PATH=<AISAN PRIVATE>/proxy-16a0eeb0791b6c92/siso-wrapper
+  RBE_service_no_security=true
+  /usr/bin/sandbox-exec
+  -f
+  <AISAN PRIVATE>/sb-16a0eeb0791b6c92.sb
+  <payload>

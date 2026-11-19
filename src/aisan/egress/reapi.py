@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import shlex
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -27,13 +28,16 @@ from pathlib import Path
 from ..mint import rbe_token as mint_rbe_token
 from ..proxy import serve_rbe_unix
 from ..proxy.rbe import UPSTREAM_HOST, hosts_file
-from ..sandbox import BindOver, BindSpec
+from ..sandbox import BindOver, BindSpec, host_platform
+from ..seatbelt import seatbelt_lexpath, seatbelt_path
+from ..statedir import write_sealed
 from .base import Backend, PreflightError
 
 log = logging.getLogger(__name__)
 
 HOSTS_FILE = "hosts"
 SISOENV_FILE = "sisoenv"
+SISO_WRAPPER_FILE = "siso-wrapper"
 # The box path the hosts bind-over replaces, before symlink resolution.
 HOSTS_DST = Path("/etc/hosts")
 
@@ -104,6 +108,7 @@ class ReapiBackend(Backend):
     # The unsafe shared-network profile mounts LUCI_STORE directly. Credential
     # checks prevent combining that profile with this proxy.
     supports_shared_net = False
+    supports_direct_unix_socket = True
 
     def __init__(
         self,
@@ -134,34 +139,76 @@ class ReapiBackend(Backend):
             "RBE_service_no_security": "true",
         }
 
+    def direct_unix_client_env(self, runtime_dir: Path) -> dict[str, str]:
+        """Configure Siso on Darwin to dial `rbe.sock` directly without BindOver."""
+        return {
+            "SISO_REAPI_ADDRESS": f"unix://{seatbelt_lexpath(self.socket_path(runtime_dir))}",
+            "SISO_PATH": seatbelt_path(self.siso_wrapper_path(runtime_dir)),
+            "RBE_service_no_security": "true",
+        }
+
     def hosts_path(self, runtime_dir: Path) -> Path:
         return runtime_dir / HOSTS_FILE
 
     def sisoenv_path(self, runtime_dir: Path) -> Path:
         return runtime_dir / SISOENV_FILE
 
+    def siso_wrapper_path(self, runtime_dir: Path) -> Path:
+        return runtime_dir / SISO_WRAPPER_FILE
+
+    def _fallback_siso_binary(self) -> Path:
+        for dst in self._sisoenv_dsts:
+            if len(dst.parents) >= 4:
+                root = dst.parents[3]
+                for rel in ("third_party/siso/cipd/siso", "third_party/siso/siso"):
+                    cand = root / rel
+                    if cand.is_file():
+                        return cand
+        if self._sisoenv_dsts and len(self._sisoenv_dsts[0].parents) >= 4:
+            return self._sisoenv_dsts[0].parents[3] / "third_party/siso/cipd/siso"
+        return Path("/usr/bin/false")
+
     def prepare(self, runtime_dir: Path) -> None:
-        """Write the two files `box_binds` names as bind-over sources."""
+        """Write runtime override files for Linux BindOver and Darwin SISO_PATH."""
         # Resolve the Google service name to the in-box loopback relay.
         hosts_file(runtime_dir)
         # Google rejects a bare instance name with CONSUMER_INVALID.
+        full_instance = f"projects/{self._project}/instances/{self._instance}"
         self.sisoenv_path(runtime_dir).write_text(
-            f"SISO_PROJECT={self._project}\n"
-            f"SISO_REAPI_INSTANCE=projects/{self._project}/instances/{self._instance}\n"
+            f"SISO_PROJECT={self._project}\nSISO_REAPI_INSTANCE={full_instance}\n"
         )
+        fallback = shlex.quote(seatbelt_path(self._fallback_siso_binary()))
+        wrapper = (
+            "#!/bin/sh\n"
+            f"export SISO_PROJECT={shlex.quote(self._project)}\n"
+            f"export SISO_REAPI_INSTANCE={shlex.quote(full_instance)}\n"
+            'd="$PWD"\n'
+            'while [ "$d" != "/" ]; do\n'
+            '  if [ -x "$d/third_party/siso/cipd/siso" ]; then\n'
+            '    exec "$d/third_party/siso/cipd/siso" "$@"\n'
+            "  fi\n"
+            '  if [ -x "$d/third_party/siso/siso" ]; then\n'
+            '    exec "$d/third_party/siso/siso" "$@"\n'
+            "  fi\n"
+            '  d=$(dirname "$d")\n'
+            "done\n"
+            f'exec {fallback} "$@"\n'
+        )
+        write_sealed(self.siso_wrapper_path(runtime_dir), wrapper, mode=0o700)
 
-    def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
-        """Return bind-overs for the hosts file and each ``.sisoenv``.
+    def cleanup_prepared(self, runtime_dir: Path) -> None:
+        for p in (
+            self.hosts_path(runtime_dir),
+            self.sisoenv_path(runtime_dir),
+            self.siso_wrapper_path(runtime_dir),
+        ):
+            p.unlink(missing_ok=True)
 
-        The hosts file preserves Google's routing authority while reaching
-        loopback. ``.sisoenv`` may live in a dependency cache shared by several
-        checkouts, so each box overlays it instead of editing it in place.
-
-        `/etc/hosts` is a symlink on some distributions. The box shows that
-        link through the `/etc` system bind, and the sandbox refuses a
-        destination through a visible link, so the bind-over targets the file
-        the link resolves to; the box's link then leads to it.
-        """
+    def box_binds_for_platform(
+        self, runtime_dir: Path, platform: str
+    ) -> list[BindSpec]:
+        if platform == "darwin":
+            return []
         return [
             BindOver(self.hosts_path(runtime_dir), HOSTS_DST.resolve()),
             *(
@@ -169,6 +216,10 @@ class ReapiBackend(Backend):
                 for dst in self._sisoenv_dsts
             ),
         ]
+
+    def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+        """Return bind-overs for Linux `bwrap`, or empty on Darwin (`SISO_PATH`)."""
+        return self.box_binds_for_platform(runtime_dir, host_platform())
 
     @property
     def refused(self) -> Exception | None:
@@ -191,7 +242,10 @@ class ReapiBackend(Backend):
         """
         sock = self.socket_path(runtime_dir)
         sock.unlink(missing_ok=True)
-        server = await serve_rbe_unix(sock, self._token)
+        if host_platform() == "darwin":
+            server = await serve_rbe_unix(sock, self._token, allow_unix_localhost=True)
+        else:
+            server = await serve_rbe_unix(sock, self._token)
         log.info("rbe proxy: listening on %s for %s", sock, UPSTREAM_HOST)
         try:
             yield

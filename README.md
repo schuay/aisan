@@ -12,22 +12,25 @@ aisan claude /path/to/repo
 The command starts an interactive Claude Code session. `aisan codex`,
 `aisan agy` and `aisan opencode` provide the same confinement:
 
-- **No credentials in the box.** `~/.claude/.credentials.json` is never
-  mounted. The client sends a per-box placeholder, and the proxy replaces it
-  with the host subscription login or the static API key selected by
-  `--api-key`.
-- **No network by default.** The box gets its own network namespace with no
-  route off the machine. The one egress is a loopback relay to the model
-  proxy over a Unix socket. `--net` opts back into host networking when a
-  task needs it; credential files stay unmounted and model calls still pass
+- **No credentials in the box.** `~/.claude/.credentials.json` and host
+  keychains stay inaccessible inside the box. The client sends a per-box
+  placeholder, and the proxy replaces it with the host subscription login or
+  the static API key selected by `--api-key`.
+- **No network by default.** On Linux, the box gets its own network namespace
+  with a loopback relay to the model proxy over a Unix socket; on macOS,
+  Seatbelt denies `network*` and pins outbound traffic to the authenticated
+  host-loopback proxy port (plus local loopback TCP for harnesses that run an
+  in-box local server). `--net` opts back into host networking when a task
+  needs it; credential files stay inaccessible and model calls still pass
   through the authenticated proxy.
 - **Selected filesystem slices.** The repo is bound rw at its real absolute
-  path, system directories ro (`/usr`, `/etc`; fresh `/proc` and `/dev`), a
-  tmpfs over `$HOME` and `/tmp`, and nothing else unless a bind spec names
-  it. Local stdio MCP servers declared on the host are started inside the
-  box, where they inherit its filesystem, cleared environment, and network
-  namespace; remote MCP declarations and their authentication state stay on
-  the host. Only servers a bind spec names are started at all.
+  path, system directories ro, `$HOME` and `/tmp` isolated (tmpfs on Linux;
+  `(deny default)` with a per-box scratch `TMPDIR` on macOS), and nothing else
+  unless a bind spec names it. Local stdio MCP servers declared on the host
+  are started inside the box, where they inherit its filesystem, cleared
+  environment, and network policy; remote MCP declarations and their
+  authentication state stay on the host. Only servers a bind spec names are
+  started at all.
 
 The same three commands, run on the host and then from inside the box:
 
@@ -38,8 +41,9 @@ The same three commands, run on the host and then from inside the box:
 
 ## Inspecting profiles with `--explain`
 
-Every launcher takes `--explain`: it prints the resolved profile and the
-exact Bubblewrap argv from the same `Box` object used to launch, then exits.
+Every launcher takes `--explain`: it prints the resolved profile (including the
+compiled Seatbelt SBPL policy on macOS) and the exact wrapper argv from the same
+`Box` object used to launch, then exits.
 Trimmed:
 
 <p align="center">
@@ -97,7 +101,10 @@ mcp     = ["v8-mcp"]
 ```
 
 The `path` key grants no filesystem access. Each entry must be covered by a
-mount in the same file. `include` expands other spec files in place before the
+mount in the same file. `overlay` mounts a Linux overlayfs with ephemeral
+in-box upper/work directories (`bwrap --overlay-src`) and is refused on macOS,
+where the built-in `depot_tools` grant instead permits narrow cache lock/stamp
+writes via `WriteRegex`. `include` expands other spec files in place before the
 including file's keys, which makes precedence explicit.
 [`examples/depot_tools.toml`](examples/depot_tools.toml) shows a complete file.
 
@@ -131,13 +138,14 @@ REAPI proxy still connect directly.
 
 The same mechanism supports headless workloads. A preset maps arguments to a
 `BoxSpec`; `Box` compiles the spec, starts its backends, and returns the command
-arguments. The Vertex backend uses ADC impersonation to mint short-lived tokens
-on the host, so batch boxes don't receive Google credentials.
+arguments. On Linux, the Vertex backend uses ADC impersonation to mint
+short-lived tokens on the host, so batch boxes don't receive Google credentials.
 
 Remote build clients such as Siso use plaintext HTTP/2 to a local REAPI
-endpoint while the bearer stays on the host. The proxy checks `:authority` and
-`:path`, adds credentials per stream, and returns policy refusals as gRPC
-errors.
+endpoint (via an in-box loopback relay on Linux, or a direct private `AF_UNIX`
+socket and `SISO_PATH` wrapper on macOS) while the bearer stays on the host.
+The proxy checks `:authority` and `:path`, adds credentials per stream, and
+returns policy refusals as gRPC errors.
 
 ## Design rules
 
@@ -152,11 +160,13 @@ errors.
   plain. The fixed system surface (`/usr`, `/etc`, `/proc`, `/dev`, the
   journal socket) is in the tree too: a bind at one of its paths conflicts,
   and a bind above one is refused because bwrap mounts the surface first.
-- **Credential-aware egress in both network modes.** Isolated boxes reach host
-  proxies through Unix sockets and in-box loopback relays. Interactive boxes
-  started with `--net` reach authenticated host-loopback TCP listeners directly;
-  a private runtime file supplies the per-session proxy token without placing it
-  in process arguments.
+- **Credential-aware egress in both network modes.** On Linux, isolated boxes
+  reach host proxies through Unix sockets and in-box loopback relays; on macOS,
+  Seatbelt pins outbound TCP to the authenticated host-loopback proxy port (or
+  a private Unix socket for REAPI). Interactive boxes started with `--net`
+  reach authenticated host-loopback TCP listeners directly; a private runtime
+  file supplies the per-session proxy token without placing it in process
+  arguments.
 - **Fail-closed request policy.** A policy exception denies the request. Refusal
   messages state the policy reason and omit internal callback names.
 - **Presets are pure functions** from arguments to `BoxSpec` values.
@@ -168,26 +178,33 @@ separate integrations.
 
 ## Requirements
 
-- Linux, Python 3.12 or newer, and `bubblewrap` (`bwrap`). User namespaces must
-  be available to the invoking user; some distributions restrict unprivileged
-  user namespaces by default.
-- `systemd-run --user` is optional. Cgroup limits are skipped when the command
-  is absent. On a host without a usable user manager, disable them explicitly
-  with `Limits(use_cgroup=False)`.
+- Python 3.12 or newer on Linux or macOS.
+- **Linux:** `bubblewrap` (`bwrap`) with unprivileged user namespaces enabled
+  for the invoking user (some distributions restrict them by default).
+  `systemd-run --user` is optional: cgroup limits are skipped when the command
+  is absent, or disabled explicitly with `Limits(use_cgroup=False)`. `aisan agy`
+  reads the host login from the Secret Service keyring via `/usr/bin/python3`
+  with PyGObject and libsecret.
+- **macOS:** Built-in Seatbelt (`/usr/bin/sandbox-exec`). `aisan claude` and
+  `aisan agy` read host OAuth logins from the macOS Login Keychain before
+  launch (falling back to their credential files) while denying `SecurityServer`
+  and `securityd` inside the box. Linux-specific primitives (`overlay` binds,
+  general `BindOver` file shadowing outside managed state directories, cgroup
+  resource limits, PID namespaces, and `VertexBackend`) are not available on
+  macOS; presets use `PinnedSymlink`, `WriteRegex`, and anti-rename rules on
+  `.git` steering files instead.
 - Interactive sessions require the corresponding host CLI (`claude`, `codex`,
   `agy`, or `opencode`) to be installed and already logged in.
-- `aisan agy` reads the host login from the Secret Service keyring with the
-  system Python (`/usr/bin/python3`), which needs PyGObject and libsecret.
 - RBE/V8 use additionally requires the relevant siso/depot_tools environment
   and `luci-auth`.
-- Vertex credential minting requires the `google-auth` extra and Application
-  Default Credentials.
+- Vertex credential minting (Linux) requires the `google-auth` extra and
+  Application Default Credentials.
 
 Boxes have no general network access by default. Interactive `claude`, `codex`,
-`agy`, and `opencode` sessions accept `--net` before the literal `--` to share the
-host network namespace. That exposes the internet, LAN/VPN routes, and
-host-local services in both directions; configured model credential files stay
-unmounted and model calls still pass through authenticated host proxies.
+`agy`, and `opencode` sessions accept `--net` before the literal `--` to allow
+host networking. That exposes the internet, LAN/VPN routes, and host-local
+services; configured model credentials stay inaccessible inside the box and
+model calls still pass through authenticated host proxies.
 
 ## Installation
 
@@ -379,10 +396,12 @@ plugins installed in the same environment readable inside boxes with egress.
 ## Relationship to sandbox-runtime
 
 [Anthropic's sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime)
-is the broader cross-platform tool for a general confined coding agent; aisan
-is Linux-only and concentrates on whole-harness confinement, explicit mount
-composition, and credential-aware transports such as the plaintext HTTP/2
-REAPI proxy.
+is a general-purpose cross-platform wrapper for confining individual agent
+commands; aisan confines the whole harness, its state directory, and the
+repository together on Linux (`bubblewrap`) and macOS (`sandbox-exec`),
+combining explicit mount/path-tree composition, `.git` steering-file
+protection, and credential-aware transports such as authenticated model proxies
+and the plaintext HTTP/2 REAPI proxy.
 
 ## Status
 

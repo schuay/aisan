@@ -614,3 +614,102 @@ async def test_live_darwin_box_proxy_roundtrip_blocks_direct_upstream_and_creden
     assert not scratch_dir(box.box_id).exists()
     assert not profile_path(box.box_id).exists()
     assert not (state / TOKEN_FILE).exists()
+
+
+@needs_seatbelt
+async def test_darwin_depot_tools_job_and_reapi_unix_socket_wrapper(
+    tmp_path, monkeypatch
+):
+    import importlib
+
+    from aisan.egress.reapi import ReapiBackend
+    from aisan.sandbox import WriteRegex
+
+    dt_mod = importlib.import_module("aisan.presets.depot_tools_job")
+
+    wt = tmp_path / "wt"
+    (wt / "build" / "config" / "siso").mkdir(parents=True)
+    sisoenv = wt / "build" / "config" / "siso" / ".sisoenv"
+    sisoenv.write_text(
+        "SISO_PROJECT=rbe-chromium-untrusted\nSISO_REAPI_INSTANCE=default_instance\n"
+    )
+    fake_siso = wt / "third_party" / "siso" / "cipd" / "siso"
+    fake_siso.parent.mkdir(parents=True)
+    fake_siso.write_text(
+        "#!/bin/sh\n"
+        'printf "PROJ=%s INST=%s ADDR=%s ARGS=%s\\n"'
+        ' "$SISO_PROJECT" "$SISO_REAPI_INSTANCE" "$SISO_REAPI_ADDRESS" "$*"\n'
+    )
+    fake_siso.chmod(0o755)
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+
+    cache = tmp_path / "vpython-root.501"
+    (cache / "store").mkdir(parents=True)
+    monkeypatch.setattr(dt_mod, "_vpython_cache", lambda: cache)
+    fake_dt = tmp_path / "depot_tools"
+    fake_dt.mkdir()
+    (fake_dt / "autoninja").write_text("#!/bin/sh\nexit 0\n")
+    (fake_dt / "autoninja").chmod(0o755)
+
+    backend = ReapiBackend(
+        project="rbe-chromium-untrusted",
+        sisoenv=sisoenv,
+        mint=lambda: asyncio.sleep(0, result="fake-luci-token"),
+    )
+    spec = dt_mod.depot_tools_job(wt, egress=(backend,), depot_tools=fake_dt)
+    assert any(isinstance(b, WriteRegex) and b.path == cache for b in spec.binds)
+    assert dict(spec.env)["DEPOT_TOOLS_BUILD_TELEMETRY"] == "0"
+
+    other_sock = Path(f"/private/tmp/aisan-unauth-{os.getpid()}.sock")
+    other_sock.unlink(missing_ok=True)
+    unauth_srv = await asyncio.start_unix_server(
+        lambda r, w: w.close(), str(other_sock)
+    )
+    box = Box(spec, box_id="darwin-rbe-test")
+    try:
+        async with box:
+            # Direct Unix-socket-only box needs no `aisan.launch` relay wrapper!
+            assert box.launch_prefix() == []
+            cmd = box.command(
+                [
+                    "/bin/sh",
+                    "-c",
+                    (
+                        'SISO_REAPI_INSTANCE=default_instance "$SISO_PATH" ninja -C out/x d8 && '
+                        f'"{sys.executable}" -c "'
+                        "import os, socket; "
+                        "sock_path = os.environ['SISO_REAPI_ADDRESS'].removeprefix('unix://'); "
+                        "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); "
+                        "s.connect(sock_path); s.close(); "
+                        "u = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); "
+                        "ok = False\n"
+                        "try:\n"
+                        f"    u.connect({str(other_sock)!r})\n"
+                        "except OSError:\n"
+                        "    ok = True\n"
+                        "assert ok, 'Seatbelt allowed unauthorized unix socket'"
+                        '"'
+                    ),
+                ]
+            )
+            res = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            assert res.returncode == 0, res.stderr
+            assert (
+                "INST=projects/rbe-chromium-untrusted/instances/default_instance"
+                in res.stdout
+            )
+            assert "ADDR=unix://" in res.stdout
+            assert "rbe.sock" in res.stdout
+            assert "ARGS=ninja -C out/x d8" in res.stdout
+    finally:
+        unauth_srv.close()
+        await unauth_srv.wait_closed()
+        other_sock.unlink(missing_ok=True)
+    assert not box.runtime_dir.exists()

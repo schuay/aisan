@@ -1052,8 +1052,15 @@ def test_a_tmpfs_root_does_not_stand_in_for_the_launcher_binds(tmp_path):
 async def test_darwin_box_serves_isolated_http_on_shared_tcp_and_direct_unix_sockets(
     tmp_path,
 ):
+    class _DarwinSharedBackend(_SharedFakeBackend):
+        def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+            return []
+
     class _DirectUnixBackend(_FakeBackend):
         supports_direct_unix_socket = True
+
+        def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+            return []
 
         def client_env(self) -> dict[str, str]:
             return {"UNIX_ENDPOINT": f"unix://{self.runtime_sock}"}
@@ -1062,7 +1069,7 @@ async def test_darwin_box_serves_isolated_http_on_shared_tcp_and_direct_unix_soc
             super().__init__(name="direct", port=8811)
             self.runtime_sock = runtime_sock
 
-    shared = _SharedFakeBackend(name="http", port=8810)
+    shared = _DarwinSharedBackend(name="http", port=8810)
     box_id = str(tmp_path / "darwin-mixed")
     direct = _DirectUnixBackend(runtime_dir(box_id) / "direct.sock")
     box = Box(
@@ -1097,9 +1104,34 @@ def test_darwin_box_refuses_backend_requiring_netns(tmp_path):
         box.wrapper()
 
 
+def test_darwin_box_refuses_backend_bind_over_without_touching_host_dst(tmp_path):
+    target_dst = tmp_path / "untouched-target.conf"
+    target_dst.write_text("host-owned\n")
+
+    class _BindOverBackend(_SharedFakeBackend):
+        def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+            return [BindOver(runtime_dir / f"{self.name}.conf", target_dst)]
+
+    box = Box(
+        _spec(tmp_path, egress=(_BindOverBackend(),), unshare_net=True),
+        box_id=str(tmp_path / "darwin-bindover"),
+        platform="darwin",
+    )
+    with (
+        box.staged(),
+        pytest.raises(ValueError, match=r"BindOver .* is not supported on macOS"),
+    ):
+        box.wrapper()
+    assert not target_dst.is_symlink()
+    assert target_dst.read_text() == "host-owned\n"
+
+
 async def test_darwin_direct_unix_only_box_needs_no_launcher(tmp_path):
     class _DirectOnly(_FakeBackend):
         supports_direct_unix_socket = True
+
+        def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+            return []
 
     direct = _DirectOnly(name="direct", port=8812)
     box = Box(

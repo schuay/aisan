@@ -4,15 +4,16 @@
 [project]
 name = "aisan"
 version = "0.1.1"
-description = "Linux confinement and credential-aware egress for build and coding agents"
+description = "Linux and macOS confinement and credential-aware egress for build and coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "Jakob Linke" }]
-keywords = ["bubblewrap", "sandbox", "security", "egress", "reapi"]
+keywords = ["bubblewrap", "seatbelt", "sandbox", "security", "egress", "reapi"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",

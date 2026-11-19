@@ -204,8 +204,14 @@ class Box:
 
     def _backend_binds(self, backend: Backend) -> list[BindSpec]:
         """Adapt backend bind-over/symlink entries to `self.platform`."""
+        platform_fn = getattr(backend, "box_binds_for_platform", None)
+        raw_list = (
+            platform_fn(self.runtime_dir, self.platform)
+            if callable(platform_fn)
+            else backend.box_binds(self.runtime_dir)
+        )
         adapted: list[BindSpec] = []
-        for raw_spec in backend.box_binds(self.runtime_dir):
+        for raw_spec in raw_list:
             item = raw_spec
             dst = getattr(item, "dst", None)
             if (
@@ -218,9 +224,7 @@ class Box:
                     item = BindOver(item.src, dst)
                 elif isinstance(item, PinnedSymlink):
                     item = PinnedSymlink(item.src, dst)
-            if self.platform == "darwin" and isinstance(item, BindOver):
-                adapted.append(PinnedSymlink(item.src, item.dst))
-            elif self.platform == "linux" and isinstance(item, PinnedSymlink):
+            if self.platform == "linux" and isinstance(item, PinnedSymlink):
                 adapted.append(BindOver(item.src, item.dst))
             else:
                 adapted.append(item)
@@ -250,6 +254,7 @@ class Box:
         backend_binds: list[BindSpec] = []
         for backend in self.spec.egress:
             backend.prepare(self.runtime_dir)
+            stack.callback(backend.cleanup_prepared, self.runtime_dir)
             # Remove prepared bind-over sources owned by this runtime directory.
             # Sources outside it belong to the backend's caller and remain intact.
             for spec in self._backend_binds(backend):
@@ -465,7 +470,10 @@ class Box:
             env.setdefault("GIT_CONFIG_GLOBAL", "/dev/null")
         for backend in self.spec.egress:
             if not self._uses_shared_tcp(backend):
-                env.update(backend.client_env())
+                if self.platform == "darwin":
+                    env.update(backend.direct_unix_client_env(self.runtime_dir))
+                else:
+                    env.update(backend.client_env())
         return env
 
     def _sandbox(self) -> SandboxBackend:

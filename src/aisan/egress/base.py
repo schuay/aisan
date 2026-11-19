@@ -118,6 +118,14 @@ class Backend(abc.ABC):
         """
         return {}
 
+    def direct_unix_client_env(self, runtime_dir: Path) -> dict[str, str]:
+        """Return client environment variables when dialing `socket_path` directly."""
+        return self.client_env()
+
+    def cleanup_prepared(self, runtime_dir: Path) -> None:
+        """Remove any auxiliary files `prepare` wrote into `runtime_dir`."""
+        return
+
     def shared_client_env_description(self) -> dict[str, str]:
         """Return stable markers for shared-network ``explain`` output."""
         raise NotImplementedError(f"{self.name} does not support shared networking")

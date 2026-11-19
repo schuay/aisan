@@ -1141,3 +1141,54 @@ def test_a_sustained_mint_outage_logs_once_per_window_not_once_ever(
     total = len([r for r in caplog.records if "no credential" in r.getMessage()])
     assert first == 1, f"logged {first} times inside one window"
     assert total == 2, "the window did not reopen"
+
+
+async def test_unix_localhost_authority_is_opt_in_and_rewritten_upstream():
+    path = f"{CAS}/FindMissingBlobs"
+    refusals: list[dict[bytes, bytes]] = []
+    forwarded: list[dict[bytes, bytes]] = []
+
+    class _Down:
+        def send_headers(self, sid, headers, end_stream=False):
+            refusals.append(dict(headers))
+
+    class _Up:
+        def get_next_available_stream_id(self):
+            return 1
+
+        def send_headers(self, sid, headers, end_stream=False):
+            forwarded.append(dict(headers))
+
+    def _req(authority: str) -> h2.events.RequestReceived:
+        return h2.events.RequestReceived(
+            stream_id=1,
+            headers=[
+                (b":method", b"POST"),
+                (b":path", path.encode()),
+                (b":scheme", b"http"),
+                (b":authority", authority.encode()),
+                (b"content-type", b"application/grpc"),
+            ],
+        )
+
+    # Default (`allow_unix_localhost=False`): `localhost` is refused.
+    default_session = Session(_token, RBE_ALLOWED_METHODS)
+    await default_session._on_down_event(_req("localhost"), _Down(), _Up())
+    assert len(refusals) == 1
+    assert refusals[0][b"grpc-status"] == b"7"
+    assert not forwarded
+
+    # Direct Unix socket mode (`allow_unix_localhost=True`): grpc-go's bare
+    # `localhost` authority is accepted and rewritten to `UPSTREAM_HOST`, while
+    # `localhost:<port>` and foreign hosts remain refused.
+    unix_session = Session(_token, RBE_ALLOWED_METHODS, allow_unix_localhost=True)
+    await unix_session._on_down_event(_req("localhost"), _Down(), _Up())
+    assert len(forwarded) == 1
+    assert forwarded[0][b":authority"] == rbe.UPSTREAM_HOST.encode()
+    assert forwarded[0][b"authorization"] == b"Bearer real-bearer"
+
+    for bad in ("localhost:8712", "storage.googleapis.com"):
+        before = len(refusals)
+        await unix_session._on_down_event(_req(bad), _Down(), _Up())
+        assert len(refusals) == before + 1
+        assert refusals[-1][b"grpc-status"] == b"7"

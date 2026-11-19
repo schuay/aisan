@@ -12,7 +12,6 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from conftest import needs_bwrap
 
 from aisan.sandbox import RO, Bind, BindOver
 from aisan.session import (
@@ -234,7 +233,6 @@ def test_a_refused_bind_spec_stops_the_launch(tmp_path, command):
     assert str(bad) in result.stderr and "not covered" in result.stderr
 
 
-@needs_bwrap
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_an_egress_profile_reaches_the_box(tmp_path, command):
     repo = tmp_path / "repo"
@@ -284,7 +282,6 @@ def test_a_profile_that_finds_nothing_says_so(tmp_path, command):
     assert "rbe.sock" not in result.stdout
 
 
-@needs_bwrap
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
 def test_naming_one_profile_twice_is_not_two_of_it(tmp_path, command):
 
@@ -298,7 +295,8 @@ def test_naming_one_profile_twice_is_not_two_of_it(tmp_path, command):
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.count("rbe.sock") == 1
+    egress_sec = result.stdout.split("== egress backends")[1].split("\n\n==")[0]
+    assert egress_sec.count("rbe.sock") == 1
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
@@ -325,7 +323,6 @@ def test_the_shared_net_profile_is_the_one_that_survives_net(tmp_path, command):
     assert "luci credential" in result.stderr
 
 
-@needs_bwrap
 @pytest.mark.parametrize("command", ["claude"])
 def test_the_two_rbe_profiles_are_mutually_exclusive(tmp_path, command):
 

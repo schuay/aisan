@@ -123,8 +123,8 @@ async def test_the_box_holds_no_luci_credential(tmp_path):
     assert creds.returncode != 0, f"the box can read a luci token: {creds.stdout!r}"
 
 
-def test_every_checkout_under_the_root_gets_the_override(tmp_path):
-
+def test_every_checkout_under_the_root_gets_the_override(tmp_path, monkeypatch):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     root = tmp_path / "root"
     dsts = []
     for name in ("main", "wt-a", "wt-b"):
@@ -169,8 +169,8 @@ def test_the_profile_finds_the_checkouts_and_dedupes_the_shared_file(tmp_path):
     assert not v8_rbe(tmp_path / "empty")
 
 
-def test_a_single_sisoenv_may_arrive_as_a_string(tmp_path):
-
+def test_a_single_sisoenv_may_arrive_as_a_string(tmp_path, monkeypatch):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
     dst = tmp_path / "build" / "config" / "siso" / ".sisoenv"
     dst.parent.mkdir(parents=True)
     dst.touch()

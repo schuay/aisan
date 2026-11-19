@@ -139,9 +139,16 @@ class Session:
     benefit.
     """
 
-    def __init__(self, token: TokenSource, allow: frozenset[str]) -> None:
+    def __init__(
+        self,
+        token: TokenSource,
+        allow: frozenset[str],
+        *,
+        allow_unix_localhost: bool = False,
+    ) -> None:
         self._token = token
         self._allow = allow
+        self._allow_unix_localhost = allow_unix_localhost
         self._c2u: dict[int, int] = {}
         self._u2c: dict[int, int] = {}
         # Key both directional queues by client stream ID.
@@ -367,9 +374,11 @@ class Session:
             # ``isdigit`` accepts non-ASCII numerals, so check both properties.
             authority = headers.get(b":authority", b"").decode(errors="replace")
             host, sep, port = authority.partition(":")
-            if host != UPSTREAM_HOST or (
-                sep and not (port.isascii() and port.isdigit())
-            ):
+            valid_upstream = host == UPSTREAM_HOST and (
+                not sep or (port.isascii() and port.isdigit())
+            )
+            valid_unix_local = self._allow_unix_localhost and authority == "localhost"
+            if not (valid_upstream or valid_unix_local):
                 self._warn.warning(log, "rbe proxy: refused authority %r", authority)
                 self._refuse(
                     down, ev.stream_id, f"authority not permitted: {authority}"
@@ -505,11 +514,18 @@ class Session:
                     down.reset_stream(cid)
 
 
-def _handler(token: TokenSource, allow: frozenset[str]):
+def _handler(
+    token: TokenSource,
+    allow: frozenset[str],
+    *,
+    allow_unix_localhost: bool = False,
+):
     """Create one REAPI session for each accepted connection."""
 
     async def handle(reader, writer) -> None:
-        await Session(token, allow).run(reader, writer)
+        await Session(token, allow, allow_unix_localhost=allow_unix_localhost).run(
+            reader, writer
+        )
 
     return handle
 
@@ -519,16 +535,21 @@ async def serve_unix(
     token: TokenSource,
     *,
     allow: frozenset[str] = ALLOWED_METHODS,
+    allow_unix_localhost: bool = False,
 ) -> asyncio.Server:
     """Serve authenticated REAPI through a private UNIX socket.
 
-    An in-box TCP relay connects Siso to this socket. Policy and credentials stay
-    in the host process. Remove stale per-box sockets before binding and restrict
-    the new socket to its owner.
+    An in-box TCP relay connects Siso to this socket on Linux; on Darwin Siso
+    dials `unix://<socket_path>` directly (`allow_unix_localhost=True`). Policy
+    and credentials stay in the host process. Remove stale per-box sockets
+    before binding and restrict the new socket to its owner.
     """
     socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     socket_path.unlink(missing_ok=True)
-    server = await asyncio.start_unix_server(_handler(token, allow), str(socket_path))
+    server = await asyncio.start_unix_server(
+        _handler(token, allow, allow_unix_localhost=allow_unix_localhost),
+        str(socket_path),
+    )
     socket_path.chmod(0o600)
     return server
 

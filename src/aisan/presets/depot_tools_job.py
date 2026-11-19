@@ -24,8 +24,22 @@ from pathlib import Path
 
 from ..egress.base import Backend, EgressProfile
 from ..gitbinds import GC_ENV, external_symlink_targets, git_binds, git_host_files
-from ..sandbox import RO, Bind, BindSpec, Overlay
+from ..sandbox import RO, Bind, BindSpec, Overlay, WriteRegex, host_platform
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Grant, Limits
+
+_DARWIN_BASE_PATH = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+)
+_XCODE_DEV_DIR = Path("/Applications/Xcode.app/Contents/Developer")
+_VPYTHON_WRITE_SUFFIXES = (
+    r"/store/\.[^/]+\.lock",
+    r"/store/[^/]+/stamp",
+)
 
 # The wrappers otherwise update the read-only depot_tools checkout on every run.
 # DEPOT_TOOLS_UPDATE disables the update, CIPD sync, and Python bootstrap. Its
@@ -47,20 +61,22 @@ _DEPOT_TOOLS_ENV = (
 
 def _vpython_cache() -> Path:
     """Return the host vpython cache path used by depot_tools."""
+    if host_platform() == "darwin":
+        return Path.home() / "Library" / "Caches" / f"vpython-root.{os.getuid()}"
     return Path.home() / ".cache" / f"vpython-root.{os.getuid()}"
 
 
 def _tool_cache_overlays() -> list[Path]:
-    """Return host tool caches that need private copy-on-write mounts.
-
-    vpython locks its cache even for reads, so a read-only mount fails. Without
-    the cache it tried to rebuild offline and produced no output for 120 seconds
-    in testing. A shared writable mount would let jobs modify roughly 4 GB of
-    executable tool state. An overlay keeps the warm cache readable and confines
-    writes to the box.
-    """
+    """Return host tool caches that need confined write access."""
     cache = _vpython_cache()
     return [cache] if cache.is_dir() else []
+
+
+def _tool_cache_binds(*, is_darwin: bool) -> list[BindSpec]:
+    caches = _tool_cache_overlays()
+    if is_darwin:
+        return [WriteRegex(p, _VPYTHON_WRITE_SUFFIXES) for p in caches]
+    return [Overlay(p) for p in caches]
 
 
 def depot_tools_root() -> Path | None:
@@ -80,13 +96,19 @@ def depot_tools_grant(depot_tools: Path | None = None) -> Grant:
     if root is None:
         # The environment settings apply only when the tool tree is mounted.
         return Grant()
+    is_darwin = host_platform() == "darwin"
+    grant_env = list(_DEPOT_TOOLS_ENV)
+    if is_darwin:
+        grant_env.append(("DEPOT_TOOLS_BUILD_TELEMETRY", "0"))
+        if _XCODE_DEV_DIR.is_dir():
+            grant_env.append(("DEVELOPER_DIR", str(_XCODE_DEV_DIR)))
     return Grant(
         binds=(
-            *(Overlay(p) for p in _tool_cache_overlays()),
+            *_tool_cache_binds(is_darwin=is_darwin),
             Bind(root, RO, optional=True),
         ),
         path=(root,),
-        env=_DEPOT_TOOLS_ENV,
+        env=tuple(grant_env),
     )
 
 
@@ -171,8 +193,10 @@ def depot_tools_job(
         )
     grant = depot_tools_grant(depot_tools)
     home = Path.home()
+    is_darwin = host_platform() == "darwin"
+    sys_bins = _DARWIN_BASE_PATH if is_darwin else ("/usr/bin",)
     # Keep depot_tools first and include launcher directories for bare MCP commands.
-    path_env = ":".join([*(str(d) for d in grant.path), *extra_path, "/usr/bin"])
+    path_env = ":".join([*(str(d) for d in grant.path), *extra_path, *sys_bins])
     # Box adds the runtime, interpreter, and backend mounts. Git pins are
     # guards below the writable worktree and its metadata. Caller paths are
     # plain so the caller's other mounts may refine them.

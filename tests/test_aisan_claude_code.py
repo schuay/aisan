@@ -133,8 +133,14 @@ def test_the_argv_helper_puts_settings_before_the_prompt(tmp_path):
     assert claude_code_argv("hello") == ["claude", "-p", "hello"]
 
 
-def test_the_preset_does_not_set_new_session(tmp_path):
-    assert "--new-session" not in Box(_spec(tmp_path), box_id="t").wrapper()
+def test_the_preset_does_not_set_new_session(tmp_path, monkeypatch):
+    with Box(_spec(tmp_path), box_id="t").staged() as host_box:
+        assert "--new-session" not in host_box.wrapper()
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "linux")
+    assert (
+        "--new-session"
+        not in Box(_spec(tmp_path), box_id="t-linux", platform="linux").wrapper()
+    )
 
 
 def test_the_binary_is_found_on_the_usr_surface_or_reported_absent():
