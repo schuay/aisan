@@ -462,6 +462,8 @@ class Box:
             if "TMPDIR" not in env:
                 env["TMPDIR"] = seatbelt_path(self.scratch_dir)
             env.setdefault("CLAUDE_CODE_TMPDIR", env["TMPDIR"])
+            env.setdefault("XDG_CACHE_HOME", f"{env['TMPDIR']}/xdg-cache")
+            env.setdefault("NPM_CONFIG_CACHE", f"{env['TMPDIR']}/npm-cache")
             env.setdefault("GIT_CONFIG_GLOBAL", "/dev/null")
         for backend in self.spec.egress:
             if not self._uses_shared_tcp(backend):

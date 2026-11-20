@@ -515,6 +515,8 @@ def _rel_tail(child: Path, parent: Path, *, casefold: bool | None = None) -> Pat
 
 def _map_darwin_root_symlink(path: Path) -> Path:
     for link, target in _DARWIN_ROOT_SYMLINKS:
+        if not link.is_symlink():
+            continue
         if path == link:
             return target
         if path.is_relative_to(link):
@@ -526,8 +528,8 @@ def resolved_path(p: Path, *, darwin: bool | None = None) -> Path:
     """Return the canonical host path, or `p` when it cannot be resolved.
 
     When `darwin` is enabled (by default on macOS), also canonicalize existing
-    prefixes via `F_GETPATH` (normalizing APFS case-folding) and map macOS root
-    symlinks and `/System/Volumes/Data` firmlinks to canonical XNU paths.
+    prefixes via `F_GETPATH` (normalizing APFS case-folding) and map
+    `/System/Volumes/Data` firmlinks back to their synthetic root paths.
     """
     use_darwin = (host_platform() == "darwin") if darwin is None else darwin
     try:
@@ -542,11 +544,9 @@ def resolved_path(p: Path, *, darwin: bool | None = None) -> Path:
             tail = resolved.relative_to(anc)
             combined = got if str(tail) == "." else f"{got.rstrip('/')}/{tail}"
             norm = _strip_firmlink(combined)
-            return _map_darwin_root_symlink(
-                Path("/" if norm == "/" else norm.rstrip("/"))
-            )
+            return Path("/" if norm == "/" else norm.rstrip("/"))
     norm = _strip_firmlink(str(resolved))
-    return _map_darwin_root_symlink(Path("/" if norm == "/" else norm.rstrip("/")))
+    return Path("/" if norm == "/" else norm.rstrip("/"))
 
 
 def paths_overlap(a: Path, b: Path, *, casefold: bool | None = None) -> bool:

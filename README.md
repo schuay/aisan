@@ -193,11 +193,19 @@ separate integrations.
 - **macOS:** Built-in Seatbelt (`/usr/bin/sandbox-exec`). `aisan claude` and
   `aisan agy` read host OAuth logins from the macOS Login Keychain before
   launch (falling back to their credential files) while denying `SecurityServer`
-  and `securityd` inside the box. Linux-specific primitives (`overlay` binds,
-  general `BindOver` file shadowing outside managed state directories, cgroup
-  resource limits, PID namespaces, and `VertexBackend`) are not available on
-  macOS; presets use `PinnedSymlink`, `WriteRegex`, and anti-rename rules on
-  `.git` steering files instead.
+  and `securityd` inside the box. Because Seatbelt stages read-only
+  `PinnedSymlink` placeholders inside the per-repository state directory rather
+  than a private mount namespace, macOS enforces one active session at a time
+  per `(client, repository)` via a host lock under `private_root()` (use a
+  separate Git worktree for concurrent sessions; `--explain` remains lock-free).
+  Harnesses that run an in-box local server (`aisan agy` and `aisan opencode`)
+  print a stderr launch warning on macOS because permitting `localhost:*` TCP
+  also makes unauthenticated host loopback TCP services reachable. Linux-specific
+  primitives (`overlay` binds, general `BindOver` file shadowing outside managed
+  state directories, cgroup resource limits, PID namespaces, and
+  `VertexBackend`) are not available on macOS; presets use `PinnedSymlink`,
+  `WriteRegex`, scratch `XDG_CACHE_HOME`/`NPM_CONFIG_CACHE` redirection, and
+  anti-rename rules on `.git` steering files instead.
 - Interactive sessions require the corresponding host CLI (`claude`, `codex`,
   `agy`, or `opencode`) to be installed and already logged in.
 - RBE/V8 use additionally requires the relevant siso/depot_tools environment

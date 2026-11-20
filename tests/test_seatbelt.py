@@ -122,7 +122,6 @@ def test_control_characters_and_invalid_endpoints_are_rejected(tmp_path):
         SeatbeltSandbox(root=tmp_path, mach_profiles=("securityd",))
 
 
-@needs_seatbelt
 def test_quote_escaping_in_rendered_sbpl(tmp_path):
     sb = SeatbeltSandbox(
         root=tmp_path,
@@ -207,7 +206,6 @@ def test_mach_profiles_and_grants_validate_known_names(tmp_path):
     assert bool(Grant(mach_profiles=("codex-cfprefs",)))
 
 
-@needs_seatbelt
 def test_tree_invariants_apfs_case_folding_and_write_regex_merges(tmp_path):
     wt = tmp_path / "wt"
     wt.mkdir()
@@ -341,7 +339,6 @@ def test_tree_invariants_apfs_case_folding_and_write_regex_merges(tmp_path):
         ).render_sbpl()
 
 
-@needs_seatbelt
 def test_exposure_and_seal_checks_catch_leaks_including_case_and_system_literals(
     tmp_path,
 ):
@@ -360,7 +357,7 @@ def test_exposure_and_seal_checks_catch_leaks_including_case_and_system_literals
     assert sb_sym.exposed_path((cred,)) is not None
 
     sb_base = SeatbeltSandbox(root=wt)
-    assert sb_base.exposed_path((Path("/private/etc/hosts"),)) is not None
+    assert sb_base.exposed_path((Path("/dev/null"),)) is not None
     assert sb_base.exposed_path((cred,)) is None
 
     upper_secret = tmp_path / "SECRETS"
@@ -381,7 +378,6 @@ def test_exposure_and_seal_checks_catch_leaks_including_case_and_system_literals
         sb_seal_leak.render_sbpl()
 
 
-@needs_seatbelt
 def test_security_server_and_securityd_are_never_in_rendered_sbpl(tmp_path):
     for unshare in (True, False):
         sbpl = SeatbeltSandbox(
@@ -400,7 +396,6 @@ def test_security_server_and_securityd_are_never_in_rendered_sbpl(tmp_path):
             assert "com.apple.trustd.agent" in sbpl
 
 
-@needs_seatbelt
 def test_wrapper_deduplicates_env_guards_env_flags_and_supports_profile_file(tmp_path):
     wt = tmp_path / "wt"
     wt.mkdir()

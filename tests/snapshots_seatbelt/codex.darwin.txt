@@ -62,9 +62,11 @@
   GIT_PAGER=cat
   GIT_TERMINAL_PROMPT=0
   HOME=<HOME>
+  NPM_CONFIG_CACHE=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/npm-cache
   PAGER=cat
   PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
   TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+  XDG_CACHE_HOME=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/xdg-cache
 
 == seatbelt profile (SBPL) ==
   (version 1)
@@ -81,12 +83,12 @@
   (allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo") (global-name "com.apple.cfprefsd.agent") (global-name "com.apple.cfprefsd.daemon"))
   (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
   (allow user-preference-read (preference-domain "com.openai.codex"))
-  (allow file-read-metadata file-test-existence (literal "/") (literal "/Library") (literal "/System") (literal "/System/Volumes") (literal "/System/Volumes/Data") (literal "/System/Volumes/Data/Users") (literal "/System/Volumes/Data/private") (literal "/System/Volumes/Preboot") (literal "/dev") (literal "/etc") (literal "/opt") (literal "/opt/homebrew") (literal "/private") (literal "/private/etc") (literal "<TMP>") (literal "<AISAN PRIVATE>") (literal "<AISAN PRIVATE>/proxy-16a0eeb0791b6c92") (literal "<CASE_TMP>") (literal "<MAIN>") (literal "<MAIN>/.git") (literal "<MAIN>/.git/objects") (literal "<MAIN>/.git/objects/info") (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt") (literal "<STATE>") (literal "<STATE>/auth.json") (literal "<ROOT>") (literal "/private/var") (literal "/private/var/db") (literal "/tmp") (literal "/var") (regex #"^/dev/ttys[0-9]+$"))
+  (allow file-read-metadata file-test-existence (literal "/") (literal "/Library") (literal "/System") (literal "/System/Volumes") (literal "/System/Volumes/Data") (literal "/System/Volumes/Data/Users") (literal "/System/Volumes/Data/private") (literal "/System/Volumes/Preboot") (literal "/dev") (literal "/etc") (literal "/opt") (literal "/opt/homebrew") (literal "/private") (literal "/private/etc") (literal "/private/var") (literal "/private/var/db") (literal "/tmp") (literal "/var") (literal "<AISAN PRIVATE>") (literal "<AISAN PRIVATE>/proxy-16a0eeb0791b6c92") (literal "<CASE_TMP>") (literal "<MAIN>") (literal "<MAIN>/.git") (literal "<MAIN>/.git/objects") (literal "<MAIN>/.git/objects/info") (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt") (literal "<ROOT>") (literal "<STATE>") (literal "<STATE>/auth.json") (literal "<TMP>")  (regex #"^/dev/ttys[0-9]+$"))
   (allow file-read* file-test-existence (subpath "/bin") (subpath "/sbin") (subpath "/usr") (subpath "/System") (subpath "/Library/Apple") (subpath "/private/etc/ssl") (subpath "/private/var/select") (subpath "/private/var/db/timezone") (subpath "/dev/fd") (subpath "/Library/Developer") (subpath "/opt/homebrew/bin") (subpath "/opt/homebrew/lib") (subpath "/opt/homebrew/Cellar") (literal "/") (literal "/dev") (literal "/private/etc/hosts") (literal "/private/etc/passwd") (literal "/private/etc/group") (literal "/private/etc/services") (literal "/private/etc/protocols") (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/tty") (literal "/dev/ptmx"))
   (allow file-read* file-write* file-ioctl (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx"))
   (allow file-read* file-write* file-ioctl (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))
   (deny file-read* file-test-existence file-write* (subpath "<AISAN PRIVATE>"))
-  (allow file-read-metadata file-test-existence (literal "<AISAN PRIVATE>") (literal "<AISAN PRIVATE>/proxy-16a0eeb0791b6c92"))
+  (allow file-read-metadata file-test-existence (literal "<AISAN PRIVATE>") (literal "<AISAN PRIVATE>/proxy-16a0eeb0791b6c92")  )
   (allow file-read* file-test-existence (subpath "<AISAN PRIVATE>/proxy-16a0eeb0791b6c92"))
   (deny file-write* (subpath "<AISAN PRIVATE>/proxy-16a0eeb0791b6c92"))
   (allow file-read* file-test-existence file-write* (subpath "<AISAN PRIVATE>/tmp-16a0eeb0791b6c92"))
@@ -109,7 +111,7 @@
   (deny file-write* (subpath "<MAIN>/.git/hooks"))
   (allow file-read* file-test-existence file-write* (subpath "<MAIN>/.git/objects"))
   (deny file-read* file-test-existence file-write* (subpath "<MAIN>/.git/worktrees"))
-  (allow file-read-metadata file-test-existence (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt"))
+  (allow file-read-metadata file-test-existence (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt")  )
   (allow file-read* file-test-existence file-write* (subpath "<MAIN>/.git/objects/info"))
   (allow file-read* file-test-existence (subpath "<MAIN>/.git/objects/pack"))
   (deny file-write* (subpath "<MAIN>/.git/objects/pack"))
@@ -121,7 +123,7 @@
   (allow file-read* file-test-existence (literal "<MAIN>/.git/worktrees/wt/config.worktree"))
   (deny file-write* (literal "<MAIN>/.git/worktrees/wt/config.worktree"))
   (deny file-write* (literal "<STATE>/auth.json"))
-  (deny file-write-unlink file-write-create (literal "<AISAN PRIVATE>") (literal "<AISAN PRIVATE>/tmp-16a0eeb0791b6c92") (literal "<MAIN>/.git") (literal "<MAIN>/.git/objects") (literal "<MAIN>/.git/objects/info") (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt") (literal "<STATE>") (literal "<STATE>/auth.json") (literal "<ROOT>"))
+  (deny file-write-unlink file-write-create (literal "<AISAN PRIVATE>") (literal "<AISAN PRIVATE>/tmp-16a0eeb0791b6c92") (literal "<MAIN>/.git") (literal "<MAIN>/.git/objects") (literal "<MAIN>/.git/objects/info") (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt") (literal "<ROOT>") (literal "<STATE>") (literal "<STATE>/auth.json")  )
   (deny network*)
   (allow system-socket (socket-domain AF_UNIX))
   (allow network-outbound (remote tcp "localhost:<PORT:openai-responses>"))
@@ -150,6 +152,8 @@
   CODEX_HOME=<STATE>
   TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
   CLAUDE_CODE_TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+  XDG_CACHE_HOME=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/xdg-cache
+  NPM_CONFIG_CACHE=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/npm-cache
   GIT_CONFIG_GLOBAL=/dev/null
   /usr/bin/sandbox-exec
   -f

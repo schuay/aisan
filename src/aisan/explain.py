@@ -518,7 +518,35 @@ def normalise(
     # Replace nested paths before their parents.
     for pair in sorted([s for s in subs if s], key=lambda s: -len(s[0])):
         text = text.replace(*pair)
+    text = _sort_sbpl_literal_sets(text)
     return re.sub(r"^(\s*)\[\s*\d+\]", r"\1[..]", text, flags=re.MULTILINE)
+
+
+def _sort_sbpl_literal_sets(text: str) -> str:
+    """Re-sort `(literal ...)` sets after path placeholder substitution."""
+    import re
+
+    lit_re = re.compile(r'\(literal "(?:[^"\\]|\\.)*"\)')
+    prefixes = (
+        "(allow file-read-metadata file-test-existence ",
+        "(deny file-write-unlink file-write-create ",
+    )
+    out: list[str] = []
+    for line in text.splitlines():
+        updated = line
+        stripped = line.lstrip()
+        if any(stripped.startswith(p) for p in prefixes):
+            lits = sorted(set(lit_re.findall(line)))
+            if lits:
+                head = line[: line.index("(literal ")]
+                tail = lit_re.sub("", line[line.index("(literal ") :]).strip()
+                suffix = f" {tail}" if tail else ")"
+                if suffix != ")" and suffix.endswith(")"):
+                    updated = f"{head}{' '.join(lits)} {suffix}"
+                else:
+                    updated = f"{head}{' '.join(lits)})"
+        out.append(updated)
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
 def _cli_inputs(argv: list[str]) -> tuple[tuple[str, str], ...]:

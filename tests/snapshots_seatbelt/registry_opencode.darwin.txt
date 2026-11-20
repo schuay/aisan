@@ -57,6 +57,7 @@
   GIT_PAGER=cat
   GIT_TERMINAL_PROMPT=0
   HOME=<HOME>
+  NPM_CONFIG_CACHE=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/npm-cache
   OPENCODE_DISABLE_AUTOUPDATE=1
   OPENCODE_DISABLE_LSP_DOWNLOAD=1
   OPENCODE_DISABLE_MODELS_FETCH=1
@@ -81,12 +82,12 @@
   (allow sysctl-read (sysctl-name "hw.activecpu" "hw.busfrequency_compat" "hw.byteorder" "hw.cacheconfig" "hw.cachelinesize" "hw.cachelinesize_compat" "hw.cpufamily" "hw.cpufrequency_compat" "hw.cpusubfamily" "hw.cputhreadtype" "hw.cputype" "hw.l1dcachesize" "hw.l1dcachesize_compat" "hw.l1icachesize" "hw.l1icachesize_compat" "hw.l2cachesize" "hw.l2cachesize_compat" "hw.l3cachesize" "hw.l3cachesize_compat" "hw.logicalcpu" "hw.logicalcpu_max" "hw.machine" "hw.memsize" "hw.ncpu" "hw.nperflevels" "hw.packages" "hw.pagesize" "hw.pagesize_compat" "hw.physicalcpu" "hw.physicalcpu_max" "hw.tbfrequency_compat" "hw.vectorunit" "kern.argmax" "kern.bootargs" "kern.hostname" "kern.maxfiles" "kern.maxfilesperproc" "kern.maxproc" "kern.ngroups" "kern.osproductversion" "kern.osrelease" "kern.ostype" "kern.osvariant_status" "kern.osversion" "kern.secure_kernel" "kern.usrstack64" "kern.version" "kern.wq_limit_cooperative_threads" "machdep.cpu.brand_string" "security.mac.lockdown_mode_state" "sysctl.proc_cputype" "vm.loadavg") (sysctl-name-prefix "hw.optional.") (sysctl-name-prefix "hw.perflevel"))
   (allow sysctl-write (sysctl-name "kern.grade_cputype"))
   (allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
-  (allow file-read-metadata file-test-existence (literal "/") (literal "/Library") (literal "/System") (literal "/System/Volumes") (literal "/System/Volumes/Data") (literal "/System/Volumes/Data/Users") (literal "/System/Volumes/Data/private") (literal "/System/Volumes/Preboot") (literal "/dev") (literal "/etc") (literal "/opt") (literal "/opt/homebrew") (literal "/private") (literal "/private/etc") (literal "<TMP>") (literal "<AISAN PRIVATE>") (literal "<TEST_TMP>") (literal "<OPENCODE_CACHE>") (literal "<MAIN>") (literal "<MAIN>/.git") (literal "<MAIN>/.git/objects") (literal "<MAIN>/.git/objects/info") (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt") (literal "<ROOT>") (literal "<ROOT>/.aisan-opencode-state") (literal "<ROOT>/.aisan-opencode-state/xdg-cache") (literal "<ROOT>/.aisan-opencode-state/xdg-cache/opencode") (literal "<ROOT>/.aisan-opencode-state/xdg-cache/opencode/models.json") (literal "/private/var") (literal "/private/var/db") (literal "/tmp") (literal "/var") (regex #"^/dev/ttys[0-9]+$"))
+  (allow file-read-metadata file-test-existence (literal "/") (literal "/Library") (literal "/System") (literal "/System/Volumes") (literal "/System/Volumes/Data") (literal "/System/Volumes/Data/Users") (literal "/System/Volumes/Data/private") (literal "/System/Volumes/Preboot") (literal "/dev") (literal "/etc") (literal "/opt") (literal "/opt/homebrew") (literal "/private") (literal "/private/etc") (literal "/private/var") (literal "/private/var/db") (literal "/tmp") (literal "/var") (literal "<AISAN PRIVATE>") (literal "<MAIN>") (literal "<MAIN>/.git") (literal "<MAIN>/.git/objects") (literal "<MAIN>/.git/objects/info") (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt") (literal "<OPENCODE_CACHE>") (literal "<ROOT>") (literal "<ROOT>/.aisan-opencode-state") (literal "<ROOT>/.aisan-opencode-state/xdg-cache") (literal "<ROOT>/.aisan-opencode-state/xdg-cache/opencode") (literal "<ROOT>/.aisan-opencode-state/xdg-cache/opencode/models.json") (literal "<TEST_TMP>") (literal "<TMP>")  (regex #"^/dev/ttys[0-9]+$"))
   (allow file-read* file-test-existence (subpath "/bin") (subpath "/sbin") (subpath "/usr") (subpath "/System") (subpath "/Library/Apple") (subpath "/private/etc/ssl") (subpath "/private/var/select") (subpath "/private/var/db/timezone") (subpath "/dev/fd") (subpath "/Library/Developer") (subpath "/opt/homebrew/bin") (subpath "/opt/homebrew/lib") (subpath "/opt/homebrew/Cellar") (literal "/") (literal "/dev") (literal "/private/etc/hosts") (literal "/private/etc/passwd") (literal "/private/etc/group") (literal "/private/etc/services") (literal "/private/etc/protocols") (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/tty") (literal "/dev/ptmx"))
   (allow file-read* file-write* file-ioctl (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx"))
   (allow file-read* file-write* file-ioctl (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))
   (deny file-read* file-test-existence file-write* (subpath "<AISAN PRIVATE>"))
-  (allow file-read-metadata file-test-existence (literal "<AISAN PRIVATE>"))
+  (allow file-read-metadata file-test-existence (literal "<AISAN PRIVATE>")  )
   (allow file-read* file-test-existence file-write* (subpath "<AISAN PRIVATE>/tmp-16a0eeb0791b6c92"))
   (allow file-read* file-test-existence (subpath "<AISAN PREFIX>"))
   (deny file-write* (subpath "<AISAN PREFIX>"))
@@ -106,7 +107,7 @@
   (deny file-write* (subpath "<MAIN>/.git/hooks"))
   (allow file-read* file-test-existence file-write* (subpath "<MAIN>/.git/objects"))
   (deny file-read* file-test-existence file-write* (subpath "<MAIN>/.git/worktrees"))
-  (allow file-read-metadata file-test-existence (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt"))
+  (allow file-read-metadata file-test-existence (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt")  )
   (allow file-read* file-test-existence file-write* (subpath "<MAIN>/.git/objects/info"))
   (allow file-read* file-test-existence (subpath "<MAIN>/.git/objects/pack"))
   (deny file-write* (subpath "<MAIN>/.git/objects/pack"))
@@ -118,7 +119,7 @@
   (allow file-read* file-test-existence (literal "<MAIN>/.git/worktrees/wt/config.worktree"))
   (deny file-write* (literal "<MAIN>/.git/worktrees/wt/config.worktree"))
   (deny file-write* (literal "<ROOT>/.aisan-opencode-state/xdg-cache/opencode/models.json"))
-  (deny file-write-unlink file-write-create (literal "<AISAN PRIVATE>") (literal "<AISAN PRIVATE>/tmp-16a0eeb0791b6c92") (literal "<MAIN>/.git") (literal "<MAIN>/.git/objects") (literal "<MAIN>/.git/objects/info") (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt") (literal "<ROOT>") (literal "<ROOT>/.aisan-opencode-state") (literal "<ROOT>/.aisan-opencode-state/xdg-cache") (literal "<ROOT>/.aisan-opencode-state/xdg-cache/opencode") (literal "<ROOT>/.aisan-opencode-state/xdg-cache/opencode/models.json"))
+  (deny file-write-unlink file-write-create (literal "<AISAN PRIVATE>") (literal "<AISAN PRIVATE>/tmp-16a0eeb0791b6c92") (literal "<MAIN>/.git") (literal "<MAIN>/.git/objects") (literal "<MAIN>/.git/objects/info") (literal "<MAIN>/.git/worktrees") (literal "<MAIN>/.git/worktrees/wt") (literal "<ROOT>") (literal "<ROOT>/.aisan-opencode-state") (literal "<ROOT>/.aisan-opencode-state/xdg-cache") (literal "<ROOT>/.aisan-opencode-state/xdg-cache/opencode") (literal "<ROOT>/.aisan-opencode-state/xdg-cache/opencode/models.json")  )
   (deny network*)
   (allow system-socket (socket-domain AF_UNIX))
   (allow network-bind (local tcp "localhost:*"))
@@ -155,6 +156,7 @@
   OPENCODE_DISABLE_LSP_DOWNLOAD=1
   TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
   CLAUDE_CODE_TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+  NPM_CONFIG_CACHE=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/npm-cache
   GIT_CONFIG_GLOBAL=/dev/null
   /usr/bin/sandbox-exec
   -f

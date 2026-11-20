@@ -203,8 +203,16 @@ async def test_claude_plan_keychain_lookup_and_file_fallback(tmp_path, monkeypat
 # --- Darwin preset & Box staging tests ---
 
 
-@needs_seatbelt
-def test_darwin_presets_avoid_bind_over_and_overlay_and_configure_flags(tmp_path):
+@pytest.fixture
+def force_darwin(monkeypatch):
+    monkeypatch.setattr("aisan.policy_tree.sys.platform", "darwin")
+    monkeypatch.setattr("aisan.egress.sys.platform", "darwin")
+    monkeypatch.setattr("aisan.userbinds.sys.platform", "darwin")
+
+
+def test_darwin_presets_avoid_bind_over_and_overlay_and_configure_flags(
+    tmp_path, force_darwin
+):
     wt = tmp_path / "wt"
     wt.mkdir()
     state = tmp_path / "state"
@@ -284,12 +292,10 @@ def test_darwin_presets_avoid_bind_over_and_overlay_and_configure_flags(tmp_path
         Box(bad_sym, box_id="bad-sym-keystore")._sandbox()
 
 
-@needs_seatbelt
 def test_darwin_executable_grant_mounts_standalone_app_bundle_root(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, force_darwin
 ):
-    bundle_root = Path("/Applications/FakeTestApp.app/Contents/Resources/tool-cli")
-    # Simulate an non-app-bundle `~/.cargo/bin/tool` install: must NOT mount `~/.cargo` whole!
+    # 1) Standalone `~/.cargo/bin/tool` install: must NOT mount `~/.cargo` whole!
     fake_home = tmp_path / "home"
     cargo_exe = fake_home / ".cargo" / "bin" / "rg-custom"
     cargo_exe.parent.mkdir(parents=True)
@@ -302,9 +308,8 @@ def test_darwin_executable_grant_mounts_standalone_app_bundle_root(
     assert (fake_home / ".cargo").resolve() not in bound_paths
     assert cargo_exe.resolve() in bound_paths
     assert cargo_grant.path == (cargo_exe.parent,)
-    assert bundle_root  # keep lint happy
 
-    # Self-contained venv (`pyvenv.cfg`) mounts the venv root cleanly.
+    # 2) Self-contained venv (`pyvenv.cfg`) mounts the venv root cleanly.
     venv_root = fake_home / "tools" / "my-venv"
     venv_exe = venv_root / "bin" / "tool"
     venv_exe.parent.mkdir(parents=True)
@@ -314,13 +319,48 @@ def test_darwin_executable_grant_mounts_standalone_app_bundle_root(
     venv_grant = darwin_executable_grant(venv_exe)
     assert Bind(venv_root.resolve(), RO, guard=False) in venv_grant.binds
 
-    # System binary needs no extra grant.
+    # 3) Version-managed `nvm` / `npm -g` scoped `@openai/codex` symlink mounts
+    #    both the `@openai/codex` package directory AND `<nvm_ver>/bin` (for `node`),
+    #    while NOT mounting sibling `node_modules` packages!
+    nvm_ver = fake_home / ".nvm" / "versions" / "node" / "v22.14.0"
+    node_bin = nvm_ver / "bin"
+    node_bin.mkdir(parents=True)
+    (node_bin / "node").write_text("#!/bin/sh\nexit 0\n")
+    (node_bin / "node").chmod(0o755)
+    pkg_dir = nvm_ver / "lib" / "node_modules" / "@openai" / "codex"
+    (pkg_dir / "bin").mkdir(parents=True)
+    (pkg_dir / "package.json").write_text('{"name":"@openai/codex"}')
+    entry_js = pkg_dir / "bin" / "codex.js"
+    entry_js.write_text("#!/usr/bin/env node\n")
+    entry_js.chmod(0o755)
+    other_pkg = nvm_ver / "lib" / "node_modules" / "unrelated-pkg"
+    other_pkg.mkdir(parents=True)
+    codex_link = node_bin / "codex"
+    codex_link.symlink_to(entry_js)
+
+    nvm_grant = darwin_executable_grant(codex_link)
+    nvm_bound = {b.path for b in nvm_grant.binds if isinstance(b, Bind)}
+    assert pkg_dir.resolve() in nvm_bound
+    assert node_bin.resolve() in nvm_bound
+    assert other_pkg.resolve() not in nvm_bound
+    assert (nvm_ver / "lib" / "node_modules").resolve() not in nvm_bound
+    assert node_bin in nvm_grant.path
+
+    # 4) Custom `.app` bundle mounts the `.app` root.
+    app_bundle = fake_home / "Applications" / "ToolApp.app"
+    app_exe = app_bundle / "Contents" / "MacOS" / "tool"
+    app_exe.parent.mkdir(parents=True)
+    app_exe.write_text("#!/bin/sh\nexit 0\n")
+    app_exe.chmod(0o755)
+    app_grant = darwin_executable_grant(app_exe)
+    assert Bind(app_bundle.resolve(), RO, guard=False) in app_grant.binds
+
+    # 5) System binary needs no extra grant.
     assert not darwin_executable_grant(Path("/usr/bin/true"))
 
 
-@needs_seatbelt
 def test_darwin_box_staging_cleans_up_symlinks_dirs_scratch_and_profile(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, force_darwin
 ):
     wt = tmp_path / "wt"
     wt.mkdir()
@@ -352,7 +392,12 @@ def test_darwin_box_staging_cleans_up_symlinks_dirs_scratch_and_profile(
         wrapper = box.wrapper()
         assert profile_path(box.box_id).is_file()
         assert wrapper[-2:] == ["-f", str(profile_path(box.box_id))]
-        assert box.env["TMPDIR"] == seatbelt_path(scratch_dir(box.box_id))
+        sb_scratch = seatbelt_path(scratch_dir(box.box_id))
+        assert box.env["TMPDIR"] == sb_scratch
+        assert box.env["XDG_CACHE_HOME"] == f"{sb_scratch}/xdg-cache"
+        assert box.env["NPM_CONFIG_CACHE"] == f"{sb_scratch}/npm-cache"
+        assert (scratch_dir(box.box_id) / "xdg-cache").is_dir()
+        assert (scratch_dir(box.box_id) / "npm-cache").is_dir()
         assert box.env["GIT_CONFIG_GLOBAL"] == "/dev/null"
 
     assert not nested_dst.exists()
@@ -378,9 +423,8 @@ def test_darwin_box_staging_cleans_up_symlinks_dirs_scratch_and_profile(
     assert (state / "occupied.json").read_text() == "user-data"
 
 
-@needs_seatbelt
 def test_darwin_git_config_binds_wires_git_config_global_and_ignores_submodules(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, force_darwin
 ):
     wt = tmp_path / "wt"
     (wt / ".git" / "modules" / "git").mkdir(parents=True)
@@ -722,8 +766,9 @@ async def test_darwin_depot_tools_job_and_reapi_unix_socket_wrapper(
     assert not box.runtime_dir.exists()
 
 
-@needs_seatbelt
-def test_darwin_casefold_and_firmlink_credential_guards(tmp_path, monkeypatch):
+def test_darwin_casefold_and_firmlink_credential_guards(
+    tmp_path, monkeypatch, force_darwin
+):
     from aisan.userbinds import load
 
     fake_home = tmp_path / "home"
@@ -774,9 +819,8 @@ def test_darwin_socket_path_checks_canonical_private_tmp_length(monkeypatch):
         backend.socket_path(borderline)
 
 
-@needs_seatbelt
 def test_darwin_codex_symlinked_agents_skills_and_cross_platform_binds(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, force_darwin
 ):
     fake_home = tmp_path / "home"
     dotfiles_skills = tmp_path / "dotfiles" / "skills"

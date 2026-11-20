@@ -10,14 +10,11 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from conftest import needs_seatbelt
 
 from aisan import Box
 from aisan.explain import explain, normalise
 from aisan.presets import PRESETS
 from aisan.presets.depot_tools_job import depot_tools_job, sisoenv_path
-
-pytestmark = needs_seatbelt
 
 SNAPSHOTS = Path(__file__).parent / "snapshots_seatbelt"
 
@@ -90,8 +87,19 @@ def _check(name: str, text: str) -> None:
 
 @pytest.fixture
 def pinned_darwin_host(monkeypatch):
+    raw_tmp = (
+        Path("/private/tmp") if Path("/private/tmp").is_dir() else Path("/var/tmp")
+    )
+    sys_tmp = str(raw_tmp.resolve())
     monkeypatch.setenv("HOME", "/Users/snapshot-user")
-    monkeypatch.setattr(tempfile, "tempdir", "/private/tmp")
+    monkeypatch.setattr(tempfile, "tempdir", sys_tmp)
+
+    policy_tree_mod = importlib.import_module("aisan.policy_tree")
+    monkeypatch.setattr(policy_tree_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(policy_tree_mod, "_f_getpath", lambda _p: None)
+    egress_base_mod = importlib.import_module("aisan.egress.base")
+    monkeypatch.setattr(egress_base_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(egress_base_mod, "_SUN_PATH_BYTES", 103)
 
     seatbelt_mod = importlib.import_module("aisan.seatbelt")
     monkeypatch.setattr(
@@ -101,8 +109,8 @@ def pinned_darwin_host(monkeypatch):
         seatbelt_mod, "_DARWIN_SYSTEM_LITERALS", _PINNED_SYSTEM_LITERALS
     )
     monkeypatch.setattr(seatbelt_mod, "darwin_controlling_ttys", lambda: ())
-    # Stub existence checks on pinned system roots so hosts without `/opt/homebrew`
-    # or `/Library/Developer` still render the identical snapshot surface.
+    # Stub existence checks on pinned system roots so Linux and macOS hosts
+    # without `/opt/homebrew` or `/Library/Developer` render identical SBPL.
     pinned_set = frozenset(_PINNED_SYSTEM_SUBPATHS) | frozenset(_PINNED_SYSTEM_LITERALS)
     real_exists = Path.exists
     monkeypatch.setattr(
@@ -111,16 +119,16 @@ def pinned_darwin_host(monkeypatch):
         lambda self: True if self in pinned_set else real_exists(self),
     )
 
-    # Root both `_PRIVATE_ROOT` and test workspaces directly under `/private/tmp`
-    # so Seatbelt's ancestor metadata chain never depends on `TMPDIR`
-    # (`/var/folders/...`) or pytest `--basetemp` nesting depth.
+    # Root both `_PRIVATE_ROOT` and test workspaces under `sys_tmp` (`/private/tmp`
+    # on Darwin, `/var/tmp` on Linux) so Seatbelt's ancestor metadata chain has
+    # identical depth regardless of `TMPDIR` or pytest `--basetemp`.
     private = importlib.import_module("aisan.private")
     with (
-        tempfile.TemporaryDirectory(prefix="aisan-sn-", dir="/private/tmp") as pdir,
-        tempfile.TemporaryDirectory(prefix="aisan-ws-", dir="/private/tmp") as wdir,
+        tempfile.TemporaryDirectory(prefix="aisan-sn-", dir=sys_tmp) as pdir,
+        tempfile.TemporaryDirectory(prefix="aisan-ws-", dir=sys_tmp) as wdir,
     ):
-        monkeypatch.setattr(private, "_PRIVATE_ROOT", Path(pdir))
-        work = Path(wdir)
+        monkeypatch.setattr(private, "_PRIVATE_ROOT", Path(pdir).resolve())
+        work = Path(wdir).resolve()
 
         preset_dt = importlib.import_module("aisan.presets.depot_tools_job")
         cache = work / "vpython-cache" / "vpython-root"
@@ -145,10 +153,13 @@ def pinned_darwin_host(monkeypatch):
 
         prefix = work / "aisan-prefix"
         (prefix / "bin").mkdir(parents=True)
+        fake_py = prefix / "bin" / "python3"
+        fake_py.write_text("")
         src = work / "aisan-src"
         src.mkdir()
+        monkeypatch.setattr(launch.sys, "executable", str(fake_py))
         monkeypatch.setattr(
-            launch, "launcher_binds", lambda: [Bind(prefix, RO), Bind(src, RO)]
+            launch, "launcher_binds", lambda **_: [Bind(prefix, RO), Bind(src, RO)]
         )
 
         opencode = importlib.import_module("aisan.presets.opencode")

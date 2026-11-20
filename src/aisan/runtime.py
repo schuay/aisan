@@ -92,8 +92,11 @@ def scratch_dir(box_id: str) -> Path:
 
 
 def prepare_scratch_dir(box_id: str) -> Path:
-    """Create the per-box scratch directory with mode `0o700`."""
-    return prepare_private_dir(scratch_dir(box_id))
+    """Create the per-box scratch directory and default cache subdirs with mode `0o700`."""
+    d = prepare_private_dir(scratch_dir(box_id))
+    for sub in ("xdg-cache", "npm-cache"):
+        (d / sub).mkdir(mode=0o700, exist_ok=True)
+    return d
 
 
 def cleanup_scratch_dir(box_id: str) -> None:

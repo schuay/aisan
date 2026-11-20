@@ -115,16 +115,66 @@ def git_config_env() -> tuple[tuple[str, str], ...]:
 _DARWIN_DEFAULT_BINS_SET = frozenset(DARWIN_DEFAULT_BINS)
 
 
-def darwin_executable_grant(executable_path: Path | None) -> Grant:
+def _node_package_mounts(
+    real: Path, shared: frozenset[Path]
+) -> tuple[list[Path], list[Path]]:
+    """Return `(mounts, path_dirs)` when `real` resolves inside `node_modules`."""
+    for idx, part in enumerate(real.parts):
+        if part != "node_modules":
+            continue
+        nm_dir = Path(*real.parts[: idx + 1])
+        rem = real.parts[idx + 1 :]
+        if not rem:
+            return [], []
+        pkg_root = (
+            nm_dir / rem[0] / rem[1]
+            if rem[0].startswith("@") and len(rem) >= 2
+            else nm_dir / rem[0]
+        )
+        if not (pkg_root / "package.json").is_file() or pkg_root in shared:
+            return [], []
+        mounts = [pkg_root]
+        extra_paths: list[Path] = []
+        if nm_dir.parent.name == "lib":
+            node_bin = nm_dir.parent.parent / "bin"
+            if (node_bin / "node").is_file() and node_bin not in shared:
+                mounts.append(node_bin)
+                extra_paths.append(node_bin)
+        return mounts, extra_paths
+    return [], []
+
+
+def _darwin_target_roots(
+    real: Path, shared: frozenset[Path]
+) -> tuple[list[Path], list[Path]]:
+    """Locate self-contained tool roots for `real` by explicit layout markers."""
+    node_mounts, node_paths = _node_package_mounts(real, shared)
+    if node_mounts:
+        return node_mounts, node_paths
+    for anc in real.parents:
+        if anc in shared or anc in (Path("/"), Path("/opt"), Path("/Applications")):
+            continue
+        if (anc / "pyvenv.cfg").is_file():
+            return [anc], []
+        if anc.suffix == ".app":
+            return [anc], []
+    return [real], []
+
+
+def darwin_executable_grant(
+    executable_path: Path | None, *, platform: str | None = None
+) -> Grant:
     """Grant read-only visibility and PATH discovery for a Darwin client binary.
 
     Homebrew and system binaries sit inside Seatbelt's fixed read-only surface
-    and default PATH. Self-contained tool roots (`pyvenv.cfg`, `bin/python`, or
-    `/Applications/*.app`) mount their prefix; other locations mount only the
-    executable and its symlink chain directories so shared trees such as
-    `~/.cargo` or `~/.bun` are never mounted whole.
+    and default PATH. Self-contained tool roots (`pyvenv.cfg` virtualenvs,
+    `node_modules/<pkg>` + `bin/node` prefixes, or `.app` bundles) mount their
+    explicit root; standalone binaries mount only the resolved executable and
+    its symlink chain directories so shared trees such as `~/.cargo` or `~/.bun`
+    are never mounted whole.
     """
-    if host_platform() != "darwin" or executable_path is None:
+    target_platform = host_platform() if platform is None else platform
+    if target_platform != "darwin" or executable_path is None:
         return Grant()
     bin_dir = executable_path.parent
     real = executable_path.resolve()
@@ -139,6 +189,7 @@ def darwin_executable_grant(executable_path: Path | None) -> Grant:
         *userbinds._refused_key_stores(),
     )
     mount_candidates: list[Path] = []
+    extra_path_dirs: list[Path] = []
     if not covered_by_surface(executable_path):
         for hop_dir in interpreter_chain_dirs(executable_path):
             if not covered_by_surface(hop_dir):
@@ -146,22 +197,11 @@ def darwin_executable_grant(executable_path: Path | None) -> Grant:
     if not covered_by_surface(real):
         home = Path.home().resolve()
         shared = _shared_roots(home)
-        root = real.parents[1] if len(real.parents) >= 2 else None
-        is_self_contained = (
-            root is not None
-            and real.parent.name == "bin"
-            and root not in shared
-            and root != Path("/opt")
-            and (
-                str(real).startswith("/Applications/")
-                or (root / "pyvenv.cfg").is_file()
-                or (root / "bin" / "python").exists()
-            )
-            and credential_overlap((root,), refused_stores) is None
-        )
-        mount_candidates.append(
-            root if is_self_contained and root is not None else real
-        )
+        target_mounts, target_paths = _darwin_target_roots(real, shared)
+        for cand in target_mounts:
+            if not covered_by_surface(cand):
+                mount_candidates.append(cand)
+        extra_path_dirs.extend(target_paths)
 
     safe_mounts = tuple(
         p
@@ -169,8 +209,12 @@ def darwin_executable_grant(executable_path: Path | None) -> Grant:
         if credential_overlap((p,), refused_stores) is None
     )
     binds = tuple(Bind(p, RO, guard=False) for p in safe_mounts)
-    path = (bin_dir,) if str(bin_dir) not in _DARWIN_DEFAULT_BINS_SET else ()
-    return Grant(binds=binds, path=path)
+    raw_paths = [
+        p
+        for p in dict.fromkeys((bin_dir, *extra_path_dirs))
+        if str(p) not in _DARWIN_DEFAULT_BINS_SET
+    ]
+    return Grant(binds=binds, path=tuple(raw_paths))
 
 
 def repo_key(repo: Path) -> str:
