@@ -203,7 +203,9 @@ def _error(status: int, message: str) -> web.Response:
     )
 
 
-def _envelope_refusal(body: bytes, policy: BodyPolicy) -> str | None:
+def _envelope_refusal(
+    body: bytes, policy: BodyPolicy, models: frozenset[str] | None = None
+) -> str | None:
     """Check a model call's envelope, then the Gemini request inside it."""
     try:
         payload = load_json_unambiguous(body)
@@ -217,6 +219,10 @@ def _envelope_refusal(body: bytes, policy: BodyPolicy) -> str | None:
         return f"field(s) not permitted by the sandbox proxy: {quoted_names(unknown)}"
     if "request" not in payload:
         return "a model call must carry a `request`"
+    if models is not None:
+        model = payload.get("model")
+        if not isinstance(model, str) or model not in models:
+            return f"model {model!r} is not permitted by the sandbox proxy"
     return policy.refuse_request(payload["request"])
 
 
@@ -230,10 +236,17 @@ def make_app(
     client_token: str,
     profile: Profile | None = None,
     body: BodyPolicy | None = None,
+    models: frozenset[str] | None = None,
     rate: RateLimit | None = None,
     transport: Transport = DIRECT,
 ) -> web.Application:
-    """Build the proxy; ``client_token`` is the bearer the box must present."""
+    """Build the proxy; ``client_token`` is the bearer the box must present.
+
+    ``models`` names the models a call may address; ``None`` leaves the choice
+    to the box. A login serves every model its account can reach, so a
+    deployment that runs one configured model keeps a box from spending on
+    another.
+    """
     chosen = profile or Profile()
     allow = RouteAllowlist(routes=MappingProxyType({**chosen.routes, **ALLOWED_ROUTES}))
     local = {**chosen.local, **_LOCAL_ANSWERS}
@@ -275,7 +288,7 @@ def make_app(
 
         if route in GENERATE_ROUTES:
             reason = policy_refusal(
-                lambda: _envelope_refusal(body, body_policy),
+                lambda: _envelope_refusal(body, body_policy, models),
                 subject=f"body of {path}",
             )
             if reason is not None:

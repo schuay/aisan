@@ -263,6 +263,19 @@ def test_an_envelope_field_outside_the_measured_set_is_refused():
     assert "'tools'" in _refusal(payload)
 
 
+def test_a_model_allowlist_refuses_an_unlisted_or_unnamed_model():
+    listed = frozenset({"claude-opus-5-5-low"})
+    turn = _agent_turn()
+    body = json.dumps(turn).encode()
+    assert _envelope_refusal(body, BodyPolicy(), listed) is None
+    other = _envelope_refusal(body, BodyPolicy(), frozenset({"gemini-3.5-flash-lite"}))
+    assert "claude-opus-5-5-low" in other
+
+    del turn["model"]
+    unnamed = _envelope_refusal(json.dumps(turn).encode(), BodyPolicy(), listed)
+    assert "not permitted" in unnamed
+
+
 @pytest.mark.parametrize(
     "body",
     [

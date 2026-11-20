@@ -107,14 +107,20 @@ class AntigravityBackend(Backend):
         rpm: int = 120,
         port: int = PORT,
         transport: Transport = DIRECT,
+        models: tuple[str, ...] = (),
     ) -> None:
-        """``token_file`` is the path at which the boxed client reads its login."""
+        """``token_file`` is the path at which the boxed client reads its login.
+
+        ``models`` restricts model calls to the named model ids; empty leaves
+        the choice to the box, which is what an interactive session wants.
+        """
         self._credential = credential
         self._profile = profile or Profile()
         self._token_file = token_file
         self.credentials = credential.files
         self.transport = transport
         self._rpm = rpm
+        self._models = frozenset(models) or None
         self.port = port
 
     def client_env(self) -> dict[str, str]:
@@ -180,6 +186,7 @@ class AntigravityBackend(Backend):
             token=self._credential.token,
             client_token=PLACEHOLDER_KEY,
             profile=self._profile,
+            models=self._models,
             rate=RateLimit(per_minute=self._rpm),
             transport=self.transport,
         )
@@ -203,6 +210,7 @@ class AntigravityBackend(Backend):
             client_token=client_token,
             profile=self._profile,
             body=body,
+            models=self._models,
             rate=RateLimit(per_minute=self._rpm),
             transport=self.transport,
         )

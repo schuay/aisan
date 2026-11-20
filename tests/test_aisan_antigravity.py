@@ -239,6 +239,56 @@ async def test_the_shared_backend_requires_its_activation_token(tmp_path):
     assert reached == [("/v1internal:generateContent", f"Bearer {HOST_TOKEN}")]
 
 
+async def test_a_model_allowlist_is_enforced_on_both_transports(tmp_path):
+    async def upstream(request: web.Request) -> web.Response:
+        return web.json_response({})
+
+    url, upstream_runner = await _upstream_server(upstream)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    backend = _backend(tmp_path, url, models=("gemini-3.5-flash-lite",))
+    other = {**SEARCH, "model": "claude-opus-5-5-low"}
+    path = "/v1internal:generateContent"
+
+    async def statuses(session: ClientSession, base: str, token: str) -> list[int]:
+        out = []
+        for payload in (SEARCH, other):
+            async with session.post(
+                f"{base}{path}", json=payload, headers=_bearer(token)
+            ) as response:
+                out.append(response.status)
+        return out
+
+    try:
+        async with backend.serve_shared(runtime) as activation:
+            token = json.loads((runtime / "antigravity-oauth-token").read_text())[
+                "token"
+            ]["access_token"]
+            base = f"http://127.0.0.1:{activation.port}"
+            async with ClientSession() as session:
+                assert await statuses(session, base, token) == [200, 403]
+
+        turn = {**SEARCH, "request": {"contents": SEARCH["request"]["contents"]}}
+        other = {**turn, "model": "claude-opus-5-5-low"}
+        async with (
+            backend.serve(runtime),
+            ClientSession(
+                connector=UnixConnector(path=str(backend.socket_path(runtime)))
+            ) as session,
+        ):
+            out = []
+            for payload in (turn, other):
+                async with session.post(
+                    f"http://antigravity.invalid{path}",
+                    json=payload,
+                    headers=_bearer(PLACEHOLDER_KEY),
+                ) as response:
+                    out.append(response.status)
+            assert out == [200, 403]
+    finally:
+        await upstream_runner.cleanup()
+
+
 async def test_preflight_reports_an_unusable_credential(tmp_path):
     async def hello(request: web.Request) -> web.Response:
         return web.Response(status=404)
