@@ -17,7 +17,7 @@ The box presents a placeholder bearer, or a per-activation token when it
 shares the host network. The proxy checks it, then replaces it with the host
 token. It never falls back to what the box sent. Cloud Code authorises partly
 on the client identity in ``User-Agent``, so that header is forwarded; every
-other upstream header is built here.
+other upstream header is built here or named by the profile.
 """
 
 from __future__ import annotations
@@ -145,13 +145,18 @@ USERINFO = LocalAnswer(
 
 _LOCAL_ANSWERS = MappingProxyType({("GET", "/userinfo"): USERINFO})
 
+# Upstream headers the proxy builds itself, lowercased.
+_BUILT_HEADERS = frozenset({"authorization", "content-type", "user-agent"})
+
 
 @dataclass(frozen=True)
 class Profile:
     """What differs between builds of the client that speak this protocol.
 
     ``routes`` and ``local`` extend the shared sets; a build cannot remove a
-    shared refusal by listing its route.
+    shared refusal by listing its route. ``headers`` are sent upstream with
+    every forwarded request, for an upstream that needs more than the bearer.
+    The box cannot set them, and they cannot replace a header the proxy builds.
     """
 
     upstream: str = DEFAULT_UPSTREAM
@@ -159,6 +164,9 @@ class Profile:
         default_factory=lambda: MappingProxyType({})
     )
     local: MappingProxyType[Route, LocalAnswer] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    headers: MappingProxyType[str, str] = field(
         default_factory=lambda: MappingProxyType({})
     )
 
@@ -250,6 +258,11 @@ def make_app(
     chosen = profile or Profile()
     allow = RouteAllowlist(routes=MappingProxyType({**chosen.routes, **ALLOWED_ROUTES}))
     local = {**chosen.local, **_LOCAL_ANSWERS}
+    extra_headers = {
+        name: value
+        for name, value in chosen.headers.items()
+        if name.lower() not in _BUILT_HEADERS
+    }
     body_policy = body or BodyPolicy()
     limiter = rate or RateLimit()
     warn = LogGate()
@@ -303,7 +316,7 @@ def make_app(
             log.error("antigravity proxy: no usable credential to attach: %s", e)
             return _error(503, f"sandbox proxy has no usable credential: {e}")
 
-        headers = {"Authorization": f"Bearer {bearer}"}
+        headers = {**extra_headers, "Authorization": f"Bearer {bearer}"}
         if body:
             headers["Content-Type"] = "application/json"
         if agent := request.headers.get("User-Agent"):

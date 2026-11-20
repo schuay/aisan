@@ -633,3 +633,44 @@ async def test_a_profile_adds_routes_and_answers_but_cannot_lift_a_refusal(tmp_p
         async with session.get(f"{URL}/userinfo") as r:
             assert await r.json() == json.loads(USERINFO.body)
     assert [r.path for r in up.requests] == ["/v1internal:rewriteUri"]
+
+
+async def test_a_profile_header_goes_upstream_and_the_box_cannot_set_it(tmp_path):
+    def profile(upstream: str) -> Profile:
+        return Profile(
+            upstream=upstream,
+            headers=MappingProxyType(
+                {
+                    "X-Example-Tenant": "host-tenant",
+                    "authorization": "Bearer other",
+                    "USER-AGENT": "other-client",
+                    "Content-type": "text/plain",
+                }
+            ),
+        )
+
+    async with (
+        _Upstream() as up,
+        _Proxy(tmp_path, profile=profile(up.url)) as session,
+    ):
+        async with session.post(
+            f"{URL}/v1internal:loadCodeAssist",
+            data=b"{}",
+            headers={"X-Example-Tenant": "box-tenant", "User-Agent": USER_AGENT},
+        ) as response:
+            assert response.status == 200
+        # No body and no client identity: the profile still supplies neither.
+        async with session.get(
+            f"{URL}/v1internal/cascadeNuxes?page_size=1000",
+            skip_auto_headers={"User-Agent"},
+        ) as response:
+            assert response.status == 200
+
+    post, get = up.requests
+    for request in (post, get):
+        assert request.headers.getall("X-Example-Tenant") == ["host-tenant"]
+        assert request.headers.getall("Authorization") == [f"Bearer {HOST_TOKEN}"]
+    assert post.headers.getall("User-Agent") == [USER_AGENT]
+    assert post.headers.getall("Content-Type") == ["application/json"]
+    assert "other-client" not in get.headers.getall("User-Agent", [])
+    assert "text/plain" not in get.headers.getall("Content-Type", [])
