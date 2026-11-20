@@ -625,6 +625,13 @@ async def run_interactive(
                         " credential files are not mounted.",
                         file=sys.stderr,
                     )
+                elif is_darwin and box.spec.allow_local_loopback:
+                    print(
+                        "WARNING: box allows localhost TCP on macOS: external"
+                        " networks and DNS are blocked, but unauthenticated"
+                        " host-local TCP services on 127.0.0.1/::1 are reachable.",
+                        file=sys.stderr,
+                    )
                 if notice:
                     print(notice, file=sys.stderr)
                 done = await asyncio.to_thread(

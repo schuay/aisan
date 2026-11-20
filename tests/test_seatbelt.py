@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import termios
 from pathlib import Path
 
@@ -853,12 +854,108 @@ def test_live_network_tcp_port_unix_socket_and_local_loopback(tmp_path):
 
 
 @needs_seatbelt
-def test_live_host_ipc_keychain_procargs_and_tiocsti_are_blocked(tmp_path):
+def test_live_shared_net_blocks_unmounted_and_sealed_unix_sockets():
+    with tempfile.TemporaryDirectory(dir="/private/tmp", prefix="aisan-un-") as td:
+        base = Path(td)
+        wt = base / "wt"
+        scratch = base / "scratch"
+        bound_dir = base / "bound"
+        unmounted_dir = base / "unmounted"
+        sealed_dir = base / "sealed"
+        hole_dir = sealed_dir / "hole"
+        for d in (wt, scratch, bound_dir, unmounted_dir, sealed_dir, hole_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        tcp_srv = socket.socket()
+        tcp_srv.bind(("127.0.0.1", 0))
+        tcp_srv.listen(2)
+        tcp_port = tcp_srv.getsockname()[1]
+
+        socks = {}
+        listeners = [tcp_srv]
+        try:
+            for label, folder in (
+                ("bound", bound_dir),
+                ("unmounted", unmounted_dir),
+                ("sealed", sealed_dir),
+                ("hole", hole_dir),
+            ):
+                sp = folder / f"{label}.sock"
+                srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                srv.bind(str(sp))
+                srv.listen(2)
+                listeners.append(srv)
+                socks[label] = sp
+
+            sb = SeatbeltSandbox(
+                root=wt,
+                binds=(
+                    *_python_binds(),
+                    Bind(scratch, RW),
+                    Bind(bound_dir, RO),
+                    Seal(sealed_dir, allow=(hole_dir,)),
+                    Bind(hole_dir, RO),
+                ),
+                env=_box_env(scratch),
+                unshare_net=False,
+            )
+            code = (
+                "import errno, socket\n"
+                f"s_tcp = socket.create_connection(('127.0.0.1', {tcp_port}), 2)\n"
+                "s_tcp.close()\n"
+                "def dial(p):\n"
+                "    u = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+                "    try:\n"
+                "        u.connect(p); return 'OK'\n"
+                "    except OSError as e:\n"
+                "        return errno.errorcode.get(e.errno, str(e.errno))\n"
+                "    finally:\n"
+                "        u.close()\n"
+                f"assert dial({str(socks['bound'])!r}) == 'OK'\n"
+                f"assert dial({str(socks['hole'])!r}) == 'OK'\n"
+                f"assert dial({str(socks['unmounted'])!r}) == 'EPERM'\n"
+                f"assert dial({str(socks['sealed'])!r}) == 'EPERM'\n"
+                "print('SHARED_NET_UNIX_ISOLATED')\n"
+            )
+            res = _run_sb(sb, [sys.executable, "-c", code])
+            assert res.returncode == 0, res.stderr
+            assert "SHARED_NET_UNIX_ISOLATED" in res.stdout
+        finally:
+            for srv in listeners:
+                srv.close()
+
+
+@needs_seatbelt
+def test_live_isolated_dns_resolution_is_blocked(tmp_path):
     wt = tmp_path / "wt"
     scratch = tmp_path / "scratch"
     wt.mkdir()
     scratch.mkdir()
+    sb = SeatbeltSandbox(
+        root=wt,
+        binds=(*_python_binds(), Bind(scratch, RW)),
+        env=_box_env(scratch),
+        unshare_net=True,
+    )
+    code = (
+        "import socket\n"
+        "try:\n"
+        "    socket.getaddrinfo('example.com', 443)\n"
+        "    raise SystemExit('DNS_RESOLVED')\n"
+        "except socket.gaierror:\n"
+        "    print('DNS_BLOCKED')\n"
+    )
+    res = _run_sb(sb, [sys.executable, "-c", code], timeout=5.0)
+    assert res.returncode == 0, res.stderr
+    assert "DNS_BLOCKED" in res.stdout
 
+
+@needs_seatbelt
+def test_live_desktop_and_keychain_tools_are_blocked(tmp_path):
+    wt = tmp_path / "wt"
+    scratch = tmp_path / "scratch"
+    wt.mkdir()
+    scratch.mkdir()
     sb = SeatbeltSandbox(
         root=wt,
         binds=(*_python_binds(), Bind(scratch, RW)),
@@ -872,43 +969,67 @@ def test_live_host_ipc_keychain_procargs_and_tiocsti_are_blocked(tmp_path):
         ["/usr/bin/security", "find-generic-password", "-s", "aisan-nonexistent"],
     ):
         assert _run_sb(sb, cmd).returncode != 0
-
     if Path("/etc/resolv.conf").exists():
         assert _run_sb(sb, ["/bin/cat", "/etc/resolv.conf"]).returncode == 0
 
-    # Verify host process KERN_PROCARGS2 inspection is denied (`process-info*`).
-    host_pid = os.getpid()
-    proc_probe = _run_sb(
-        sb,
-        [
-            sys.executable,
-            "-c",
-            (
-                "import ctypes, os\n"
-                "libc = ctypes.CDLL(None, use_errno=True)\n"
-                "def procargs(pid):\n"
-                "    mib = (ctypes.c_int * 3)(1, 49, pid)\n"  # CTL_KERN=1, KERN_PROCARGS2=49
-                "    sz = ctypes.c_size_t(65536)\n"
-                "    buf = ctypes.create_string_buffer(65536)\n"
-                "    return libc.sysctl(mib, 3, buf, ctypes.byref(sz), None, 0)\n"
-                "assert procargs(os.getpid()) == 0\n"
-                f"assert procargs({host_pid}) != 0\n"
-                "print('PROCARGS_BLOCKED')\n"
-            ),
-        ],
-    )
-    assert proc_probe.returncode == 0, proc_probe.stderr
-    assert "PROCARGS_BLOCKED" in proc_probe.stdout
 
-    # Verify cross-terminal PTY isolation, in-box `openpty()`, and TIOCSTI denial.
+@needs_seatbelt
+def test_live_host_process_info_and_pid_sysctl_are_blocked(tmp_path):
+    wt = tmp_path / "wt"
+    scratch = tmp_path / "scratch"
+    wt.mkdir()
+    scratch.mkdir()
+    sb = SeatbeltSandbox(
+        root=wt,
+        binds=(*_python_binds(), Bind(scratch, RW)),
+        env=_box_env(scratch),
+        unshare_net=True,
+    )
+    host_pid = os.getpid()
+    code = (
+        "import ctypes, os\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        "def procargs(pid):\n"
+        "    mib = (ctypes.c_int * 3)(1, 49, pid)\n"  # CTL_KERN=1, KERN_PROCARGS2=49
+        "    sz = ctypes.c_size_t(65536)\n"
+        "    buf = ctypes.create_string_buffer(65536)\n"
+        "    return libc.sysctl(mib, 3, buf, ctypes.byref(sz), None, 0)\n"
+        "def kinfo_pid(pid):\n"
+        "    mib = (ctypes.c_int * 4)(1, 14, 1, pid)\n"  # CTL_KERN=1, KERN_PROC=14, KERN_PROC_PID=1
+        "    sz = ctypes.c_size_t(0)\n"
+        "    return libc.sysctl(mib, 4, None, ctypes.byref(sz), None, 0)\n"
+        "path_buf = ctypes.create_string_buffer(4096)\n"
+        # Same-sandbox proc_pidpath succeeds; host PID proc_pidpath (`process-info*`),
+        # KERN_PROC_PID (`sysctl-read`), and KERN_PROCARGS2 all fail.
+        "assert libc.proc_pidpath(os.getpid(), path_buf, 4096) > 0\n"
+        f"assert libc.proc_pidpath({host_pid}, path_buf, 4096) == 0\n"
+        f"assert kinfo_pid({host_pid}) != 0\n"
+        f"assert procargs({host_pid}) != 0\n"
+        "print('PROC_ISOLATION_OK')\n"
+    )
+    res = _run_sb(sb, [sys.executable, "-c", code])
+    assert res.returncode == 0, res.stderr
+    assert "PROC_ISOLATION_OK" in res.stdout
+
+
+@needs_seatbelt
+def test_live_cross_terminal_pty_isolation_and_openpty(tmp_path):
+    wt = tmp_path / "wt"
+    scratch = tmp_path / "scratch"
+    wt.mkdir()
+    scratch.mkdir()
     with pytest.raises(ValueError, match="invalid controlling_tty"):
         SeatbeltSandbox(root=wt, controlling_ttys=("/etc/passwd",))
 
+    sb = SeatbeltSandbox(
+        root=wt,
+        binds=(*_python_binds(), Bind(scratch, RW)),
+        env=_box_env(scratch),
+        unshare_net=True,
+    )
     master_fd, slave_fd = pty.openpty()
     try:
         tty_name = os.ttyname(slave_fd)
-        # 1) Without `controlling_ttys`, opening another host PTY fails while
-        #    in-box `pty.openpty()` succeeds!
         iso_probe = _run_sb(
             sb,
             [
@@ -930,40 +1051,59 @@ def test_live_host_ipc_keychain_procargs_and_tiocsti_are_blocked(tmp_path):
         )
         assert iso_probe.returncode == 0, iso_probe.stderr
         assert "PTY_ISOLATED" in iso_probe.stdout
-
-        # 2) On the box's own controlling TTY, reopening works while TIOCSTI stays denied.
-        sb_tty = SeatbeltSandbox(
-            root=wt,
-            binds=sb.binds,
-            env=sb.env,
-            unshare_net=True,
-            controlling_ttys=(tty_name,),
-        )
-        tiocsti = getattr(termios, "TIOCSTI", 0x80017472)
-        probe = subprocess.run(
-            [
-                *sb_tty.wrapper(),
-                sys.executable,
-                "-c",
-                (
-                    "import fcntl, os\n"
-                    f"fd = os.open({tty_name!r}, os.O_RDWR)\n"
-                    "try:\n"
-                    f"    fcntl.ioctl(fd, {tiocsti}, b'X')\n"
-                    "    raise SystemExit('TIOCSTI_ALLOWED')\n"
-                    "except OSError:\n"
-                    "    print('TIOCSTI_BLOCKED')\n"
-                    "finally:\n"
-                    "    os.close(fd)\n"
-                ),
-            ],
-            stdin=slave_fd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert probe.returncode == 0, probe.stderr
-        assert "TIOCSTI_BLOCKED" in probe.stdout
     finally:
         os.close(master_fd)
         os.close(slave_fd)
+
+
+@needs_seatbelt
+def test_live_tiocsti_is_blocked_on_real_controlling_tty(tmp_path):
+    wt = tmp_path / "wt"
+    scratch = tmp_path / "scratch"
+    wt.mkdir()
+    scratch.mkdir()
+    tiocsti = getattr(termios, "TIOCSTI", 0x80017472)
+
+    def run_on_controlling_tty(*, sandboxed: bool) -> str:
+        out_file = scratch / ("sb.txt" if sandboxed else "unsb.txt")
+        out_file.unlink(missing_ok=True)
+        pid, master_fd = os.forkpty()
+        if pid == 0:
+            import signal as _sig
+
+            _sig.alarm(3)
+            tty_name = os.ttyname(0)
+            code = (
+                "import errno, fcntl, os\n"
+                f"fd = os.open({tty_name!r}, os.O_RDWR)\n"
+                "try:\n"
+                f"    fcntl.ioctl(fd, {tiocsti}, b'Q')\n"
+                f"    open({str(out_file)!r}, 'w').write('TIOCSTI_OK')\n"
+                "except OSError as e:\n"
+                "    name = errno.errorcode.get(e.errno, str(e.errno))\n"
+                f"    open({str(out_file)!r}, 'w').write(f'TIOCSTI_ERR:{{name}}')\n"
+                "finally:\n"
+                "    os.close(fd)\n"
+                "os._exit(0)\n"
+            )
+            if sandboxed:
+                sb_tty = SeatbeltSandbox(
+                    root=wt,
+                    binds=(Bind(scratch, RW),),
+                    env=_box_env(scratch),
+                    unshare_net=True,
+                    controlling_ttys=(tty_name,),
+                )
+                argv = [*sb_tty.wrapper(), "/usr/bin/python3", "-c", code]
+            else:
+                argv = ["/usr/bin/python3", "-c", code]
+            os.execv(argv[0], argv)  # noqa: S606 - fixed test argv
+        _, status = os.waitpid(pid, 0)
+        os.close(master_fd)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+        return out_file.read_text()
+
+    # Positive control: unsandboxed child with real controlling TTY CAN inject via TIOCSTI.
+    assert run_on_controlling_tty(sandboxed=False) == "TIOCSTI_OK"
+    # Under Seatbelt, the identical controlling-TTY ioctl fails with EPERM (`hid-control`).
+    assert run_on_controlling_tty(sandboxed=True) == "TIOCSTI_ERR:EPERM"

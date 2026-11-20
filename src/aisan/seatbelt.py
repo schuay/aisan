@@ -643,7 +643,7 @@ class SeatbeltSandbox:
             *self._render_surface_and_ancestors(mounts, symlinks),
             *self._render_policy_mounts(mounts, symlinks),
             *self._render_anti_rename_pins(mounts, symlinks),
-            *self._render_network(),
+            *self._render_network(mounts),
         ]
         return "\n".join(line for line in lines if line) + "\n"
 
@@ -652,8 +652,7 @@ class SeatbeltSandbox:
         return (
             f"(allow sysctl-read (sysctl-name {names})"
             ' (sysctl-name-prefix "hw.optional.")'
-            ' (sysctl-name-prefix "hw.perflevel")'
-            ' (sysctl-name-prefix "kern.proc.pid."))'
+            ' (sysctl-name-prefix "hw.perflevel"))'
         )
 
     def _render_mach(self) -> list[str]:
@@ -861,9 +860,52 @@ class SeatbeltSandbox:
         literals = " ".join(f"(literal {_sbpl_quote(p)})" for p in sorted(pinned))
         return [f"(deny file-write-unlink file-write-create {literals})"]
 
-    def _render_network(self) -> list[str]:
+    def _render_network(self, mounts: list[Mount]) -> list[str]:
         if not self.unshare_net:
-            return ["(allow network*)"]
+            # `(allow network*)` permits AF_UNIX `connect()` regardless of
+            # `file-read*` rules. Deny `remote unix-socket` and re-open only
+            # `mDNSResponder`, explicit backend sockets, and the resolved mount
+            # tree so unmounted host sockets (`docker.sock`, `S.gpg-agent`,
+            # 1Password, sibling boxes) remain unreachable under `--net`.
+            out = [
+                "(allow network*)",
+                "(deny network-outbound (remote unix-socket))",
+                '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
+            ]
+            for sock in self.unix_sockets:
+                sb_sock = seatbelt_lexpath(sock)
+                out.append(
+                    f"(allow network-outbound (remote unix-socket (path-literal {_sbpl_quote(sb_sock)})))"
+                )
+            ordered = sorted(
+                mounts,
+                key=lambda m: (len(_canonical_path(m.dst).parts), seatbelt_path(m.dst)),
+            )
+            for m in ordered:
+                quoted = _sbpl_quote(seatbelt_path(m.dst))
+                if m.op == "tmpfs":
+                    out.append(
+                        f"(deny network-outbound (remote unix-socket (subpath {quoted})))"
+                    )
+                elif m.op == "ro":
+                    filt = (
+                        "subpath"
+                        if (m.src is not None and m.src.is_dir())
+                        else "path-literal"
+                    )
+                    out.append(
+                        f"(allow network-outbound (remote unix-socket ({filt} {quoted})))"
+                    )
+                else:
+                    filt = (
+                        "subpath"
+                        if (m.src is None or not m.src.exists() or m.src.is_dir())
+                        else "path-literal"
+                    )
+                    out.append(
+                        f"(allow network-outbound (remote unix-socket ({filt} {quoted})))"
+                    )
+            return out
         out = [
             "(deny network*)",
             "(allow system-socket (socket-domain AF_UNIX))",

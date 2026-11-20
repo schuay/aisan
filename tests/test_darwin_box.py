@@ -453,6 +453,8 @@ def test_state_lock_blocks_concurrent_sessions_while_explain_preserves_live_syml
     live_tok_target = tmp_path / "live-token.json"
     live_tok_target.write_text("{}")
     with lock_state_dir(st):
+        # Lock file MUST live under private_root(), never inside writable `state`!
+        assert not (st / ".aisan.lock").exists()
         # Second lock attempt raises StateBusyError.
         with (
             pytest.raises(StateBusyError, match="already running"),
@@ -836,3 +838,29 @@ def test_darwin_explain_includes_executable_grant(tmp_path):
     )
     assert res.returncode == 0, res.stderr
     assert str(venv.resolve()) in res.stdout
+
+
+@needs_seatbelt
+async def test_darwin_run_interactive_warns_on_allow_local_loopback(tmp_path, capsys):
+    from aisan.session import LauncherFlags, run_interactive
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    spec = antigravity(repo, state=state)
+    rc = await run_interactive(
+        client="antigravity",
+        harness="antigravity",
+        executable="true",
+        repo=repo,
+        state=state,
+        spec=spec,
+        command=lambda _box: ["/usr/bin/true"],
+        binary=lambda: Path("/usr/bin/true"),
+        flags=LauncherFlags(),
+        explain_only=False,
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "WARNING: box allows localhost TCP on macOS" in err

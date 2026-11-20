@@ -8,20 +8,23 @@ a fixed seed path before the host-side launcher writes there as the operator.
 Following that link would let the box truncate or create an arbitrary host file.
 
 State directories receive the same ownership and permission checks as runtime
-directories, and seed I/O never follows symlinks. This module has no aisan
-imports so all seed writers can use it without creating an import cycle.
+directories, and seed I/O never follows symlinks. This module imports only
+`private` so all seed writers can use it without creating an import cycle.
 """
 
 from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+from .private import prepare_private_dir, private_root
 
 
 def prepare_state_dir(state: Path) -> Path:
@@ -70,17 +73,23 @@ class StateBusyError(RuntimeError):
     """Another live session currently holds the exclusive lock on `state`."""
 
 
+def _state_lock_path(state: Path, *, create_root: bool) -> Path:
+    digest = hashlib.sha256(str(state.resolve()).encode()).hexdigest()[:16]
+    root = prepare_private_dir(private_root()) if create_root else private_root()
+    return root / f"state-{digest}.lock"
+
+
 @contextmanager
 def lock_state_dir(state: Path) -> Iterator[None]:
     """Acquire a non-blocking exclusive lock on `state` for a Darwin session.
 
     Seatbelt has no private mount namespace, so `PinnedSymlink` entries live in
-    `state` on the host filesystem. Locking `state` prevents a second session
-    for the same `(client, repo)` from overwriting or unlinking the active
-    session's symlinks; concurrent sessions should use separate Git worktrees.
+    `state` on the host filesystem. Keep the lock file inside `private_root()`
+    so a boxed process cannot unlink it to defeat single-session exclusion;
+    concurrent sessions should use separate Git worktrees.
     """
     prepare_state_dir(state)
-    lock_path = state / ".aisan.lock"
+    lock_path = _state_lock_path(state, create_root=True)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         try:
@@ -99,7 +108,7 @@ def lock_state_dir(state: Path) -> Iterator[None]:
 
 def is_state_dir_locked(state: Path) -> bool:
     """Return whether a live session holds `lock_state_dir(state)`."""
-    lock_path = state / ".aisan.lock"
+    lock_path = _state_lock_path(state, create_root=False)
     try:
         fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
