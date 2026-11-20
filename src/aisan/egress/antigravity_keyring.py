@@ -34,6 +34,13 @@ from aiohttp import web
 
 from ..hostproc import neutral_child
 from ..proxy.http import serve_tcp
+from ._macos_keychain import (
+    SECURITY_BIN,
+    SECURITY_EXIT_LOCKED,
+    SECURITY_EXIT_MISSING,
+    decode_security_secret,
+    query_generic_password,
+)
 from .antigravity import CLOUD_CODE_URL_ENV
 from .base import PreflightError
 from .hostlogin import CredentialRefreshError, SingleFlight, ensure_fresh
@@ -162,25 +169,10 @@ def read_keyring(
     return result.stdout
 
 
-_MACOS_SECURITY = "/usr/bin/security"
-_SECURITY_EXIT_LOCKED = 36
-_SECURITY_EXIT_MISSING = 44
-
-
-def _decode_security_output(raw: str) -> str:
-    stripped = raw.rstrip("\r\n")
-    if stripped and not stripped.startswith("{") and len(stripped) % 2 == 0:
-        try:
-            return bytes.fromhex(stripped).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            pass
-    return stripped
-
-
 def read_macos_keychain(
     attributes: tuple[tuple[str, str], ...] = KEYRING_ATTRIBUTES,
     *,
-    security: str = _MACOS_SECURITY,
+    security: str = SECURITY_BIN,
     fallback_file: Path | None = None,
 ) -> str:
     """Read the Antigravity login from macOS Keychain or its fallback token file.
@@ -195,13 +187,11 @@ def read_macos_keychain(
     account = attrs.get("username", "antigravity")
     result: subprocess.CompletedProcess[str] | None = None
     try:
-        result = subprocess.run(
-            [security, "find-generic-password", "-s", service, "-a", account, "-w"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
+        result = query_generic_password(
+            service=service,
+            account=account,
+            security=security,
             timeout=_READ_TIMEOUT_S,
-            check=False,
         )
     except OSError:
         result = None
@@ -209,7 +199,7 @@ def read_macos_keychain(
         raise KeyringError("the macOS Keychain did not answer", _FIX_LOCKED) from e
 
     kc_text = (
-        _decode_security_output(result.stdout)
+        decode_security_secret(result.stdout)
         if result is not None and result.returncode == 0
         else None
     )
@@ -243,11 +233,11 @@ def read_macos_keychain(
         raise KeyringError(
             f"cannot run {security} and {token_path} is absent", _FIX_LOGIN
         )
-    if result.returncode == _SECURITY_EXIT_MISSING:
+    if result.returncode == SECURITY_EXIT_MISSING:
         raise KeyringError(
             "no Antigravity login in the macOS Keychain or fallback file", _FIX_LOGIN
         )
-    if result.returncode == _SECURITY_EXIT_LOCKED:
+    if result.returncode == SECURITY_EXIT_LOCKED:
         raise KeyringError(
             "the macOS login keychain is locked and no fallback token file exists",
             _FIX_LOCKED,

@@ -32,7 +32,7 @@ from .egress.claude_plan import claude_config_dir
 from .launch import interpreter_roots
 from .opencode_config import config_file as _opencode_config_file
 from .opencode_config import read_config as _read_jsonc
-from .sandbox import host_platform
+from .sandbox import DARWIN_DEFAULT_BINS, host_platform
 from .statedir import write_sealed
 from .userbinds import WILDCARD
 
@@ -264,14 +264,7 @@ def mcp_search_path(local_bin: bool = True) -> str:
     Include ``~/.local/bin`` only when the box mounts home-installed launchers.
     """
     dirs = (
-        [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ]
+        list(DARWIN_DEFAULT_BINS)
         if host_platform() == "darwin"
         else ["/usr/bin", "/usr/local/bin"]
     )

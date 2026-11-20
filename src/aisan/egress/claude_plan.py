@@ -35,6 +35,12 @@ from aiohttp import web
 
 from ..hostproc import neutral_child
 from ..proxy.http import serve_tcp
+from ._macos_keychain import (
+    SECURITY_EXIT_LOCKED,
+    KeychainLockedError,
+    decode_security_secret,
+    query_generic_password,
+)
 from .base import PreflightError
 from .hostlogin import CredentialRefreshError, SingleFlight, ensure_fresh
 
@@ -75,7 +81,6 @@ _FIX_MISSING = "claude auth login   (no readable credential at that path)"
 _FIX_KEYCHAIN_LOCKED = (
     "unlock the macOS login keychain on the HOST (or run `claude auth login`)"
 )
-_SECURITY_EXIT_LOCKED = 36
 
 
 # The relay-token variable and the display-only plan label, used by presets
@@ -177,9 +182,8 @@ class PlanCredential:
     async def check(self, backend: str) -> None:
         try:
             await self._ensure_fresh(floor=_EXPIRY_MARGIN_S)
-        except PermissionError as e:
-            fix = _FIX_KEYCHAIN_LOCKED if "keychain" in str(e).lower() else _FIX_MISSING
-            raise PreflightError(backend, str(e), fix) from e
+        except KeychainLockedError as e:
+            raise PreflightError(backend, str(e), _FIX_KEYCHAIN_LOCKED) from e
         except OSError as e:
             raise PreflightError(
                 backend, f"cannot read {self.path}: {e}", _FIX_MISSING
@@ -332,17 +336,6 @@ async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> N
         await runner.cleanup()
 
 
-def _decode_security_secret(raw: str) -> str:
-    """Decode `security find-generic-password -w` text or hex-encoded output."""
-    stripped = raw.strip()
-    if stripped and not stripped.startswith("{") and len(stripped) % 2 == 0:
-        try:
-            return bytes.fromhex(stripped).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            pass
-    return stripped
-
-
 def _keychain_service(config_dir: Path) -> str:
     override = os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR") or os.environ.get(
         "CLAUDE_CONFIG_DIR"
@@ -360,19 +353,13 @@ def _keychain_service(config_dir: Path) -> str:
 def _read_macos_keychain_status(config_dir: Path) -> tuple[str | None, int | None]:
     service = _keychain_service(config_dir)
     try:
-        res = subprocess.run(
-            ["/usr/bin/security", "find-generic-password", "-s", service, "-w"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        res = query_generic_password(service=service, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None, None
+    assert res is not None
     if res.returncode != 0:
         return None, res.returncode
-    text = _decode_security_secret(res.stdout)
+    text = decode_security_secret(res.stdout)
     return (text or None), 0
 
 
@@ -416,8 +403,8 @@ def _read_oauth(path: Path, *, use_keychain: bool = False) -> dict:
                 sec.get("expiresAt") if isinstance(sec.get("expiresAt"), int) else -1
             ),
         )
-    if kc_rc == _SECURITY_EXIT_LOCKED:
-        raise PermissionError(
+    if kc_rc == SECURITY_EXIT_LOCKED:
+        raise KeychainLockedError(
             f"the macOS login keychain is locked and {path} is absent"
         )
     if last_err is not None:

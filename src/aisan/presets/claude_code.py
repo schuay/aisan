@@ -27,6 +27,7 @@ from pathlib import Path
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
 from ..sandbox import (
+    DARWIN_DEFAULT_PATH,
     RO,
     RW,
     Bind,
@@ -37,8 +38,6 @@ from ..sandbox import (
     host_platform,
 )
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
-
-_DARWIN_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Return promptly when the relay is unavailable. Testing reached no answer after
 # 180 seconds with retries and returned code 1 in one second with retries disabled.
@@ -96,10 +95,11 @@ def claude_code(
     memory_max: str = "32G",
     cpu_quota: str = "",
     tasks_max: int = 4096,
+    platform: str | None = None,
 ) -> BoxSpec:
     """Build a Claude Code confinement spec for ``worktree``."""
     home = Path.home()
-    is_darwin = host_platform() == "darwin"
+    is_darwin = (host_platform() if platform is None else platform) == "darwin"
     skills_bind: list[BindSpec] = []
     if skills is not None:
         skills_bind = [
@@ -137,7 +137,7 @@ def claude_code(
             *NESTING_ENV.items(),
             *GC_ENV,
             ("HOME", str(home)),
-            ("PATH", _DARWIN_PATH if is_darwin else "/usr/bin"),
+            ("PATH", DARWIN_DEFAULT_PATH if is_darwin else "/usr/bin"),
             # Claude Code stores sessions and reads user instructions here.
             ("CLAUDE_CONFIG_DIR", str(state)),
             *_RETRY_ENV,

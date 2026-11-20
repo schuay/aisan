@@ -137,15 +137,11 @@ class Backend(abc.ABC):
         """Return stable markers for shared-network ``explain`` output."""
         raise NotImplementedError(f"{self.name} does not support shared networking")
 
-    def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+    def box_binds(
+        self, runtime_dir: Path, *, platform: str | None = None
+    ) -> list[BindSpec]:
         """Return extra mounts needed by the boxed client."""
         return []
-
-    def box_binds_for_platform(
-        self, runtime_dir: Path, platform: str
-    ) -> list[BindSpec]:
-        """Return extra mounts needed by the boxed client on `platform`."""
-        return self.box_binds(runtime_dir)
 
     def prepare(self, runtime_dir: Path) -> None:
         """Create bind sources before bubblewrap resolves the mount list."""
@@ -164,7 +160,9 @@ class Backend(abc.ABC):
 
     @abc.abstractmethod
     @asynccontextmanager
-    async def serve(self, runtime_dir: Path) -> AsyncIterator[None]:
+    async def serve(
+        self, runtime_dir: Path, *, platform: str | None = None
+    ) -> AsyncIterator[None]:
         """Run the isolated host service for the duration of the context.
 
         Fail startup if the backend can't listen, since every dependent request
@@ -172,10 +170,6 @@ class Backend(abc.ABC):
         """
         raise NotImplementedError
         yield  # pragma: no cover - keep the abstract method an async generator
-
-    def serve_for_platform(self, runtime_dir: Path, platform: str):
-        """Run the isolated host service for `platform`."""
-        return self.serve(runtime_dir)
 
     @asynccontextmanager
     async def serve_shared(

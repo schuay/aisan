@@ -14,10 +14,9 @@ import secrets
 import shutil
 import subprocess
 import sys
-import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import userbinds
@@ -28,7 +27,14 @@ from .explain import assembly_refusal, explain
 from .launch import exit_status, interpreter_chain_dirs
 from .presets import EGRESS_PROFILES, GRANTS
 from .private import private_root
-from .sandbox import RO, Bind, BindOver, BindSpec, PinnedSymlink, host_platform
+from .sandbox import (
+    DARWIN_DEFAULT_BINS,
+    RO,
+    Bind,
+    BindOver,
+    BindSpec,
+    host_platform,
+)
 from .seatbelt import darwin_system_ro_roots, seatbelt_path
 from .session_mcp import MCPAllowlist, SessionMCP, _shared_roots, mcp_ro_binds
 from .spec import BoxSpec, Grant
@@ -91,7 +97,7 @@ def git_config_binds() -> list[BindSpec]:
         return [Bind(host.resolve(), RO)]
     box_dst = Path.home() / ".config" / "git" / "config"
     if host.resolve() == box_dst.resolve():
-        return [Bind(box_dst, RO)]
+        return [Bind(host, RO)]
     return [BindOver(host, box_dst)]
 
 
@@ -106,16 +112,7 @@ def git_config_env() -> tuple[tuple[str, str], ...]:
     return (("GIT_CONFIG_GLOBAL", seatbelt_path(host.resolve())),)
 
 
-_DARWIN_DEFAULT_BINS = frozenset(
-    {
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin",
-    }
-)
+_DARWIN_DEFAULT_BINS_SET = frozenset(DARWIN_DEFAULT_BINS)
 
 
 def darwin_executable_grant(executable_path: Path | None) -> Grant:
@@ -172,7 +169,7 @@ def darwin_executable_grant(executable_path: Path | None) -> Grant:
         if credential_overlap((p,), refused_stores) is None
     )
     binds = tuple(Bind(p, RO, guard=False) for p in safe_mounts)
-    path = (bin_dir,) if str(bin_dir) not in _DARWIN_DEFAULT_BINS else ()
+    path = (bin_dir,) if str(bin_dir) not in _DARWIN_DEFAULT_BINS_SET else ()
     return Grant(binds=binds, path=path)
 
 
@@ -452,28 +449,6 @@ def resolve_launcher_flags(
     )
 
 
-def _retarget_state(spec: BoxSpec, old_state: Path, new_state: Path) -> BoxSpec:
-    """Redirect `old_state` binds and env values to `new_state` for locked `--explain`."""
-
-    def remap(p: Path) -> Path:
-        return (
-            new_state / p.relative_to(old_state) if p.is_relative_to(old_state) else p
-        )
-
-    new_binds: list[BindSpec] = []
-    for b in spec.binds:
-        if isinstance(b, Bind):
-            new_binds.append(replace(b, path=remap(b.path)))
-        elif isinstance(b, PinnedSymlink):
-            new_binds.append(PinnedSymlink(b.src, remap(b.dst)))
-        else:
-            new_binds.append(b)
-    old_s = str(old_state)
-    new_s = str(new_state)
-    new_env = tuple((k, v.replace(old_s, new_s)) for k, v in spec.env)
-    return replace(spec, binds=tuple(new_binds), env=new_env)
-
-
 async def run_interactive(
     *,
     client: str,
@@ -525,44 +500,11 @@ async def run_interactive(
                 ", ".join(map(str, flags.files)) if flags.files else "(none)",
             ),
         )
-        if is_darwin and isinstance(spec, BoxSpec) and is_state_dir_locked(state):
-            exp_parent = (
-                str(state.parent)
-                if state.parent.is_dir() and os.access(state.parent, os.W_OK)
-                else "/private/tmp"
-            )
-            with tempfile.TemporaryDirectory(
-                dir=exp_parent, prefix="aisan-exp-"
-            ) as tmp_raw:
-                tmp_state = Path(tmp_raw)
-                exp_box = Box(
-                    _retarget_state(spec, state, tmp_state),
-                    box_id=box_id(client, repo),
-                    state_remap=(state, tmp_state),
-                )
-                try:
-                    with exp_box.staged():
-                        rendered = explain(
-                            exp_box, inputs=inputs, color=sys.stdout.isatty()
-                        )
-                        refused = assembly_refusal(exp_box) is not None
-                except (
-                    ValueError,
-                    FileNotFoundError,
-                    FileExistsError,
-                    NotADirectoryError,
-                ) as exc:
-                    rendered = f"\n== BOX ASSEMBLY REFUSED ==\n  {exc}\n"
-                    refused = True
-                rendered = rendered.replace(
-                    seatbelt_path(tmp_state), seatbelt_path(state)
-                ).replace(str(tmp_state), str(state))
-                print(rendered, end="")
-            return 2 if refused else 0
-
+        locked = is_darwin and isinstance(spec, BoxSpec) and is_state_dir_locked(state)
+        state_guard = contextlib.nullcontext() if locked else staged_directory(state)
         box = Box(spec, box_id=box_id(client, repo))
         try:
-            with staged_directory(state), box.staged():
+            with state_guard, box.staged(stage_symlinks=not locked):
                 print(
                     explain(
                         box,

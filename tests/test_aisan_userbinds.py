@@ -192,7 +192,9 @@ def test_a_backend_without_a_file_cannot_be_exposed(tmp_path):
         name = "minted"
         port = 8790
 
-        async def serve(self, runtime_dir):  # pragma: no cover - shape only
+        async def serve(
+            self, runtime_dir, *, platform=None
+        ):  # pragma: no cover - shape only
             yield
 
     f = _spec_file(tmp_path, f'ro = ["{tmp_path / "elsewhere"}"]\n')

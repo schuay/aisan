@@ -113,19 +113,17 @@ class CodexBackend(Backend):
     def shared_client_env_description(self) -> dict[str, str]:
         return {CLIENT_KEY_ENV: SHARED_TOKEN_MARKER}
 
-    def box_binds_for_platform(
-        self, runtime_dir: Path, platform: str
+    def box_binds(
+        self, runtime_dir: Path, *, platform: str | None = None
     ) -> list[BindSpec]:
         if self._codex_home is None:
             return []
         src = runtime_dir / _BOX_AUTH_NAME
         dst = self._codex_home / "auth.json"
-        if platform == "darwin":
+        target_platform = host_platform() if platform is None else platform
+        if target_platform == "darwin":
             return [PinnedSymlink(src, dst)]
         return [BindOver(src, dst)]
-
-    def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
-        return self.box_binds_for_platform(runtime_dir, host_platform())
 
     def prepare(self, runtime_dir: Path) -> None:
         if self._codex_home is not None:
@@ -230,7 +228,9 @@ class CodexBackend(Backend):
             ) from e
 
     @asynccontextmanager
-    async def serve(self, runtime_dir: Path) -> AsyncIterator[None]:
+    async def serve(
+        self, runtime_dir: Path, *, platform: str | None = None
+    ) -> AsyncIterator[None]:
         sock = self.socket_path(runtime_dir)
         app = make_app(
             credential=self._credential,

@@ -29,10 +29,17 @@ from pathlib import Path
 
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
-from ..sandbox import RO, RW, Bind, BindOver, BindSpec, PinnedSymlink, host_platform
+from ..sandbox import (
+    DARWIN_DEFAULT_PATH,
+    RO,
+    RW,
+    Bind,
+    BindOver,
+    BindSpec,
+    PinnedSymlink,
+    host_platform,
+)
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
-
-_DARWIN_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Disable network-dependent update and download retries. The network namespace
 # enforces isolation; these settings make offline failures return promptly.
@@ -86,6 +93,7 @@ def opencode(
     memory_max: str = "8G",
     cpu_quota: str = "",
     tasks_max: int = 4096,
+    platform: str | None = None,
 ) -> BoxSpec:
     """Build an OpenCode confinement spec for ``worktree``.
 
@@ -93,7 +101,7 @@ def opencode(
     optional host catalog selected through ``XDG_CACHE_HOME``.
     """
     home = Path.home()
-    is_darwin = host_platform() == "darwin"
+    is_darwin = (host_platform() if platform is None else platform) == "darwin"
     catalog = models if models is not None else _default_catalog()
     darwin_xdg_env = (
         (
@@ -128,7 +136,7 @@ def opencode(
             *NESTING_ENV.items(),
             *GC_ENV,
             ("HOME", str(home)),
-            ("PATH", _DARWIN_PATH if is_darwin else "/usr/bin"),
+            ("PATH", DARWIN_DEFAULT_PATH if is_darwin else "/usr/bin"),
             # Persist sessions, logs, and the database.
             ("XDG_DATA_HOME", str(state)),
             *darwin_xdg_env,

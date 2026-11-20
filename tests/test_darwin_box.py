@@ -809,8 +809,8 @@ def test_darwin_codex_symlinked_agents_skills_and_cross_platform_binds(
         credential=KeyringCredential(), token_file=state / TOKEN_FILE
     )
     rt = tmp_path / "rt"
-    assert isinstance(cx_backend.box_binds_for_platform(rt, "darwin")[0], PinnedSymlink)
-    assert isinstance(ag_backend.box_binds_for_platform(rt, "darwin")[0], PinnedSymlink)
+    assert isinstance(cx_backend.box_binds(rt, platform="darwin")[0], PinnedSymlink)
+    assert isinstance(ag_backend.box_binds(rt, platform="darwin")[0], PinnedSymlink)
 
 
 @needs_seatbelt
@@ -864,3 +864,74 @@ async def test_darwin_run_interactive_warns_on_allow_local_loopback(tmp_path, ca
     assert rc == 0
     err = capsys.readouterr().err
     assert "WARNING: box allows localhost TCP on macOS" in err
+
+
+@pytest.mark.live
+@needs_seatbelt
+def test_real_claude_cli_matches_keychain_service_derivation(tmp_path, monkeypatch):
+    from aisan.egress.claude_plan import _keychain_service
+    from aisan.presets.claude_code import claude_code_binary
+
+    claude = claude_code_binary()
+    if claude is None:
+        pytest.skip("claude is not installed")
+    sec_log = tmp_path / "security.log"
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "security"
+    shim.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {sec_log}\nexit 44\n')
+    shim.chmod(0o755)
+
+    # 1) Custom CLAUDE_CONFIG_DIR: must match `Claude Code-credentials-<sha8>`.
+    custom_cfg = tmp_path / "custom-claude-cfg"
+    custom_cfg.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom_cfg))
+    monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+    expected_custom = _keychain_service(custom_cfg)
+
+    env = {
+        **os.environ,
+        "PATH": f"{shim_dir}:{os.environ['PATH']}",
+        "CLAUDE_CONFIG_DIR": str(custom_cfg),
+    }
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    subprocess.run(
+        [str(claude), "auth", "status"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    logged = sec_log.read_text() if sec_log.exists() else ""
+    assert f"-s {expected_custom}" in logged, logged
+
+    # 2) Default `~/.claude` with CLAUDE_CONFIG_DIR unset: must match `Claude Code-credentials`.
+    sec_log.unlink(missing_ok=True)
+    fake_home = tmp_path / "home"
+    (fake_home / ".claude").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: fake_home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    expected_default = _keychain_service(fake_home / ".claude")
+    assert expected_default == "Claude Code-credentials"
+
+    env_def = {
+        **os.environ,
+        "HOME": str(fake_home),
+        "PATH": f"{shim_dir}:{os.environ['PATH']}",
+    }
+    env_def.pop("CLAUDE_CONFIG_DIR", None)
+    env_def.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    subprocess.run(
+        [str(claude), "auth", "status"],
+        env=env_def,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    logged_def = sec_log.read_text() if sec_log.exists() else ""
+    assert f"-s {expected_default}\n" in logged_def, logged_def

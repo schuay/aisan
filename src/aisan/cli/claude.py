@@ -35,6 +35,7 @@ from pathlib import Path
 from aisan.cli.claude_menu import MENU_KEY, fetch_menu
 from aisan.egress.anthropic import DEFAULT_UPSTREAM, PLACEHOLDER_KEY, AnthropicBackend
 from aisan.presets.claude_code import claude_code, claude_code_binary
+from aisan.sandbox import host_platform
 from aisan.session import (
     LaunchRefused,
     git_config_binds,
@@ -288,12 +289,13 @@ async def _main(argv: list[str]) -> int:
     menu = [] if args.explain else await fetch_menu(backend)
 
     def prepare() -> None:
-        skills_dst = state / "skills"
-        if skills_dst.is_dir() and not skills_dst.is_symlink():
-            import contextlib
+        if host_platform() == "darwin":
+            skills_dst = state / "skills"
+            if skills_dst.is_dir() and not skills_dst.is_symlink():
+                import contextlib
 
-            with contextlib.suppress(OSError):
-                skills_dst.rmdir()
+                with contextlib.suppress(OSError):
+                    skills_dst.rmdir()
         seed_state(state, menu=menu)
         seed_settings(state)
         seed_user_memory(state, USER_MEMORY)

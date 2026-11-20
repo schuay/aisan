@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .policy_tree import (
+    DARWIN_DEFAULT_BINS,
+    DARWIN_DEFAULT_PATH,
     RO,
     RW,
     Bind,
@@ -62,6 +64,8 @@ from .policy_tree import (
 )
 
 __all__ = [
+    "DARWIN_DEFAULT_BINS",
+    "DARWIN_DEFAULT_PATH",
     "RO",
     "RW",
     "Bind",

@@ -225,7 +225,9 @@ class OpenAICompatBackend(Backend):
         return {}
 
     @asynccontextmanager
-    async def serve(self, runtime_dir: Path) -> AsyncIterator[None]:
+    async def serve(
+        self, runtime_dir: Path, *, platform: str | None = None
+    ) -> AsyncIterator[None]:
         sock = self.socket_path(runtime_dir)
         # The upstream API base restores the provider path prefix omitted from
         # the box-facing loopback URL. ``serve_proxy`` removes stale sockets.

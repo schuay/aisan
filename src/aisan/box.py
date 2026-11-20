@@ -130,7 +130,6 @@ class Box:
         *,
         box_id: str,
         platform: str | None = None,
-        state_remap: tuple[Path, Path] | None = None,
     ) -> None:
         resolved = _default_platform() if platform is None else platform
         if resolved not in _PLATFORMS:
@@ -141,15 +140,16 @@ class Box:
         self.spec = spec
         self.box_id = box_id
         self.platform = resolved
-        self._state_remap = state_remap
         self.runtime_dir = runtime_dir(box_id)
         self.scratch_dir = scratch_dir(box_id)
         self._staged_profile_path: Path | None = None
+        self._verify_symlinks: bool = True
         self._stack: AsyncExitStack | None = None
         self._activations: dict[Backend, BackendActivation] = {}
 
     def _clear_staged_profile(self) -> None:
         self._staged_profile_path = None
+        self._verify_symlinks = True
 
     def _uses_shared_tcp(self, backend: Backend) -> bool:
         """Return whether `backend` serves authenticated TCP on host loopback.
@@ -205,33 +205,18 @@ class Box:
 
     def _backend_binds(self, backend: Backend) -> list[BindSpec]:
         """Adapt backend bind-over/symlink entries to `self.platform`."""
-        platform_fn = getattr(backend, "box_binds_for_platform", None)
-        raw_list = (
-            platform_fn(self.runtime_dir, self.platform)
-            if callable(platform_fn)
-            else backend.box_binds(self.runtime_dir)
-        )
+        raw_list = backend.box_binds(self.runtime_dir, platform=self.platform)
         adapted: list[BindSpec] = []
-        for raw_spec in raw_list:
-            item = raw_spec
-            dst = getattr(item, "dst", None)
-            if (
-                dst is not None
-                and self._state_remap is not None
-                and dst.is_relative_to(self._state_remap[0])
-            ):
-                dst = self._state_remap[1] / dst.relative_to(self._state_remap[0])
-                if isinstance(item, BindOver):
-                    item = BindOver(item.src, dst)
-                elif isinstance(item, PinnedSymlink):
-                    item = PinnedSymlink(item.src, dst)
+        for item in raw_list:
             if self.platform == "linux" and isinstance(item, PinnedSymlink):
                 adapted.append(BindOver(item.src, item.dst))
             else:
                 adapted.append(item)
         return adapted
 
-    def _stage(self, stack: ExitStack | AsyncExitStack) -> None:
+    def _stage(
+        self, stack: ExitStack | AsyncExitStack, *, stage_symlinks: bool = True
+    ) -> None:
         """Create every on-disk source required before wrapper resolution.
 
         This includes ensure-paths, the runtime directory, backend bind-over
@@ -250,6 +235,7 @@ class Box:
             prof = profile_path(self.box_id)
             prof.unlink(missing_ok=True)
             self._staged_profile_path = prof
+            self._verify_symlinks = stage_symlinks
             stack.callback(self._clear_staged_profile)
             stack.callback(prof.unlink, missing_ok=True)
         backend_binds: list[BindSpec] = []
@@ -263,7 +249,7 @@ class Box:
                 src = getattr(spec, "src", None)
                 if src is not None and src.parent == self.runtime_dir:
                     stack.callback(src.unlink, missing_ok=True)
-        if self.platform == "darwin":
+        if self.platform == "darwin" and stage_symlinks:
             self._stage_pinned_symlinks(
                 stack,
                 tuple(
@@ -402,7 +388,7 @@ class Box:
                     client_env.update(activation.client_env)
                 else:
                     await stack.enter_async_context(
-                        backend.serve_for_platform(self.runtime_dir, self.platform)
+                        backend.serve(self.runtime_dir, platform=self.platform)
                     )
                     act_env = (
                         backend.direct_unix_client_env(self.runtime_dir)
@@ -449,15 +435,17 @@ class Box:
             raise RuntimeError("backend activation is not live in this Box") from e
 
     @contextmanager
-    def staged(self) -> Iterator[Box]:
+    def staged(self, *, stage_symlinks: bool = True) -> Iterator[Box]:
         """Stage the box for inspection without serving or minting credentials.
 
         Wrapper resolution requires every bind-over source. Reuse the live
         staging path to create those sources without opening sockets, ensuring
-        `explain` reports the same mount profile a live box receives.
+        `explain` reports the same mount profile a live box receives. When
+        `stage_symlinks=False` (used while another session holds the state-dir
+        lock), omit host `PinnedSymlink` mutation while rendering identical SBPL.
         """
         with ExitStack() as stack:
-            self._stage(stack)
+            self._stage(stack, stage_symlinks=stage_symlinks)
             yield self
 
     @property
@@ -583,6 +571,7 @@ class Box:
                 unix_sockets=unix_sockets,
                 controlling_ttys=_seatbelt.darwin_controlling_ttys(),
                 profile_path=self._staged_profile_path,
+                verify_symlinks=self._verify_symlinks,
             )
         else:
             sandbox = Sandbox(

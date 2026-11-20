@@ -82,7 +82,9 @@ class _FakeBackend(Backend):
     def client_env(self) -> dict[str, str]:
         return {"FAKE_ENDPOINT": f"http://127.0.0.1:{self.port}"}
 
-    def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+    def box_binds(
+        self, runtime_dir: Path, *, platform: str | None = None
+    ) -> list[BindSpec]:
         return [BindOver(runtime_dir / f"{self.name}.conf", Path("/etc/fake.conf"))]
 
     def prepare(self, runtime_dir: Path) -> None:
@@ -95,7 +97,7 @@ class _FakeBackend(Backend):
             raise PreflightError(self.name, self._fail, "run-this-to-fix")
 
     @contextlib.asynccontextmanager
-    async def serve(self, runtime_dir: Path):
+    async def serve(self, runtime_dir: Path, *, platform: str | None = None):
         self.order.append("serve")
         sock = self.socket_path(runtime_dir)
         s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
@@ -286,7 +288,9 @@ async def test_shared_client_environment_reaches_a_real_box_without_argv_leak(
     tmp_path, monkeypatch
 ):
     class _NoFilesShared(_SharedFakeBackend):
-        def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+        def box_binds(
+            self, runtime_dir: Path, *, platform: str | None = None
+        ) -> list[BindSpec]:
             return []
 
         def prepare(self, runtime_dir: Path) -> None:
@@ -369,7 +373,9 @@ async def test_the_endpoint_the_client_reads_is_the_port_the_relay_serves(tmp_pa
 async def test_wrapper_refuses_a_box_whose_runtime_dir_is_not_mounted(tmp_path):
 
     class _NoFiles(_FakeBackend):
-        def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+        def box_binds(
+            self, runtime_dir: Path, *, platform: str | None = None
+        ) -> list[BindSpec]:
             return []
 
     box = Box(_spec(tmp_path, egress=(_NoFiles(),)), box_id=str(tmp_path / "j"))
@@ -1053,13 +1059,17 @@ async def test_darwin_box_serves_isolated_http_on_shared_tcp_and_direct_unix_soc
     tmp_path,
 ):
     class _DarwinSharedBackend(_SharedFakeBackend):
-        def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+        def box_binds(
+            self, runtime_dir: Path, *, platform: str | None = None
+        ) -> list[BindSpec]:
             return []
 
     class _DirectUnixBackend(_FakeBackend):
         supports_direct_unix_socket = True
 
-        def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+        def box_binds(
+            self, runtime_dir: Path, *, platform: str | None = None
+        ) -> list[BindSpec]:
             return []
 
         def client_env(self) -> dict[str, str]:
@@ -1109,7 +1119,9 @@ def test_darwin_box_refuses_backend_bind_over_without_touching_host_dst(tmp_path
     target_dst.write_text("host-owned\n")
 
     class _BindOverBackend(_SharedFakeBackend):
-        def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+        def box_binds(
+            self, runtime_dir: Path, *, platform: str | None = None
+        ) -> list[BindSpec]:
             return [BindOver(runtime_dir / f"{self.name}.conf", target_dst)]
 
     box = Box(
@@ -1130,7 +1142,9 @@ async def test_darwin_direct_unix_only_box_needs_no_launcher(tmp_path):
     class _DirectOnly(_FakeBackend):
         supports_direct_unix_socket = True
 
-        def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
+        def box_binds(
+            self, runtime_dir: Path, *, platform: str | None = None
+        ) -> list[BindSpec]:
             return []
 
     direct = _DirectOnly(name="direct", port=8812)

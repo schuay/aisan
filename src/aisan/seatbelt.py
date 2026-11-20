@@ -53,7 +53,7 @@ from .policy_tree import (
     Seal,
     SymlinkDestination,
     WriteRegex,
-    _f_getpath,
+    _map_darwin_root_symlink,
     _strip_firmlink,
     check_guards,
     check_surface,
@@ -80,13 +80,6 @@ __all__ = [
 _PORT_PLACEHOLDER_RE = re.compile(r"^<PORT:[^>\x00\r\n\"]+>$")
 _DEV_TTYS_RE = re.compile(r"^/dev/ttys[0-9]+$")
 _XCODE_SELECT_LINK = Path("/private/var/db/xcode_select_link")
-
-# Signed immutable root symlinks on macOS.
-_DARWIN_ROOT_SYMLINKS: tuple[tuple[Path, Path], ...] = (
-    (Path("/") / "tmp", Path("/private/tmp")),
-    (Path("/") / "var", Path("/private/var")),
-    (Path("/") / "etc", Path("/private/etc")),
-)
 
 # Read-only system subpaths required by dyld, POSIX utilities, and toolchains.
 _DARWIN_SYSTEM_SUBPATHS: tuple[Path, ...] = (
@@ -242,34 +235,13 @@ def through_darwin_system_symlink(path: Path) -> Path:
     `/System/Volumes/Data/<firmlink>`) are rewritten here; deeper components
     stay untouched until `check_symlink_free` has inspected them.
     """
-    stripped = Path(_strip_firmlink(str(path)))
-    for link, target in _DARWIN_ROOT_SYMLINKS:
-        if stripped == link:
-            return target
-        if stripped.is_relative_to(link):
-            return target / stripped.relative_to(link)
-    return stripped
+    return _map_darwin_root_symlink(Path(_strip_firmlink(str(path))))
 
 
 def seatbelt_path(path: Path) -> str:
-    """Return XNU's canonical `vn_getpath` spelling for `path`.
-
-    Resolves symlinks (including `/tmp`, `/var`, `/etc`), queries `F_GETPATH`
-    on the deepest existing prefix when running on Darwin (normalizing APFS
-    case-folding), and maps APFS `/System/Volumes/Data` firmlinks back to their
-    synthetic root paths.
-    """
+    """Return XNU's canonical `vn_getpath` spelling for `path`."""
     _check_clean_path(str(path))
-    resolved = resolved_path(path)
-    for anc in (resolved, *resolved.parents):
-        got = _f_getpath(anc)
-        if got is not None:
-            tail = resolved.relative_to(anc)
-            combined = got if str(tail) == "." else f"{got.rstrip('/')}/{tail}"
-            norm = _strip_firmlink(combined)
-            return norm if norm == "/" else norm.rstrip("/")
-    norm = _strip_firmlink(str(resolved))
-    return norm if norm == "/" else norm.rstrip("/")
+    return str(resolved_path(path, darwin=True))
 
 
 def _canonical_path(path: Path) -> Path:
@@ -385,6 +357,7 @@ class SeatbeltSandbox:
     unix_sockets: tuple[Path, ...] = ()
     controlling_ttys: tuple[str, ...] = ()
     profile_path: Path | None = None
+    verify_symlinks: bool = True
 
     def __post_init__(self) -> None:
         validate_destination(self.root)
@@ -619,8 +592,9 @@ class SeatbeltSandbox:
         for sym in symlinks:
             if not sym.src.exists():
                 raise FileNotFoundError(f"PinnedSymlink source missing: {sym.src}")
-            if not sym.dst.is_symlink() or seatbelt_path(sym.dst) != seatbelt_path(
-                sym.src
+            if self.verify_symlinks and (
+                not sym.dst.is_symlink()
+                or seatbelt_path(sym.dst) != seatbelt_path(sym.src)
             ):
                 raise ValueError(
                     f"PinnedSymlink destination {sym.dst} must be staged as a"

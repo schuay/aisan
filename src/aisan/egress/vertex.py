@@ -150,7 +150,9 @@ class VertexBackend(Backend):
             ) from e
 
     @asynccontextmanager
-    async def serve(self, runtime_dir: Path) -> AsyncIterator[None]:
+    async def serve(
+        self, runtime_dir: Path, *, platform: str | None = None
+    ) -> AsyncIterator[None]:
         sock = self.socket_path(runtime_dir)
         # Remove a socket left by an earlier crashed run of this box.
         sock.unlink(missing_ok=True)

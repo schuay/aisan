@@ -24,18 +24,18 @@ from pathlib import Path
 
 from ..egress.base import Backend, EgressProfile
 from ..gitbinds import GC_ENV, external_symlink_targets, git_binds, git_host_files
-from ..sandbox import RO, Bind, BindSpec, Overlay, WriteRegex, host_platform
+from ..sandbox import (
+    DARWIN_DEFAULT_BINS,
+    RO,
+    Bind,
+    BindSpec,
+    Overlay,
+    WriteRegex,
+    host_platform,
+)
 from ..seatbelt import darwin_selected_xcode_app, seatbelt_path
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Grant, Limits
 
-_DARWIN_BASE_PATH = (
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-    "/usr/sbin",
-    "/sbin",
-)
 _XCODE_DEV_DIR = Path("/Applications/Xcode.app/Contents/Developer")
 _VPYTHON_WRITE_SUFFIXES = (
     r"/store/\.[^/]+\.lock",
@@ -98,7 +98,9 @@ def _active_xcode_dev_dir() -> Path | None:
     return None
 
 
-def depot_tools_grant(depot_tools: Path | None = None) -> Grant:
+def depot_tools_grant(
+    depot_tools: Path | None = None, *, platform: str | None = None
+) -> Grant:
     """Grant access to depot_tools and its copy-on-write caches.
 
     The grant also adds depot_tools to ``PATH`` and disables operations that
@@ -109,7 +111,7 @@ def depot_tools_grant(depot_tools: Path | None = None) -> Grant:
     if root is None:
         # The environment settings apply only when the tool tree is mounted.
         return Grant()
-    is_darwin = host_platform() == "darwin"
+    is_darwin = (host_platform() if platform is None else platform) == "darwin"
     grant_env = list(_DEPOT_TOOLS_ENV)
     if is_darwin:
         grant_env.append(("DEPOT_TOOLS_BUILD_TELEMETRY", "0"))
@@ -192,6 +194,7 @@ def depot_tools_job(
     memory_max: str = "32G",
     cpu_quota: str = "",
     tasks_max: int = 4096,
+    platform: str | None = None,
 ) -> BoxSpec:
     """Build a confinement spec rooted at ``worktree``.
 
@@ -205,10 +208,11 @@ def depot_tools_job(
             f"box root does not exist: {worktree}"
             " (a box is rooted at a real directory: bound rw, and its cwd)"
         )
-    grant = depot_tools_grant(depot_tools)
+    target_platform = host_platform() if platform is None else platform
+    grant = depot_tools_grant(depot_tools, platform=target_platform)
     home = Path.home()
-    is_darwin = host_platform() == "darwin"
-    sys_bins = _DARWIN_BASE_PATH if is_darwin else ("/usr/bin",)
+    is_darwin = target_platform == "darwin"
+    sys_bins = DARWIN_DEFAULT_BINS if is_darwin else ("/usr/bin",)
     # Keep depot_tools first and include launcher directories for bare MCP commands.
     path_env = ":".join([*(str(d) for d in grant.path), *extra_path, *sys_bins])
     # Box adds the runtime, interpreter, and backend mounts. Git pins are

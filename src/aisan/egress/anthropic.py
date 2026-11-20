@@ -252,7 +252,9 @@ class AnthropicBackend(Backend):
             ) from e
 
     @asynccontextmanager
-    async def serve(self, runtime_dir: Path) -> AsyncIterator[None]:
+    async def serve(
+        self, runtime_dir: Path, *, platform: str | None = None
+    ) -> AsyncIterator[None]:
         sock = self.socket_path(runtime_dir)
         # ``serve_proxy`` removes stale sockets before binding.
         app = make_app(

@@ -403,6 +403,24 @@ def host_platform() -> str:
     return "darwin" if sys.platform == "darwin" else "linux"
 
 
+DARWIN_DEFAULT_BINS: tuple[str, ...] = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+)
+DARWIN_DEFAULT_PATH: str = ":".join(DARWIN_DEFAULT_BINS)
+
+# Signed immutable root symlinks on macOS.
+_DARWIN_ROOT_SYMLINKS: tuple[tuple[Path, Path], ...] = (
+    (Path("/") / "tmp", Path("/private/tmp")),
+    (Path("/") / "var", Path("/private/var")),
+    (Path("/") / "etc", Path("/private/etc")),
+)
+
+
 def bindable(p: Path) -> bool:
     """Return whether an optional bind source can be statted.
 
@@ -495,18 +513,28 @@ def _rel_tail(child: Path, parent: Path, *, casefold: bool | None = None) -> Pat
     return Path(*child.parts[len(pp) :])
 
 
-def resolved_path(p: Path) -> Path:
+def _map_darwin_root_symlink(path: Path) -> Path:
+    for link, target in _DARWIN_ROOT_SYMLINKS:
+        if path == link:
+            return target
+        if path.is_relative_to(link):
+            return target / path.relative_to(link)
+    return path
+
+
+def resolved_path(p: Path, *, darwin: bool | None = None) -> Path:
     """Return the canonical host path, or `p` when it cannot be resolved.
 
-    On Darwin, also canonicalize existing prefixes via `F_GETPATH` (normalizing
-    APFS case-folding) and map `/System/Volumes/Data` firmlinks back to their
-    synthetic root paths so firmlink or case aliases cannot evade policy checks.
+    When `darwin` is enabled (by default on macOS), also canonicalize existing
+    prefixes via `F_GETPATH` (normalizing APFS case-folding) and map macOS root
+    symlinks and `/System/Volumes/Data` firmlinks to canonical XNU paths.
     """
+    use_darwin = (host_platform() == "darwin") if darwin is None else darwin
     try:
         resolved = p.resolve()
     except OSError:
         resolved = p
-    if host_platform() != "darwin":
+    if not use_darwin:
         return resolved
     for anc in (resolved, *resolved.parents):
         got = _f_getpath(anc)
@@ -514,9 +542,11 @@ def resolved_path(p: Path) -> Path:
             tail = resolved.relative_to(anc)
             combined = got if str(tail) == "." else f"{got.rstrip('/')}/{tail}"
             norm = _strip_firmlink(combined)
-            return Path("/" if norm == "/" else norm.rstrip("/"))
+            return _map_darwin_root_symlink(
+                Path("/" if norm == "/" else norm.rstrip("/"))
+            )
     norm = _strip_firmlink(str(resolved))
-    return Path("/" if norm == "/" else norm.rstrip("/"))
+    return _map_darwin_root_symlink(Path("/" if norm == "/" else norm.rstrip("/")))
 
 
 def paths_overlap(a: Path, b: Path, *, casefold: bool | None = None) -> bool:

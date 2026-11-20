@@ -162,7 +162,7 @@ class _StubBackend(Backend):
         }
 
     @contextlib.asynccontextmanager
-    async def serve(self, runtime_dir: Path):
+    async def serve(self, runtime_dir: Path, *, platform: str | None = None):
         async def handle(reader, writer):
             await reader.read(16)
             writer.write(b"from-the-host")

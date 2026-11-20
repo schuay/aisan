@@ -133,16 +133,14 @@ class AntigravityBackend(Backend):
     def shared_client_env_description(self) -> dict[str, str]:
         return self._client_env(SHARED_PORT_MARKER)
 
-    def box_binds_for_platform(
-        self, runtime_dir: Path, platform: str
+    def box_binds(
+        self, runtime_dir: Path, *, platform: str | None = None
     ) -> list[BindSpec]:
         src = runtime_dir / _BOX_TOKEN_NAME
-        if platform == "darwin":
+        target_platform = host_platform() if platform is None else platform
+        if target_platform == "darwin":
             return [PinnedSymlink(src, self._token_file)]
         return [BindOver(src, self._token_file)]
-
-    def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
-        return self.box_binds_for_platform(runtime_dir, host_platform())
 
     def prepare(self, runtime_dir: Path) -> None:
         self._write_box_token(runtime_dir, PLACEHOLDER_KEY)
@@ -180,7 +178,9 @@ class AntigravityBackend(Backend):
             ) from e
 
     @asynccontextmanager
-    async def serve(self, runtime_dir: Path) -> AsyncIterator[None]:
+    async def serve(
+        self, runtime_dir: Path, *, platform: str | None = None
+    ) -> AsyncIterator[None]:
         sock = self.socket_path(runtime_dir)
         app = make_app(
             token=self._credential.token,

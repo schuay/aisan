@@ -363,7 +363,7 @@ async def test_an_isolated_box_reaches_the_host_only_through_the_relay(tmp_path)
             return {"ECHO_ENDPOINT": f"127.0.0.1:{self.port}"}
 
         @contextlib.asynccontextmanager
-        async def serve(self, runtime_dir: Path):
+        async def serve(self, runtime_dir: Path, *, platform: str | None = None):
             async def handle(reader, writer):
                 seen.append(await reader.read(16))
                 writer.write(b"from-the-host")

@@ -157,18 +157,6 @@ class ReapiBackend(Backend):
     def siso_wrapper_path(self, runtime_dir: Path) -> Path:
         return runtime_dir / SISO_WRAPPER_FILE
 
-    def _fallback_siso_binary(self) -> Path:
-        for dst in self._sisoenv_dsts:
-            if len(dst.parents) >= 4:
-                root = dst.parents[3]
-                for rel in ("third_party/siso/cipd/siso", "third_party/siso/siso"):
-                    cand = root / rel
-                    if cand.is_file():
-                        return cand
-        if self._sisoenv_dsts and len(self._sisoenv_dsts[0].parents) >= 4:
-            return self._sisoenv_dsts[0].parents[3] / "third_party/siso/cipd/siso"
-        return Path("/usr/bin/false")
-
     def prepare(self, runtime_dir: Path) -> None:
         """Write runtime override files for Linux BindOver and Darwin SISO_PATH."""
         # Resolve the Google service name to the in-box loopback relay.
@@ -178,7 +166,6 @@ class ReapiBackend(Backend):
         self.sisoenv_path(runtime_dir).write_text(
             f"SISO_PROJECT={self._project}\nSISO_REAPI_INSTANCE={full_instance}\n"
         )
-        fallback = shlex.quote(seatbelt_path(self._fallback_siso_binary()))
         unix_addr = shlex.quote(
             f"unix://{seatbelt_lexpath(self.socket_path(runtime_dir))}"
         )
@@ -232,7 +219,7 @@ class ReapiBackend(Backend):
             "  done\n"
             "done\n"
             'IFS="$OLD_IFS"\n'
-            f'exec {fallback} "$@"\n'
+            'exec siso "$@"\n'
         )
         write_sealed(self.siso_wrapper_path(runtime_dir), wrapper, mode=0o700)
 
@@ -244,10 +231,12 @@ class ReapiBackend(Backend):
         ):
             p.unlink(missing_ok=True)
 
-    def box_binds_for_platform(
-        self, runtime_dir: Path, platform: str
+    def box_binds(
+        self, runtime_dir: Path, *, platform: str | None = None
     ) -> list[BindSpec]:
-        if platform == "darwin":
+        """Return bind-overs for Linux `bwrap`, or empty on Darwin (`SISO_PATH`)."""
+        target_platform = host_platform() if platform is None else platform
+        if target_platform == "darwin":
             return []
         return [
             BindOver(self.hosts_path(runtime_dir), HOSTS_DST.resolve()),
@@ -256,10 +245,6 @@ class ReapiBackend(Backend):
                 for dst in self._sisoenv_dsts
             ),
         ]
-
-    def box_binds(self, runtime_dir: Path) -> list[BindSpec]:
-        """Return bind-overs for Linux `bwrap`, or empty on Darwin (`SISO_PATH`)."""
-        return self.box_binds_for_platform(runtime_dir, host_platform())
 
     @property
     def refused(self) -> Exception | None:
@@ -273,12 +258,9 @@ class ReapiBackend(Backend):
                 self.name, f"cannot mint a luci token: {e}", _FIX
             ) from e
 
-    def serve_for_platform(self, runtime_dir: Path, platform: str):
-        return self.serve(runtime_dir, direct_unix=(platform == "darwin"))
-
     @asynccontextmanager
     async def serve(
-        self, runtime_dir: Path, *, direct_unix: bool | None = None
+        self, runtime_dir: Path, *, platform: str | None = None
     ) -> AsyncIterator[None]:
         """Serve RBE for the duration of the box.
 
@@ -287,10 +269,8 @@ class ReapiBackend(Backend):
         """
         sock = self.socket_path(runtime_dir)
         sock.unlink(missing_ok=True)
-        use_direct = (
-            (host_platform() == "darwin") if direct_unix is None else direct_unix
-        )
-        if use_direct:
+        target_platform = host_platform() if platform is None else platform
+        if target_platform == "darwin":
             server = await serve_rbe_unix(sock, self._token, allow_unix_localhost=True)
         else:
             server = await serve_rbe_unix(sock, self._token)

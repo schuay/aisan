@@ -27,10 +27,18 @@ from pathlib import Path
 
 from ..egress.base import Backend
 from ..gitbinds import GC_ENV, git_binds, git_host_files
-from ..sandbox import RO, RW, Bind, BindOver, BindSpec, PinnedSymlink, host_platform
+from ..sandbox import (
+    DARWIN_DEFAULT_PATH,
+    RO,
+    RW,
+    Bind,
+    BindOver,
+    BindSpec,
+    PinnedSymlink,
+    host_platform,
+)
 from ..spec import DEFANG_ENV, NESTING_ENV, BoxSpec, Limits
 
-_DARWIN_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 _CODEX_APP_CLI = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli")
 
 
@@ -89,15 +97,16 @@ def codex(
     memory_max: str = "8G",
     cpu_quota: str = "",
     tasks_max: int = 4096,
+    platform: str | None = None,
 ) -> BoxSpec:
     """Build a Codex confinement spec for ``worktree``."""
     home = Path.home()
-    is_darwin = host_platform() == "darwin"
+    is_darwin = (host_platform() if platform is None else platform) == "darwin"
     app_cli_binds: list[BindSpec] = []
-    darwin_path = _DARWIN_PATH
+    darwin_path = DARWIN_DEFAULT_PATH
     if is_darwin and (_CODEX_APP_CLI / "bin" / "codex").is_file():
         app_cli_binds = [Bind(_CODEX_APP_CLI, RO, guard=False)]
-        darwin_path = f"{_CODEX_APP_CLI / 'bin'}:{_DARWIN_PATH}"
+        darwin_path = f"{_CODEX_APP_CLI / 'bin'}:{DARWIN_DEFAULT_PATH}"
     skills_binds: list[BindSpec] = []
     if skills:
         skills_binds = (
