@@ -83,7 +83,7 @@ def pinned_host(tmp_path, monkeypatch, home_layout):
 
     cache = tmp_path / "vpython-cache" / "vpython-root"
     cache.mkdir(parents=True)
-    monkeypatch.setattr(preset, "_vpython_cache", lambda: cache)
+    monkeypatch.setattr(preset, "_vpython_cache", lambda **_: cache)
     depot = tmp_path / "depot_tools"
     depot.mkdir()
     monkeypatch.setattr(preset.shutil, "which", lambda cmd: str(depot / cmd))

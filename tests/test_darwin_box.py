@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -31,7 +32,7 @@ from aisan.private import private_root
 from aisan.proxy.antigravity import Profile as AgyProfile
 from aisan.runtime import profile_path, scratch_dir
 from aisan.sandbox import RO, RW, Bind, PinnedSymlink
-from aisan.seatbelt import seatbelt_path
+from aisan.seatbelt import SeatbeltSandbox, seatbelt_path
 from aisan.session import darwin_executable_grant, git_config_binds, git_config_env
 from aisan.spec import BoxSpec
 from aisan.statedir import StateBusyError, lock_state_dir, planted_credentials
@@ -306,10 +307,12 @@ def test_darwin_executable_grant_mounts_standalone_app_bundle_root(
     cargo_grant = darwin_executable_grant(cargo_exe)
     bound_paths = {b.path for b in cargo_grant.binds if isinstance(b, Bind)}
     assert (fake_home / ".cargo").resolve() not in bound_paths
+    assert cargo_exe.parent.resolve() not in bound_paths
     assert cargo_exe.resolve() in bound_paths
     assert cargo_grant.path == (cargo_exe.parent,)
 
-    # 2) Self-contained venv (`pyvenv.cfg`) mounts the venv root cleanly.
+    # 2) Self-contained venv (`pyvenv.cfg`) and `uv tool` symlinked-Python venv
+    #    mount the venv + interpreter root without mounting `~/.local/bin` whole.
     venv_root = fake_home / "tools" / "my-venv"
     venv_exe = venv_root / "bin" / "tool"
     venv_exe.parent.mkdir(parents=True)
@@ -318,6 +321,35 @@ def test_darwin_executable_grant_mounts_standalone_app_bundle_root(
     venv_exe.chmod(0o755)
     venv_grant = darwin_executable_grant(venv_exe)
     assert Bind(venv_root.resolve(), RO, guard=False) in venv_grant.binds
+
+    uv_py_root = fake_home / ".local" / "share" / "uv" / "python" / "cpython-3.14"
+    (uv_py_root / "bin").mkdir(parents=True)
+    (uv_py_root / "lib").mkdir(parents=True)
+    uv_py_bin = uv_py_root / "bin" / "python3"
+    uv_py_bin.write_text("#!/bin/sh\nexit 0\n")
+    uv_py_bin.chmod(0o755)
+    uv_venv = fake_home / ".local" / "share" / "uv" / "tools" / "mytool"
+    (uv_venv / "bin").mkdir(parents=True)
+    (uv_venv / "pyvenv.cfg").write_text(f"home = {uv_py_root / 'bin'}\n")
+    (uv_venv / "bin" / "python").symlink_to(uv_py_bin)
+    uv_entry = uv_venv / "bin" / "mytool"
+    uv_entry.write_text("#!/bin/sh\nexit 0\n")
+    uv_entry.chmod(0o755)
+    local_bin = fake_home / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    uv_link = local_bin / "mytool"
+    uv_link.symlink_to(uv_entry)
+
+    uv_grant = darwin_executable_grant(uv_link)
+    uv_bound = {b.path for b in uv_grant.binds if isinstance(b, Bind)}
+    assert local_bin.resolve() not in uv_bound
+    assert uv_link in uv_bound
+    assert uv_venv.resolve() in uv_bound
+    assert uv_py_root.resolve() in uv_bound
+    assert (uv_venv / "bin" / "python") not in uv_bound
+    wt_check = tmp_path / "wt-check"
+    wt_check.mkdir()
+    assert SeatbeltSandbox(root=wt_check, binds=uv_grant.binds).resolve()
 
     # 3) Version-managed `nvm` / `npm -g` scoped `@openai/codex` symlink mounts
     #    both the `@openai/codex` package directory AND `<nvm_ver>/bin` (for `node`),
@@ -345,6 +377,7 @@ def test_darwin_executable_grant_mounts_standalone_app_bundle_root(
     assert other_pkg.resolve() not in nvm_bound
     assert (nvm_ver / "lib" / "node_modules").resolve() not in nvm_bound
     assert node_bin in nvm_grant.path
+    assert SeatbeltSandbox(root=wt_check, binds=nvm_grant.binds).resolve()
 
     # 4) Custom `.app` bundle mounts the `.app` root.
     app_bundle = fake_home / "Applications" / "ToolApp.app"
@@ -494,7 +527,9 @@ def test_state_lock_blocks_concurrent_sessions_while_explain_preserves_live_syml
 
     # Simulate a live session holding `lock_state_dir(state)` with a staged token symlink.
     st = state_dir("antigravity", repo, home=fake_home)
-    live_tok_target = tmp_path / "live-token.json"
+    live_proxy_dir = tmp_path / "proxy-live-other"
+    live_proxy_dir.mkdir()
+    live_tok_target = live_proxy_dir / "live-token.json"
     live_tok_target.write_text("{}")
     with lock_state_dir(st):
         # Lock file MUST live under private_root(), never inside writable `state`!
@@ -509,7 +544,8 @@ def test_state_lock_blocks_concurrent_sessions_while_explain_preserves_live_syml
         tok_link.parent.mkdir(parents=True, exist_ok=True)
         tok_link.symlink_to(live_tok_target)
 
-        # Running `--explain` in another process while `st` is locked succeeds AND leaves `tok_link` intact!
+        # Running `--explain` in another process while `st` is locked succeeds,
+        # leaves `tok_link` intact, and does NOT leak `proxy-live-other`!
         res_locked = subprocess.run(
             [sys.executable, "-m", "aisan.cli.main", "agy", "--explain", str(repo)],
             env=env,
@@ -519,6 +555,7 @@ def test_state_lock_blocks_concurrent_sessions_while_explain_preserves_live_syml
         )
         assert res_locked.returncode == 0, res_locked.stderr
         assert str(st) in res_locked.stdout
+        assert "proxy-live-other" not in res_locked.stdout
         assert tok_link.is_symlink()
         assert Path(os.readlink(tok_link)) == live_tok_target
 
@@ -691,7 +728,7 @@ async def test_darwin_depot_tools_job_and_reapi_unix_socket_wrapper(
 
     cache = tmp_path / "vpython-root.501"
     (cache / "store").mkdir(parents=True)
-    monkeypatch.setattr(dt_mod, "_vpython_cache", lambda: cache)
+    monkeypatch.setattr(dt_mod, "_vpython_cache", lambda **_: cache)
     fake_dt = tmp_path / "depot_tools"
     fake_dt.mkdir()
     (fake_dt / "autoninja").write_text("#!/bin/sh\nexit 0\n")
@@ -771,22 +808,26 @@ def test_darwin_casefold_and_firmlink_credential_guards(
 ):
     from aisan.userbinds import load
 
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: fake_home))
+    firmlink_home = Path("/Users/aisan-test-user")
+    monkeypatch.setenv("HOME", str(firmlink_home))
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: firmlink_home))
 
     for bad_toml in (
         'ro = ["~/.SSH"]\n',
         'ro = ["~/library/keychains"]\n',
         'ro = ["~/.CODEX"]\n',
-        f'ro = ["/System/Volumes/Data{fake_home}/.ssh"]\n',
-        f'ro = ["/System/Volumes/Data{fake_home}/Library/Keychains"]\n',
+        f'ro = ["/System/Volumes/Data{firmlink_home}/.ssh"]\n',
+        f'ro = ["/System/Volumes/Data{firmlink_home}/Library/Keychains"]\n',
     ):
         spec_file = tmp_path / "bad.toml"
         spec_file.write_text(bad_toml)
         with pytest.raises(ValueError):
             load(spec_file, egress=())
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: fake_home))
 
     wt = tmp_path / "wt"
     wt.mkdir()
@@ -978,4 +1019,6 @@ def test_real_claude_cli_matches_keychain_service_derivation(tmp_path, monkeypat
         check=False,
     )
     logged_def = sec_log.read_text() if sec_log.exists() else ""
-    assert f"-s {expected_default}\n" in logged_def, logged_def
+    assert re.search(rf"-s {re.escape(expected_default)}(?:\s|$)", logged_def), (
+        logged_def
+    )

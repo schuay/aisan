@@ -9,7 +9,8 @@ Following that link would let the box truncate or create an arbitrary host file.
 
 State directories receive the same ownership and permission checks as runtime
 directories, and seed I/O never follows symlinks. This module imports only
-`private` so all seed writers can use it without creating an import cycle.
+`policy_tree` and `private` so all seed writers can use it without creating an
+import cycle.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from .policy_tree import resolved_path
 from .private import prepare_private_dir, private_root
 
 
@@ -74,7 +76,7 @@ class StateBusyError(RuntimeError):
 
 
 def _state_lock_path(state: Path, *, create_root: bool) -> Path:
-    digest = hashlib.sha256(str(state.resolve()).encode()).hexdigest()[:16]
+    digest = hashlib.sha256(str(resolved_path(state)).encode()).hexdigest()[:16]
     root = prepare_private_dir(private_root()) if create_root else private_root()
     return root / f"state-{digest}.lock"
 

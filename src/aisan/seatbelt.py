@@ -676,7 +676,7 @@ class SeatbeltSandbox:
             *(m.dst for m in mounts),
             *raw_bind_paths,
             *(sym.src for sym in symlinks),
-            *(sym.dst for sym in symlinks),
+            *(sym.dst.parent for sym in symlinks),
             *self.unix_sockets,
         ]
         for p in all_paths:
@@ -846,11 +846,6 @@ class SeatbeltSandbox:
                 "(deny network-outbound (remote unix-socket))",
                 '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
             ]
-            for sock in self.unix_sockets:
-                sb_sock = seatbelt_lexpath(sock)
-                out.append(
-                    f"(allow network-outbound (remote unix-socket (path-literal {_sbpl_quote(sb_sock)})))"
-                )
             ordered = sorted(
                 mounts,
                 key=lambda m: (len(_canonical_path(m.dst).parts), seatbelt_path(m.dst)),
@@ -879,6 +874,11 @@ class SeatbeltSandbox:
                     out.append(
                         f"(allow network-outbound (remote unix-socket ({filt} {quoted})))"
                     )
+            for sock in self.unix_sockets:
+                sb_sock = seatbelt_lexpath(sock)
+                out.append(
+                    f"(allow network-outbound (remote unix-socket (path-literal {_sbpl_quote(sb_sock)})))"
+                )
             return out
         out = [
             "(deny network*)",

@@ -24,7 +24,7 @@ from .box import Box
 from .egress import known_credential_paths
 from .egress.base import Backend, EgressProfile, PreflightError, credential_overlap
 from .explain import assembly_refusal, explain
-from .launch import exit_status, interpreter_chain_dirs
+from .launch import exit_status, interpreter_roots
 from .presets import EGRESS_PROFILES, GRANTS
 from .private import private_root
 from .sandbox import (
@@ -35,7 +35,7 @@ from .sandbox import (
     BindSpec,
     host_platform,
 )
-from .seatbelt import darwin_system_ro_roots, seatbelt_path
+from .seatbelt import darwin_system_ro_roots, seatbelt_lexpath, seatbelt_path
 from .session_mcp import MCPAllowlist, SessionMCP, _shared_roots, mcp_ro_binds
 from .spec import BoxSpec, Grant
 from .statedir import (
@@ -144,6 +144,24 @@ def _node_package_mounts(
     return [], []
 
 
+def _symlink_hops(entry: Path) -> list[Path]:
+    """Return each symlink path along `entry`'s chain without its parent dir."""
+    hops: list[Path] = []
+    seen: set[Path] = set()
+    p = entry
+    for _ in range(10):
+        try:
+            if not p.is_symlink() or p in seen:
+                break
+            seen.add(p)
+            hops.append(p)
+            target = Path(os.readlink(p))
+            p = target if target.is_absolute() else (p.parent / target)
+        except OSError:
+            break
+    return hops
+
+
 def _darwin_target_roots(
     real: Path, shared: frozenset[Path]
 ) -> tuple[list[Path], list[Path]]:
@@ -155,7 +173,13 @@ def _darwin_target_roots(
         if anc in shared or anc in (Path("/"), Path("/opt"), Path("/Applications")):
             continue
         if (anc / "pyvenv.cfg").is_file():
-            return [anc], []
+            mounts = [anc]
+            for py_name in ("python", "python3"):
+                py = anc / "bin" / py_name
+                if py.is_symlink():
+                    mounts.extend(_symlink_hops(py))
+                    mounts.extend(p for p in interpreter_roots(py) if p not in shared)
+            return mounts, []
         if anc.suffix == ".app":
             return [anc], []
     return [real], []
@@ -170,7 +194,7 @@ def darwin_executable_grant(
     and default PATH. Self-contained tool roots (`pyvenv.cfg` virtualenvs,
     `node_modules/<pkg>` + `bin/node` prefixes, or `.app` bundles) mount their
     explicit root; standalone binaries mount only the resolved executable and
-    its symlink chain directories so shared trees such as `~/.cargo` or `~/.bun`
+    its symlink hops so shared trees such as `~/.cargo/bin` or `~/.local/bin`
     are never mounted whole.
     """
     target_platform = host_platform() if platform is None else platform
@@ -179,9 +203,12 @@ def darwin_executable_grant(
     bin_dir = executable_path.parent
     real = executable_path.resolve()
     sys_roots = darwin_system_ro_roots()
+    shared = _shared_roots(Path.home().resolve())
 
     def covered_by_surface(target: Path) -> bool:
-        canon = Path(seatbelt_path(target))
+        canon = Path(
+            seatbelt_lexpath(target) if target.is_symlink() else seatbelt_path(target)
+        )
         return any(canon == r or canon.is_relative_to(r) for r in sys_roots)
 
     refused_stores = (
@@ -191,22 +218,31 @@ def darwin_executable_grant(
     mount_candidates: list[Path] = []
     extra_path_dirs: list[Path] = []
     if not covered_by_surface(executable_path):
-        for hop_dir in interpreter_chain_dirs(executable_path):
-            if not covered_by_surface(hop_dir):
-                mount_candidates.append(hop_dir)
+        for hop in _symlink_hops(executable_path):
+            if not covered_by_surface(hop) and hop not in shared:
+                mount_candidates.append(hop)
     if not covered_by_surface(real):
-        home = Path.home().resolve()
-        shared = _shared_roots(home)
         target_mounts, target_paths = _darwin_target_roots(real, shared)
         for cand in target_mounts:
-            if not covered_by_surface(cand):
+            if not covered_by_surface(cand) and cand not in shared:
                 mount_candidates.append(cand)
         extra_path_dirs.extend(target_paths)
 
-    safe_mounts = tuple(
+    candidates = [
         p
         for p in dict.fromkeys(mount_candidates)
         if credential_overlap((p,), refused_stores) is None
+    ]
+    dir_roots = tuple(
+        Path(seatbelt_path(p)) for p in candidates if not p.is_symlink() and p.is_dir()
+    )
+    safe_mounts = tuple(
+        p
+        for p in candidates
+        if not (
+            p.is_symlink()
+            and any(Path(seatbelt_lexpath(p)).is_relative_to(d) for d in dir_roots)
+        )
     )
     binds = tuple(Bind(p, RO, guard=False) for p in safe_mounts)
     raw_paths = [
@@ -611,7 +647,11 @@ async def run_interactive(
                         " credential files are not mounted.",
                         file=sys.stderr,
                     )
-                elif is_darwin and box.spec.allow_local_loopback:
+                elif (
+                    is_darwin
+                    and isinstance(box.spec, BoxSpec)
+                    and box.spec.allow_local_loopback
+                ):
                     print(
                         "WARNING: box allows localhost TCP on macOS: external"
                         " networks and DNS are blocked, but unauthenticated"

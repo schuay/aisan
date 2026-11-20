@@ -356,7 +356,6 @@ def _read_macos_keychain_status(config_dir: Path) -> tuple[str | None, int | Non
         res = query_generic_password(service=service, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None, None
-    assert res is not None
     if res.returncode != 0:
         return None, res.returncode
     text = decode_security_secret(res.stdout)

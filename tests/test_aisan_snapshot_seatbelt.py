@@ -109,14 +109,29 @@ def pinned_darwin_host(monkeypatch):
         seatbelt_mod, "_DARWIN_SYSTEM_LITERALS", _PINNED_SYSTEM_LITERALS
     )
     monkeypatch.setattr(seatbelt_mod, "darwin_controlling_ttys", lambda: ())
-    # Stub existence checks on pinned system roots so Linux and macOS hosts
-    # without `/opt/homebrew` or `/Library/Developer` render identical SBPL.
+    # Stub existence, symlink, and resolution checks on pinned system roots so
+    # usrmerge Linux (`/bin -> /usr/bin`, `/dev/fd -> /proc/self/fd`) and macOS
+    # hosts without `/opt/homebrew` or `/Library/Developer` render identical SBPL.
     pinned_set = frozenset(_PINNED_SYSTEM_SUBPATHS) | frozenset(_PINNED_SYSTEM_LITERALS)
     real_exists = Path.exists
+    real_is_symlink = Path.is_symlink
+    real_resolve = Path.resolve
     monkeypatch.setattr(
         Path,
         "exists",
         lambda self: True if self in pinned_set else real_exists(self),
+    )
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda self: False if self in pinned_set else real_is_symlink(self),
+    )
+    monkeypatch.setattr(
+        Path,
+        "resolve",
+        lambda self, *args, **kwargs: (
+            self if self in pinned_set else real_resolve(self, *args, **kwargs)
+        ),
     )
 
     # Root both `_PRIVATE_ROOT` and test workspaces under `sys_tmp` (`/private/tmp`
@@ -133,7 +148,7 @@ def pinned_darwin_host(monkeypatch):
         preset_dt = importlib.import_module("aisan.presets.depot_tools_job")
         cache = work / "vpython-cache" / "vpython-root"
         cache.mkdir(parents=True)
-        monkeypatch.setattr(preset_dt, "_vpython_cache", lambda: cache)
+        monkeypatch.setattr(preset_dt, "_vpython_cache", lambda **_: cache)
         monkeypatch.setattr(preset_dt, "_active_xcode_dev_dir", lambda: None)
         depot = work / "depot_tools"
         depot.mkdir()

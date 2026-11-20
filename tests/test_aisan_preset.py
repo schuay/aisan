@@ -384,7 +384,7 @@ def test_the_vpython_cache_is_an_overlay_not_a_bind(tmp_path, monkeypatch):
 
     cache = tmp_path / "vpython-root.999"
     cache.mkdir()
-    monkeypatch.setattr(preset, "_vpython_cache", lambda: cache)
+    monkeypatch.setattr(preset, "_vpython_cache", lambda **_: cache)
     _, wt = _fake_checkout(tmp_path)
 
     spec = depot_tools_job(wt)
@@ -397,7 +397,7 @@ def test_a_host_without_vpython_still_builds_a_profile(tmp_path, monkeypatch):
 
     preset = importlib.import_module("aisan.presets.depot_tools_job")
 
-    monkeypatch.setattr(preset, "_vpython_cache", lambda: tmp_path / "nope")
+    monkeypatch.setattr(preset, "_vpython_cache", lambda **_: tmp_path / "nope")
     _, wt = _fake_checkout(tmp_path)
     assert not [b for b in depot_tools_job(wt).binds if isinstance(b, Overlay)]
 
@@ -610,7 +610,7 @@ def test_the_depot_tools_grant_is_the_tree_its_cache_its_path_and_its_env(
     depot_tools.mkdir()
     cache = tmp_path / "vpython-root.1000"
     cache.mkdir()
-    monkeypatch.setattr(depot_tools_job_module, "_vpython_cache", lambda: cache)
+    monkeypatch.setattr(depot_tools_job_module, "_vpython_cache", lambda **_: cache)
 
     grant = depot_tools_grant(depot_tools)
 

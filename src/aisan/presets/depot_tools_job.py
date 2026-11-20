@@ -60,21 +60,22 @@ _DEPOT_TOOLS_ENV = (
 )
 
 
-def _vpython_cache() -> Path:
+def _vpython_cache(*, is_darwin: bool | None = None) -> Path:
     """Return the host vpython cache path used by depot_tools."""
-    if host_platform() == "darwin":
+    darwin = (host_platform() == "darwin") if is_darwin is None else is_darwin
+    if darwin:
         return Path.home() / "Library" / "Caches" / f"vpython-root.{os.getuid()}"
     return Path.home() / ".cache" / f"vpython-root.{os.getuid()}"
 
 
-def _tool_cache_overlays() -> list[Path]:
+def _tool_cache_overlays(*, is_darwin: bool | None = None) -> list[Path]:
     """Return host tool caches that need confined write access."""
-    cache = _vpython_cache()
+    cache = _vpython_cache(is_darwin=is_darwin)
     return [cache] if cache.is_dir() else []
 
 
 def _tool_cache_binds(*, is_darwin: bool) -> list[BindSpec]:
-    caches = _tool_cache_overlays()
+    caches = _tool_cache_overlays(is_darwin=is_darwin)
     if is_darwin:
         return [WriteRegex(p, _VPYTHON_WRITE_SUFFIXES) for p in caches]
     return [Overlay(p) for p in caches]

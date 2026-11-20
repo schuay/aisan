@@ -537,14 +537,15 @@ def _sort_sbpl_literal_sets(text: str) -> str:
         stripped = line.lstrip()
         if any(stripped.startswith(p) for p in prefixes):
             lits = sorted(set(lit_re.findall(line)))
-            if lits:
-                head = line[: line.index("(literal ")]
-                tail = lit_re.sub("", line[line.index("(literal ") :]).strip()
-                suffix = f" {tail}" if tail else ")"
-                if suffix != ")" and suffix.endswith(")"):
-                    updated = f"{head}{' '.join(lits)} {suffix}"
-                else:
-                    updated = f"{head}{' '.join(lits)})"
+            if lits and line.endswith(")"):
+                idx = line.index("(literal ")
+                head = line[:idx]
+                rest = lit_re.sub("", line[idx:-1]).strip()
+                updated = (
+                    f"{head}{' '.join(lits)} {rest})"
+                    if rest
+                    else f"{head}{' '.join(lits)})"
+                )
         out.append(updated)
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 

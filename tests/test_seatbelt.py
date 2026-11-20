@@ -79,7 +79,14 @@ def _box_env(tmp_dir: Path) -> tuple[tuple[str, str], ...]:
 # --- Pure policy, validation, and path-normalization tests ---
 
 
-def test_firmlink_and_root_symlink_normalization():
+def test_firmlink_and_root_symlink_normalization(monkeypatch):
+    darwin_root_links = frozenset({Path("/tmp"), Path("/var"), Path("/etc")})
+    real_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda self: True if self in darwin_root_links else real_is_symlink(self),
+    )
     assert through_darwin_system_symlink(Path("/tmp/aisan-501")) == Path(
         "/private/tmp/aisan-501"
     )

@@ -33,7 +33,7 @@ def query_generic_password(
     account: str | None = None,
     security: str = SECURITY_BIN,
     timeout: float = 10.0,
-) -> subprocess.CompletedProcess[str] | None:
+) -> subprocess.CompletedProcess[str]:
     """Run `security find-generic-password -w` without interactive prompts."""
     cmd = [security, "find-generic-password", "-s", service]
     if account is not None:
