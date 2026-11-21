@@ -594,6 +594,58 @@ async def test_an_upstream_error_is_relayed_and_logged_on_one_line(tmp_path, cap
     assert "\n" not in line
 
 
+@pytest.mark.parametrize("code", [429, 502, 503, 504, 529])
+async def test_retryable_upstream_errors_relay_in_full_without_warning(
+    tmp_path, caplog, code
+):
+    from aiohttp import ClientSession
+
+    payload = b'{"error": {"code": 503,\n "message": "No capacity available"}}'
+
+    async def upstream(request: web.Request) -> web.Response:
+        return web.Response(status=code, body=payload, content_type="application/json")
+
+    up_url, up_runner = await _upstream_server(upstream)
+
+    import aisan.proxy.vertex as v
+
+    orig = v._upstream
+    v._upstream = lambda _loc: up_url
+    try:
+        app = make_app(allowlist=_allow(), token=lambda: _ready("t"), location=LOCATION)
+        sock = tmp_path / "vertex.sock"
+        runner = await serve_proxy(sock, app)
+        relay = await serve_relay(sock, 0)
+        port = relay.sockets[0].getsockname()[1]
+        try:
+            url = (
+                f"http://127.0.0.1:{port}{BASE}"
+                f"/publishers/google/models/{MODEL}:streamGenerateContent"
+            )
+            with caplog.at_level("WARNING", logger="aisan.proxy.vertex"):
+                async with ClientSession() as s, s.post(url, data=b"{}") as r:
+                    warn_status, warn_body = r.status, await r.read()
+            assert (warn_status, warn_body) == (code, payload)
+            assert not caplog.records
+
+            with caplog.at_level("DEBUG", logger="aisan.proxy.vertex"):
+                async with ClientSession() as s, s.post(url, data=b"{}") as r:
+                    dbg_status, dbg_body = r.status, await r.read()
+        finally:
+            relay.close()
+            await relay.wait_closed()
+            await runner.cleanup()
+    finally:
+        v._upstream = orig
+        await up_runner.cleanup()
+
+    assert (dbg_status, dbg_body) == (code, payload)
+    [rec] = [r for r in caplog.records if f"answered {code}" in r.getMessage()]
+    assert rec.levelno == logging.DEBUG
+    assert "No capacity available" in rec.getMessage()
+    assert "\n" not in rec.getMessage()
+
+
 async def test_box_headers_are_never_forwarded(tmp_path):
     from aiohttp import ClientSession
 

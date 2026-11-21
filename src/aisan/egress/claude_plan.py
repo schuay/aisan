@@ -320,8 +320,9 @@ async def _refresh_claude_login(command: tuple[str, ...], config_dir: Path) -> N
                 raise TimeoutError("host Claude token refresh timed out") from e
             if stderr:
                 # Keep child stderr in the host log. Don't return untrusted child
-                # output to the box in a refusal message.
-                log.warning(
+                # output to the box in a refusal message, and don't warn on the
+                # sink's expected 404.
+                log.info(
                     "anthropic: host Claude refresh wrote to stderr: %s",
                     stderr.decode("utf-8", "replace").strip()[-_STDERR_TAIL:],
                 )

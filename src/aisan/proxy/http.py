@@ -140,6 +140,10 @@ _CHUNK = 64 << 10
 # Log the start of an upstream error body: enough for the error message, not a
 # whole echoed request.
 _ERROR_LOG_BYTES = 2 << 10
+# Rate-limit, capacity, and gateway statuses that model clients retry on their
+# own; 529 is Anthropic's ``overloaded_error``. Log them at DEBUG rather than
+# WARNING so ``logging.lastResort`` doesn't write over an interactive TUI.
+RETRYABLE_UPSTREAM_STATUSES = frozenset({429, 502, 503, 504, 529})
 
 
 async def forward(
@@ -159,13 +163,13 @@ async def forward(
 ) -> web.StreamResponse:
     """Send a checked request upstream and relay the response to the box.
 
-    Redirects are refused with 502 rather than followed. An upstream status of
-    400 or above is logged through ``gate`` with the start of its body, which
-    is still relayed in full; otherwise a faithfully relayed refusal leaves no
-    host-side record of which call failed. ``label`` prefixes log lines and
-    ``origin`` names the upstream in them. ``failure_detail`` adds the client
-    exception text to the log and refusal; leave it off for user-configured
-    upstreams, whose URLs may appear in that text.
+    Redirects are refused with 502 rather than followed. Non-retryable upstream
+    statuses of 400 or above are logged through ``gate`` with the start of their
+    body, while ``RETRYABLE_UPSTREAM_STATUSES`` log at DEBUG; in both cases the
+    body is relayed in full. ``label`` prefixes log lines and ``origin`` names
+    the upstream in them. ``failure_detail`` adds the client exception text to
+    the log and refusal; leave it off for user-configured upstreams, whose URLs
+    may appear in that text.
     """
     try:
         async with session.request(
@@ -190,7 +194,18 @@ async def forward(
                 if answered is not None:
                     return answered
             head = b""
-            if up.status >= 400:
+            if up.status in RETRYABLE_UPSTREAM_STATUSES:
+                if logger.isEnabledFor(logging.DEBUG):
+                    head = await up.content.read(_ERROR_LOG_BYTES)
+                    logger.debug(
+                        "%s proxy: upstream %s answered %d for %s: %r",
+                        label,
+                        origin,
+                        up.status,
+                        request_path(request),
+                        head.decode("utf-8", "replace"),
+                    )
+            elif up.status >= 400:
                 head = await up.content.read(_ERROR_LOG_BYTES)
                 # ``%r`` keeps a body containing newlines from forging log lines.
                 gate.warning(
