@@ -46,7 +46,6 @@ from .base import (
     Backend,
     BackendActivation,
     PreflightError,
-    shared_proxy_token,
 )
 
 log = logging.getLogger(__name__)
@@ -118,7 +117,7 @@ class CodexBackend(Backend):
     ) -> list[BindSpec]:
         if self._codex_home is None:
             return []
-        src = runtime_dir / _BOX_AUTH_NAME
+        src = self.client_file(runtime_dir, _BOX_AUTH_NAME)
         dst = self._codex_home / "auth.json"
         target_platform = host_platform() if platform is None else platform
         if target_platform == "darwin":
@@ -126,8 +125,12 @@ class CodexBackend(Backend):
         return [BindOver(src, dst)]
 
     def prepare(self, runtime_dir: Path) -> None:
-        if self._codex_home is not None:
-            self._write_box_auth(runtime_dir, PLACEHOLDER_KEY)
+        if self._codex_home is None:
+            return
+        # Keep the file a concurrent session's client is reading.
+        if self.lease and self.client_file(runtime_dir, _BOX_AUTH_NAME).exists():
+            return
+        self._write_box_auth(runtime_dir, PLACEHOLDER_KEY)
 
     def _write_box_auth(self, runtime_dir: Path, access_token: str) -> None:
         auth = {
@@ -141,7 +144,7 @@ class CodexBackend(Backend):
             },
             "last_refresh": datetime.now(UTC).isoformat(),
         }
-        write_sealed(runtime_dir / _BOX_AUTH_NAME, json.dumps(auth))
+        write_sealed(self.client_file(runtime_dir, _BOX_AUTH_NAME), json.dumps(auth))
 
     def config_overrides(self, *, port: int | None = None) -> tuple[str, ...]:
         """Highest-precedence Codex settings for this confined transport."""
@@ -257,8 +260,10 @@ class CodexBackend(Backend):
     async def serve_shared(
         self, runtime_dir: Path, *, isolated: bool = False
     ) -> AsyncIterator[BackendActivation]:
-        client_token = shared_proxy_token()
-        if self._codex_home is not None:
+        client_token, new = self.proxy_token()
+        if self._codex_home is not None and (
+            new or not self.client_file(runtime_dir, _BOX_AUTH_NAME).exists()
+        ):
             self._write_box_auth(runtime_dir, client_token)
         app = make_app(
             credential=self._credential,

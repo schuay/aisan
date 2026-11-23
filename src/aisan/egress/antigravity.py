@@ -36,7 +36,6 @@ from .base import (
     Backend,
     BackendActivation,
     PreflightError,
-    shared_proxy_token,
 )
 
 log = logging.getLogger(__name__)
@@ -136,17 +135,23 @@ class AntigravityBackend(Backend):
     def box_binds(
         self, runtime_dir: Path, *, platform: str | None = None
     ) -> list[BindSpec]:
-        src = runtime_dir / _BOX_TOKEN_NAME
+        src = self.client_file(runtime_dir, _BOX_TOKEN_NAME)
         target_platform = host_platform() if platform is None else platform
         if target_platform == "darwin":
             return [PinnedSymlink(src, self._token_file)]
         return [BindOver(src, self._token_file)]
 
     def prepare(self, runtime_dir: Path) -> None:
+        # Keep the file a concurrent session's client is reading.
+        if self.lease and self.client_file(runtime_dir, _BOX_TOKEN_NAME).exists():
+            return
         self._write_box_token(runtime_dir, PLACEHOLDER_KEY)
 
     def _write_box_token(self, runtime_dir: Path, access_token: str) -> None:
-        write_sealed(runtime_dir / _BOX_TOKEN_NAME, box_token_file(access_token))
+        write_sealed(
+            self.client_file(runtime_dir, _BOX_TOKEN_NAME),
+            box_token_file(access_token),
+        )
 
     async def preflight(self) -> None:
         """Check the upstream and the credential before starting the box.
@@ -202,8 +207,9 @@ class AntigravityBackend(Backend):
     async def serve_shared(
         self, runtime_dir: Path, *, isolated: bool = False
     ) -> AsyncIterator[BackendActivation]:
-        client_token = shared_proxy_token()
-        self._write_box_token(runtime_dir, client_token)
+        client_token, new = self.proxy_token()
+        if new or not self.client_file(runtime_dir, _BOX_TOKEN_NAME).exists():
+            self._write_box_token(runtime_dir, client_token)
         body = BodyPolicy() if isolated else BodyPolicy.for_shared_network()
         app = make_app(
             token=self._credential.token,

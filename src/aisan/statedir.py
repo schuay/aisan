@@ -15,11 +15,11 @@ import cycle.
 
 from __future__ import annotations
 
-import contextlib
 import fcntl
 import hashlib
 import json
 import os
+import shutil
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -72,57 +72,84 @@ EMPTY_CREDENTIAL_MOUNTPOINTS: dict[str, tuple[str, ...]] = {
 
 
 class StateBusyError(RuntimeError):
-    """Another live session currently holds the exclusive lock on `state`."""
+    """A session of an aisan that cannot share `state` is running in it."""
 
 
-def _state_lock_path(state: Path, *, create_root: bool) -> Path:
-    digest = hashlib.sha256(str(resolved_path(state)).encode()).hexdigest()[:16]
-    root = prepare_private_dir(private_root()) if create_root else private_root()
-    return root / f"state-{digest}.lock"
+class StateLease:
+    """One session's membership in a state directory shared on Darwin.
+
+    Seatbelt has no private mount namespace, so `PinnedSymlink` entries are
+    host symlinks in the state directory, common to every concurrent session.
+    The sessions therefore stage identical links. A source that would be
+    per-session lives in `links` instead, a directory below `private_root()`
+    that the sessions share, and the last session to leave removes it.
+
+    `exclusive` serializes staging and teardown between the sessions.
+    """
+
+    def __init__(self, links: Path, member_fd: int, mutex: Path) -> None:
+        self.links = links
+        self._member_fd = member_fd
+        self._mutex = mutex
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Block until this session alone may change the shared links."""
+        fd = os.open(self._mutex, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    def alone(self) -> bool:
+        """Return whether no other session is live. Call inside `exclusive`."""
+        try:
+            fcntl.flock(self._member_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            alone = False
+        else:
+            alone = True
+        # A lock conversion may drop the held lock, even when it fails.
+        fcntl.flock(self._member_fd, fcntl.LOCK_SH)
+        return alone
 
 
 @contextmanager
-def lock_state_dir(state: Path) -> Iterator[None]:
-    """Acquire a non-blocking exclusive lock on `state` for a Darwin session.
+def share_state_dir(state: Path) -> Iterator[StateLease]:
+    """Join the sessions using `state` for the duration of the context.
 
-    Seatbelt has no private mount namespace, so `PinnedSymlink` entries live in
-    `state` on the host filesystem. Keep the lock file inside `private_root()`
-    so a boxed process cannot unlink it to defeat single-session exclusion;
-    concurrent sessions should use separate Git worktrees.
+    The lock files and `StateLease.links` live inside `private_root()`, so a
+    boxed process can neither fake nor end a membership.
     """
-    prepare_state_dir(state)
-    lock_path = _state_lock_path(state, create_root=True)
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    root = prepare_private_dir(private_root())
+    digest = hashlib.sha256(str(resolved_path(state)).encode()).hexdigest()[:16]
+    links = root / f"links-{digest}"
+    fd = os.open(
+        root / f"state-{digest}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
+    )
+    lease = StateLease(links, fd, root / f"state-{digest}.mutex")
     try:
+        with lease.exclusive():
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError as e:
+                # Sessions hold the lock shared; older releases held it
+                # exclusively and repoint the links of any other session.
+                raise StateBusyError(
+                    f"a session of an older aisan is running with state"
+                    f" directory {state}; exit it first"
+                ) from e
+            if lease.alone():
+                # A killed session leaves its links behind.
+                shutil.rmtree(links, ignore_errors=True)
+            prepare_private_dir(links)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as e:
-            raise StateBusyError(
-                f"another aisan session is already running with state directory"
-                f" {state}; use a separate git worktree for concurrent sessions"
-            ) from e
-        yield
-    finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
-def is_state_dir_locked(state: Path) -> bool:
-    """Return whether a live session holds `lock_state_dir(state)`."""
-    lock_path = _state_lock_path(state, create_root=False)
-    try:
-        fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return False
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
+            yield lease
+        finally:
+            with lease.exclusive():
+                if lease.alone():
+                    shutil.rmtree(links, ignore_errors=True)
     finally:
         os.close(fd)
 

@@ -22,7 +22,14 @@ import logging
 import os
 import stat
 from collections.abc import Iterator
-from contextlib import AsyncExitStack, ExitStack, contextmanager, suppress
+from contextlib import (
+    AbstractContextManager,
+    AsyncExitStack,
+    ExitStack,
+    contextmanager,
+    nullcontext,
+    suppress,
+)
 from pathlib import Path
 from typing import Self
 
@@ -58,7 +65,7 @@ from .sandbox import (
 )
 from .seatbelt import SeatbeltSandbox, seatbelt_path, through_darwin_system_symlink
 from .spec import SECURITY_SERVER, BoxSpec
-from .statedir import is_runtime_symlink
+from .statedir import StateLease, is_runtime_symlink
 
 _SYSTEM_KEYCHAINS = Path("/Library/Keychains")
 
@@ -124,6 +131,10 @@ class Box:
 
     `wrapper()` and `launch_prefix()` are valid only inside the async context
     because they refer to resources created and removed by that context.
+
+    `lease` is the box's membership in a state directory that concurrent
+    Darwin sessions share. Such boxes stage the same `PinnedSymlink` entries,
+    and only the last one to exit removes them.
     """
 
     def __init__(
@@ -132,6 +143,7 @@ class Box:
         *,
         box_id: str,
         platform: str | None = None,
+        lease: StateLease | None = None,
     ) -> None:
         resolved = _default_platform() if platform is None else platform
         if resolved not in _PLATFORMS:
@@ -144,14 +156,20 @@ class Box:
         self.platform = resolved
         self.runtime_dir = runtime_dir(box_id)
         self.scratch_dir = scratch_dir(box_id)
+        self.lease = lease
+        if lease is not None:
+            for backend in spec.egress:
+                backend.lease = lease
         self._staged_profile_path: Path | None = None
-        self._verify_symlinks: bool = True
         self._stack: AsyncExitStack | None = None
         self._activations: dict[Backend, BackendActivation] = {}
 
     def _clear_staged_profile(self) -> None:
         self._staged_profile_path = None
-        self._verify_symlinks = True
+
+    def _exclusive(self) -> AbstractContextManager[None]:
+        """Serialize staging and teardown with sessions sharing the state."""
+        return nullcontext() if self.lease is None else self.lease.exclusive()
 
     def _uses_shared_tcp(self, backend: Backend) -> bool:
         """Return whether `backend` serves authenticated TCP on host loopback.
@@ -216,9 +234,7 @@ class Box:
                 adapted.append(item)
         return adapted
 
-    def _stage(
-        self, stack: ExitStack | AsyncExitStack, *, stage_symlinks: bool = True
-    ) -> None:
+    def _stage(self, stack: ExitStack | AsyncExitStack) -> None:
         """Create every on-disk source required before wrapper resolution.
 
         This includes ensure-paths, the runtime directory, backend bind-over
@@ -237,7 +253,6 @@ class Box:
             prof = profile_path(self.box_id)
             prof.unlink(missing_ok=True)
             self._staged_profile_path = prof
-            self._verify_symlinks = stage_symlinks
             stack.callback(self._clear_staged_profile)
             stack.callback(prof.unlink, missing_ok=True)
         backend_binds: list[BindSpec] = []
@@ -251,7 +266,7 @@ class Box:
                 src = getattr(spec, "src", None)
                 if src is not None and src.parent == self.runtime_dir:
                     stack.callback(src.unlink, missing_ok=True)
-        if self.platform == "darwin" and stage_symlinks:
+        if self.platform == "darwin":
             self._stage_pinned_symlinks(
                 stack,
                 tuple(
@@ -274,6 +289,9 @@ class Box:
         priv = private_root()
 
         def cleanup_staged() -> None:
+            # A session sharing the state still reads through the links.
+            if self.lease is not None and not self.lease.alone():
+                return
             for dst, src in reversed(staged_links):
                 _unlink_staged_symlink(dst, src)
             if created_dirs:
@@ -304,7 +322,12 @@ class Box:
                     sym.dst.unlink()
                 elif stat.S_ISLNK(info.st_mode):
                     target = Path(os.readlink(sym.dst))
-                    if target == sym.src or is_runtime_symlink(sym.dst, priv):
+                    if target == sym.src:
+                        # Replacing the link would briefly hide it from a
+                        # session sharing the state.
+                        staged_links.append((sym.dst, sym.src))
+                        continue
+                    if is_runtime_symlink(sym.dst, priv):
                         sym.dst.unlink()
                     else:
                         raise FileExistsError(
@@ -369,46 +392,48 @@ class Box:
 
     async def __aenter__(self) -> Self:
         self._validate_platform_egress()
+        for backend in self.spec.egress:
+            # Preflight the complete set before starting services or writing
+            # state, so one missing credential aborts the box cleanly.
+            await backend.preflight()
         stack = AsyncExitStack()
-        try:
-            for backend in self.spec.egress:
-                # Preflight the complete set before starting services or writing
-                # state, so one missing credential aborts the box cleanly.
-                await backend.preflight()
-            self._stage(stack)
-            activations: dict[Backend, BackendActivation] = {}
-            shared_backends = False
-            client_env: dict[str, str] = {}
-            for backend in self.spec.egress:
-                if self._uses_shared_tcp(backend):
-                    activation = await stack.enter_async_context(
-                        backend.serve_shared(
-                            self.runtime_dir, isolated=self.spec.unshare_net
+        activations: dict[Backend, BackendActivation] = {}
+        # The lock spans awaits that only start local listeners.
+        with self._exclusive():
+            try:
+                self._stage(stack)
+                shared_backends = False
+                client_env: dict[str, str] = {}
+                for backend in self.spec.egress:
+                    if self._uses_shared_tcp(backend):
+                        activation = await stack.enter_async_context(
+                            backend.serve_shared(
+                                self.runtime_dir, isolated=self.spec.unshare_net
+                            )
                         )
-                    )
-                    shared_backends = True
-                    client_env.update(activation.client_env)
-                else:
-                    await stack.enter_async_context(
-                        backend.serve(self.runtime_dir, platform=self.platform)
-                    )
-                    act_env = (
-                        backend.direct_unix_client_env(self.runtime_dir)
-                        if self.platform == "darwin"
-                        else backend.client_env()
-                    )
-                    activation = BackendActivation(backend.port, act_env)
-                activations[backend] = activation
-            if shared_backends:
-                path = write_client_env(self.runtime_dir, client_env)
-                stack.callback(path.unlink, missing_ok=True)
-            if self._needs_relays():
-                path = write_manifest(self.runtime_dir, self._manifest())
-                # The runtime directory can be removed only after this file.
-                stack.callback(path.unlink, missing_ok=True)
-        except BaseException:
-            await stack.aclose()
-            raise
+                        shared_backends = True
+                        client_env.update(activation.client_env)
+                    else:
+                        await stack.enter_async_context(
+                            backend.serve(self.runtime_dir, platform=self.platform)
+                        )
+                        act_env = (
+                            backend.direct_unix_client_env(self.runtime_dir)
+                            if self.platform == "darwin"
+                            else backend.client_env()
+                        )
+                        activation = BackendActivation(backend.port, act_env)
+                    activations[backend] = activation
+                if shared_backends:
+                    path = write_client_env(self.runtime_dir, client_env)
+                    stack.callback(path.unlink, missing_ok=True)
+                if self._needs_relays():
+                    path = write_manifest(self.runtime_dir, self._manifest())
+                    # The runtime directory can be removed only after this file.
+                    stack.callback(path.unlink, missing_ok=True)
+            except BaseException:
+                await stack.aclose()
+                raise
         self._activations = activations
         self._stack = stack
         return self
@@ -427,7 +452,8 @@ class Box:
         stack, self._stack = self._stack, None
         self._activations = {}
         if stack is not None:
-            await stack.aclose()
+            with self._exclusive():
+                await stack.aclose()
 
     def activation(self, backend: Backend) -> BackendActivation:
         """Return a backend's live endpoint within this box's async context."""
@@ -437,18 +463,21 @@ class Box:
             raise RuntimeError("backend activation is not live in this Box") from e
 
     @contextmanager
-    def staged(self, *, stage_symlinks: bool = True) -> Iterator[Box]:
+    def staged(self) -> Iterator[Box]:
         """Stage the box for inspection without serving or minting credentials.
 
         Wrapper resolution requires every bind-over source. Reuse the live
         staging path to create those sources without opening sockets, ensuring
-        `explain` reports the same mount profile a live box receives. When
-        `stage_symlinks=False` (used while another session holds the state-dir
-        lock), omit host `PinnedSymlink` mutation while rendering identical SBPL.
+        `explain` reports the same mount profile a live box receives.
         """
-        with ExitStack() as stack:
-            self._stage(stack, stage_symlinks=stage_symlinks)
+        stack = ExitStack()
+        try:
+            with self._exclusive():
+                self._stage(stack)
             yield self
+        finally:
+            with self._exclusive():
+                stack.close()
 
     @property
     def env(self) -> dict[str, str]:
@@ -525,6 +554,9 @@ class Box:
             binds.append(scratch_bind(self.box_id))
         if self.spec.egress:
             holes.append(self.runtime_dir)
+        if self.lease is not None:
+            holes.append(self.lease.links)
+            binds.append(Bind(self.lease.links, RO, optional=True))
         binds.append(
             Seal(
                 private_root(),
@@ -575,7 +607,6 @@ class Box:
                 unix_sockets=unix_sockets,
                 controlling_ttys=_seatbelt.darwin_controlling_ttys(),
                 profile_path=self._staged_profile_path,
-                verify_symlinks=self._verify_symlinks,
             )
         else:
             sandbox = Sandbox(

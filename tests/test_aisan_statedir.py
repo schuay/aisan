@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -13,11 +15,13 @@ from aisan.cli.claude import seed_settings, seed_state
 from aisan.session import mirror_user_memory
 from aisan.session_mcp import SessionMCP
 from aisan.statedir import (
+    StateBusyError,
     ensure_sealed_dir,
     planted_credentials,
     prepare_state_dir,
     read_sealed_object,
     read_sealed_text,
+    share_state_dir,
     write_sealed,
 )
 
@@ -212,3 +216,54 @@ def test_session_mcp_write_cannot_overwrite_a_symlink_target(tmp_path):
     assert victim.read_text() == "SECRET-HOST-CONTENT\n"
     assert not link.is_symlink()
     assert stat.S_IMODE(link.lstat().st_mode) == 0o600
+
+
+def test_sessions_sharing_a_state_dir_keep_its_links_until_the_last_leaves(tmp_path):
+    state = prepare_state_dir(tmp_path / "state")
+    with share_state_dir(state) as first:
+        with first.exclusive():
+            assert first.alone()
+        (first.links / "token").write_text("t")
+        with share_state_dir(state) as second:
+            assert second.links == first.links
+            for lease in (first, second, first):
+                with lease.exclusive():
+                    assert not lease.alone()
+        assert (first.links / "token").read_text() == "t"
+        with first.exclusive():
+            assert first.alone()
+    assert not first.links.exists()
+
+
+def test_the_first_session_discards_links_a_killed_session_left(tmp_path):
+    state = prepare_state_dir(tmp_path / "state")
+    with share_state_dir(state) as lease:
+        links = lease.links
+    links.mkdir()
+    (links / "token").write_text("stale")
+    with share_state_dir(state) as lease:
+        assert list(lease.links.iterdir()) == []
+
+
+def test_state_dirs_do_not_share_links(tmp_path):
+    a = prepare_state_dir(tmp_path / "a")
+    b = prepare_state_dir(tmp_path / "b")
+    with share_state_dir(a) as first, share_state_dir(b) as second:
+        assert first.links != second.links
+        with first.exclusive():
+            assert first.alone()
+
+
+def test_an_exclusive_holder_of_the_membership_lock_refuses_the_join(tmp_path):
+    state = prepare_state_dir(tmp_path / "state")
+    with share_state_dir(state) as lease:
+        lock = lease.links.with_name(
+            lease.links.name.replace("links-", "state-") + ".lock"
+        )
+    fd = os.open(lock, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with pytest.raises(StateBusyError, match="older aisan"), share_state_dir(state):
+            pass
+    finally:
+        os.close(fd)

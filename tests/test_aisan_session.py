@@ -470,7 +470,7 @@ async def test_the_run_path_routes_an_assembly_refusal_to_return_2(
 ):
 
     class _RefusingBox:
-        def __init__(self, spec, *, box_id):
+        def __init__(self, spec, *, box_id, lease=None):
             self.spec = spec
 
         async def __aenter__(self):
@@ -504,7 +504,7 @@ async def test_the_run_path_normalizes_a_signal_death_to_shell_status(
 ):
 
     class _Box:
-        def __init__(self, spec, *, box_id):
+        def __init__(self, spec, *, box_id, lease=None):
             self.spec = spec
             self.env = {}
 
@@ -557,7 +557,7 @@ async def test_a_credential_written_inside_a_box_refuses_the_next_launch(
     started = False
 
     class _Box:
-        def __init__(self, spec, *, box_id):
+        def __init__(self, spec, *, box_id, lease=None):
             self.spec = spec
             self.env = {}
 

@@ -196,9 +196,11 @@ separate integrations.
   and `securityd` inside the box (the opt-in `security-server` grant permits
   `SecurityServer` alone). Because Seatbelt stages read-only
   `PinnedSymlink` placeholders inside the per-repository state directory rather
-  than a private mount namespace, macOS enforces one active session at a time
-  per `(client, repository)` via a host lock under `private_root()` (use a
-  separate Git worktree for concurrent sessions; `--explain` remains lock-free).
+  than a private mount namespace, concurrent macOS sessions of one
+  `(client, repository)` share those placeholders, including the placeholder
+  login: such sessions use one proxy token, so each can reach the others'
+  proxies. A host lock under `private_root()` tracks the sessions, and the last
+  one to exit removes the placeholders.
   Harnesses that run an in-box local server (`aisan agy` and `aisan opencode`)
   print a stderr launch warning on macOS because permitting `localhost:*` TCP
   also makes unauthenticated host loopback TCP services reachable. Linux-specific

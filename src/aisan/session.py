@@ -40,10 +40,10 @@ from .session_mcp import MCPAllowlist, SessionMCP, _shared_roots, mcp_ro_binds
 from .spec import SECURITY_SERVER, BoxSpec, Grant
 from .statedir import (
     StateBusyError,
-    is_state_dir_locked,
-    lock_state_dir,
+    StateLease,
     planted_credentials,
     prepare_state_dir,
+    share_state_dir,
     write_sealed,
 )
 from .upstream import Transport
@@ -585,11 +585,12 @@ async def run_interactive(
                 ", ".join(map(str, flags.files)) if flags.files else "(none)",
             ),
         )
-        locked = is_darwin and isinstance(spec, BoxSpec) and is_state_dir_locked(state)
-        state_guard = contextlib.nullcontext() if locked else staged_directory(state)
-        box = Box(spec, box_id=box_id(client, repo))
         try:
-            with state_guard, box.staged(stage_symlinks=not locked):
+            with (
+                staged_directory(state),
+                _state_lease(state) as lease,
+                Box(spec, box_id=box_id(client, repo), lease=lease).staged() as box,
+            ):
                 print(
                     explain(
                         box,
@@ -605,6 +606,7 @@ async def run_interactive(
             FileNotFoundError,
             FileExistsError,
             NotADirectoryError,
+            StateBusyError,
         ) as exc:
             print(f"\n== BOX ASSEMBLY REFUSED ==\n  {exc}\n", end="")
             return 2
@@ -617,8 +619,6 @@ async def run_interactive(
             file=sys.stderr,
         )
         return 2
-    box = Box(spec, box_id=box_id(client, repo))
-
     # A credential planted in persistent state would enter every later box read-write.
     planted = planted_credentials(
         state,
@@ -638,13 +638,12 @@ async def run_interactive(
         )
         return 2
 
-    state_ctx = lock_state_dir(state) if is_darwin else contextlib.nullcontext()
     try:
-        with state_ctx:
-            prepare_state_dir(state)
+        prepare_state_dir(state)
+        with _state_lease(state) as lease:
             if prepare is not None:
                 prepare()
-            async with box:
+            async with Box(spec, box_id=box_id(client, repo), lease=lease) as box:
                 if not box.spec.unshare_net:
                     print(
                         "WARNING: box shares host networking: internet, LAN/VPN, and"
@@ -683,6 +682,13 @@ async def run_interactive(
         # Bind sources can disappear and mount resolution can still fail after preflight.
         print(f"refused: {e}", file=sys.stderr)
         return 2
+
+
+def _state_lease(state: Path) -> contextlib.AbstractContextManager[StateLease | None]:
+    """Join the sessions sharing `state` where a box's links are host symlinks."""
+    if host_platform() == "darwin":
+        return share_state_dir(state)
+    return contextlib.nullcontext()
 
 
 @contextmanager

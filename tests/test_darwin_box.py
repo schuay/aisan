@@ -17,11 +17,12 @@ from conftest import needs_seatbelt
 
 from aisan import Box
 from aisan.egress.anthropic import AnthropicBackend
-from aisan.egress.antigravity import AntigravityBackend
+from aisan.egress.antigravity import USER_INFO_URL_ENV, AntigravityBackend
 from aisan.egress.antigravity_keyring import (
     KeyringError,
     read_macos_keychain,
 )
+from aisan.egress.base import PLACEHOLDER_KEY
 from aisan.egress.claude_plan import PlanCredential, _keychain_service
 from aisan.egress.openai_responses import CodexBackend
 from aisan.presets.antigravity import TOKEN_FILE, antigravity
@@ -33,9 +34,19 @@ from aisan.proxy.antigravity import Profile as AgyProfile
 from aisan.runtime import profile_path, scratch_dir
 from aisan.sandbox import RO, RW, Bind, PinnedSymlink
 from aisan.seatbelt import SeatbeltSandbox, seatbelt_path
-from aisan.session import darwin_executable_grant, git_config_binds, git_config_env
+from aisan.session import (
+    darwin_executable_grant,
+    git_config_binds,
+    git_config_env,
+    state_dir,
+)
 from aisan.spec import BoxSpec
-from aisan.statedir import StateBusyError, lock_state_dir, planted_credentials
+from aisan.statedir import (
+    StateLease,
+    planted_credentials,
+    prepare_state_dir,
+    share_state_dir,
+)
 
 
 def _claude_cred(path: Path, bearer: str = "real-oauth-for-test") -> Path:
@@ -524,11 +535,7 @@ def test_darwin_git_config_binds_wires_git_config_global_and_ignores_submodules(
 
 
 @needs_seatbelt
-def test_state_lock_blocks_concurrent_sessions_while_explain_preserves_live_symlinks(
-    tmp_path,
-):
-    from aisan.session import state_dir
-
+def test_an_uncontested_explain_leaves_no_state_behind(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     fake_home = tmp_path / "home"
@@ -548,39 +555,98 @@ def test_state_lock_blocks_concurrent_sessions_while_explain_preserves_live_syml
     assert "localhost TCP + pinned endpoints" in res.stdout
     assert not (fake_home / ".cache").exists()
 
-    # Simulate a live session holding `lock_state_dir(state)` with a staged token symlink.
-    st = state_dir("antigravity", repo, home=fake_home)
-    live_proxy_dir = tmp_path / "proxy-live-other"
-    live_proxy_dir.mkdir()
-    live_tok_target = live_proxy_dir / "live-token.json"
-    live_tok_target.write_text("{}")
-    with lock_state_dir(st):
-        # Lock file MUST live under private_root(), never inside writable `state`!
-        assert not (st / ".aisan.lock").exists()
-        # Second lock attempt raises StateBusyError.
-        with (
-            pytest.raises(StateBusyError, match="already running"),
-            lock_state_dir(st),
-        ):
-            pass
-        tok_link = st / TOKEN_FILE
-        tok_link.parent.mkdir(parents=True, exist_ok=True)
-        tok_link.symlink_to(live_tok_target)
 
-        # Running `--explain` in another process while `st` is locked succeeds,
-        # leaves `tok_link` intact, and does NOT leak `proxy-live-other`!
-        res_locked = subprocess.run(
-            [sys.executable, "-m", "aisan.cli.main", "agy", "--explain", str(repo)],
-            env=env,
+@needs_seatbelt
+async def test_concurrent_sessions_share_a_state_dir(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    state = prepare_state_dir(state_dir("antigravity", repo, home=fake_home))
+    token_link = state / TOKEN_FILE
+
+    async def upstream(request: web.Request) -> web.Response:
+        return web.json_response({"ok": True})
+
+    up_url, _, runner = await _fake_upstream(upstream)
+
+    class _FakeAgyCred:
+        files = (tmp_path / "agy-secret.json",)
+
+        async def token(self) -> str:
+            return "agy-real-token"
+
+        async def check(self, backend: str) -> None:
+            return None
+
+    def session(n: int, lease: StateLease) -> Box:
+        backend = AntigravityBackend(
+            credential=_FakeAgyCred(),
+            profile=AgyProfile(upstream=up_url),
+            token_file=token_link,
+        )
+        spec = antigravity(repo, state=state, egress=(backend,), unshare_net=True)
+        return Box(spec, box_id=f"darwin-shared-{n}", lease=lease)
+
+    # Each box presents the token at the fixed client path to its own proxy.
+    probe = (
+        "import json, os, urllib.request\n"
+        f"tok = json.load(open({str(token_link)!r}))['token']['access_token']\n"
+        f"req = urllib.request.Request(os.environ[{USER_INFO_URL_ENV!r}],"
+        " headers={'Authorization': 'Bearer ' + tok})\n"
+        "urllib.request.urlopen(req, timeout=5).read()\n"
+        "print('TOKEN=' + tok)\n"
+    )
+
+    async def token_seen_in(box: Box) -> str:
+        res = await asyncio.to_thread(
+            subprocess.run,
+            box.command([sys.executable, "-c", probe]),
+            env={**os.environ, **box.env},
             capture_output=True,
             text=True,
+            timeout=15,
             check=False,
         )
-        assert res_locked.returncode == 0, res_locked.stderr
-        assert str(st) in res_locked.stdout
-        assert "proxy-live-other" not in res_locked.stdout
-        assert tok_link.is_symlink()
-        assert Path(os.readlink(tok_link)) == live_tok_target
+        assert res.returncode == 0, res.stderr
+        return res.stdout.strip().removeprefix("TOKEN=")
+
+    try:
+        with share_state_dir(state) as first:
+            links = first.links
+            async with session(1, first) as box1:
+                token = await token_seen_in(box1)
+                assert token != PLACEHOLDER_KEY
+                with share_state_dir(state) as second:
+                    async with session(2, second) as box2:
+                        assert await token_seen_in(box2) == token
+                        assert await token_seen_in(box1) == token
+                # The first session still reads through the shared link.
+                assert Path(os.readlink(token_link)).parent == links
+                assert await token_seen_in(box1) == token
+
+                # `--explain` joins and leaves without disturbing it.
+                res = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "aisan.cli.main",
+                        "agy",
+                        "--explain",
+                        str(repo),
+                    ],
+                    env={**os.environ, "HOME": str(fake_home)},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                assert res.returncode == 0, res.stderr
+                assert str(state) in res.stdout
+                assert await token_seen_in(box1) == token
+            assert not os.path.lexists(token_link)
+        assert not links.exists()
+    finally:
+        await runner.cleanup()
 
 
 # --- Live Darwin `Box` + authenticated host-loopback proxy round-trip ---

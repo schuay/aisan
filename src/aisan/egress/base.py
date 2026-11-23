@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..sandbox import BindSpec, paths_overlap
+from ..statedir import StateLease, read_sealed_text, write_sealed
 from ..upstream import DIRECT, Transport
 
 
@@ -62,6 +63,9 @@ class BackendActivation:
     client_env: dict[str, str]
 
 
+_PROXY_TOKEN_NAME = "proxy-token"  # noqa: S105 -- a file name
+
+
 def shared_proxy_token() -> str:
     """Create a proxy token with Claude Code's accepted key suffix."""
     return secrets.token_urlsafe(32) + PLACEHOLDER_KEY[-20:]
@@ -86,6 +90,32 @@ class Backend(abc.ABC):
     supports_direct_unix_socket: bool = False
     #: How the host service reaches its upstream.
     transport: Transport = DIRECT
+    #: Set by a `Box` whose state directory concurrent sessions share.
+    lease: StateLease | None = None
+
+    def client_file(self, runtime_dir: Path, name: str) -> Path:
+        """Return the source of a file published at a fixed client path.
+
+        Sessions sharing a state directory publish one file between them.
+        """
+        return (runtime_dir if self.lease is None else self.lease.links) / name
+
+    def proxy_token(self) -> tuple[str, bool]:
+        """Return the `serve_shared` client token and whether it is new.
+
+        A client file can hold one token, so sessions sharing a state
+        directory share the token of the first. Call inside
+        `StateLease.exclusive`.
+        """
+        if self.lease is None:
+            return shared_proxy_token(), True
+        path = self.lease.links / _PROXY_TOKEN_NAME
+        token = read_sealed_text(path)
+        if token:
+            return token, False
+        token = shared_proxy_token()
+        write_sealed(path, token)
+        return token, True
 
     def socket_path(self, runtime_dir: Path) -> Path:
         """Return this backend's socket path in the runtime directory.
