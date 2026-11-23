@@ -11,7 +11,8 @@ host agy.
 
 The host's ``~/.gemini`` is not mounted. The box starts past agy's first-run
 screens with this repository trusted, and the host's model choice and global
-rules files are copied into the box's state on every launch.
+rules files are copied into the box's state on every launch. Host MCP servers
+named in a bind spec are imported into the box's ``config/mcp_config.json``.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from aisan.egress.antigravity import AntigravityBackend
@@ -29,6 +31,7 @@ from aisan.session import (
     git_config_binds,
     git_config_env,
     interactive_parser,
+    mcp_launcher_binds,
     mirror_user_memory,
     parse_interactive_args,
     resolve_launcher_flags,
@@ -37,6 +40,7 @@ from aisan.session import (
     terminal_env,
     upstream_transport,
 )
+from aisan.session_mcp import SessionMCP, antigravity_host_mcp, mcp_search_path
 from aisan.statedir import ensure_sealed_dir, read_sealed_object, write_sealed
 
 HOST_SETTINGS = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
@@ -99,6 +103,21 @@ def seed_state(state: Path, repo: Path, seed: dict[str, object]) -> None:
     write_sealed(path, json.dumps(settings, indent=2))
 
 
+def write_host_mcp(mcp: SessionMCP, state: Path) -> None:
+    """Write the imported MCP servers to the config agy reads in the box.
+
+    agy has no flag for a separate MCP config, so the import goes into the
+    box's own file and owns ``mcpServers`` outright. It is written even when
+    nothing is selected, so a server imported by an earlier launch does not
+    start in one whose specs no longer name it. Other keys stay.
+    """
+    config = state / "config"
+    ensure_sealed_dir(config)
+    path = config / "mcp_config.json"
+    document = {**read_sealed_object(path), **mcp.document}
+    replace(mcp, document=document).write(path)
+
+
 def parse_args(argv: list[str]):
     return parse_interactive_args(interactive_parser("aisan agy", "agy"), argv)
 
@@ -124,11 +143,18 @@ async def _main(argv: list[str]) -> int:
     except LaunchRefused as e:
         print(e, file=sys.stderr)
         return e.code
+    # The bind specs decide which host declarations this box may start.
+    mcp = antigravity_host_mcp(allow=flags.mcp)
     spec = antigravity(
         repo,
         state=state,
         egress=(backend,),
-        extra_env=terminal_env(),
+        extra_ro=mcp_launcher_binds(mcp),
+        extra_env=(
+            # Include mounted home launchers when MCP is enabled.
+            ("PATH", mcp_search_path(local_bin=mcp.enabled)),
+            *terminal_env(),
+        ),
         unshare_net=not args.net,
     )
     # Bind the XDG-aware Git config file without its credential directory.
@@ -138,6 +164,7 @@ async def _main(argv: list[str]) -> int:
         for source in USER_MEMORY:
             seed_user_memory(state, source)
         seed_state(state, repo, host_settings(HOST_SETTINGS))
+        write_host_mcp(mcp, state)
 
     return await run_interactive(
         client="antigravity",
@@ -151,6 +178,7 @@ async def _main(argv: list[str]) -> int:
         flags=flags,
         explain_only=args.explain,
         prepare=prepare,
+        mcp=mcp,
     )
 
 

@@ -19,6 +19,7 @@ from aisan.session import LaunchRefused, mcp_launcher_binds, mcp_notice
 from aisan.session_mcp import (
     MCPAllowlist,
     SessionMCP,
+    antigravity_host_mcp,
     claude_host_mcp,
     codex_host_mcp,
     mcp_ro_binds,
@@ -117,6 +118,46 @@ def test_opencode_import_parses_jsonc_and_keeps_only_local_servers(
             "local": {
                 "type": "local",
                 "command": ["local-mcp", "--one"],
+            }
+        }
+    }
+
+
+def test_antigravity_import_parses_jsonc_and_keeps_only_enabled_stdio_servers(
+    tmp_path,
+):
+    source = tmp_path / "mcp_config.json"
+    source.write_text(
+        """
+        {
+          // Shapes written by agy 1.5.11 `mcp add` and `mcp disable`.
+          "mcpServers": {
+            "local": {
+              "command": "local-mcp",
+              "args": ["--one"],
+              "disabled": false,
+              "env": {"K": "v"},
+            },
+            "off": {"command": "off-mcp", "disabled": true},
+            "remote": {"disabled": false, "serverUrl": "https://example.test/mcp"},
+            // agy lists this one as http.
+            "both": {"command": "both-mcp", "url": "https://example.test/mcp"},
+          },
+        }
+        """
+    )
+
+    imported = antigravity_host_mcp(source, allow=ANY)
+
+    assert imported.commands == ("local-mcp",)
+    assert imported.env_names == ("local",)
+    assert imported.document == {
+        "mcpServers": {
+            "local": {
+                "command": "local-mcp",
+                "args": ["--one"],
+                "disabled": False,
+                "env": {"K": "v"},
             }
         }
     }
@@ -552,11 +593,14 @@ def test_the_wildcard_admits_every_local_declaration_in_each_client(
     opencode.write_text(
         json.dumps({"mcp": {"a": {"type": "local", "command": ["a-mcp"]}}})
     )
+    antigravity = tmp_path / "mcp_config.json"
+    antigravity.write_text(json.dumps({"mcpServers": {"a": {"command": "a-mcp"}}}))
 
     for imported in (
         claude_host_mcp(claude, allow=ANY),
         codex_host_mcp(codex, allow=ANY),
         opencode_host_mcp(opencode, allow=ANY),
+        antigravity_host_mcp(antigravity, allow=ANY),
     ):
         assert imported.names == ("a",)
         assert imported.withheld == ()
@@ -564,6 +608,7 @@ def test_the_wildcard_admits_every_local_declaration_in_each_client(
         claude_host_mcp(claude),
         codex_host_mcp(codex),
         opencode_host_mcp(opencode),
+        antigravity_host_mcp(antigravity),
     ):
         assert denied.names == ()
         assert denied.withheld == (("a", "a-mcp"),)

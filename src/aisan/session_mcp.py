@@ -30,6 +30,7 @@ from .egress import known_credential_paths
 from .egress.base import credential_overlap
 from .egress.claude_plan import claude_config_dir
 from .launch import interpreter_roots
+from .opencode_config import _strip_jsonc
 from .opencode_config import config_file as _opencode_config_file
 from .opencode_config import read_config as _read_jsonc
 from .sandbox import DARWIN_DEFAULT_BINS, host_platform
@@ -247,6 +248,36 @@ def opencode_host_mcp(
     )
 
 
+def antigravity_host_mcp(
+    path: Path | None = None, *, allow: MCPAllowlist = DENY_ALL
+) -> SessionMCP:
+    source = path or antigravity_config_file()
+    # agy accepts comments and trailing commas in this file.
+    data = _read_json(source, jsonc=True)
+    servers = _table(data.get("mcpServers"), source, "mcpServers")
+    # agy treats a declaration with a URL as remote even when it also names a
+    # command, and ignores ``type``.
+    local = {
+        name: server
+        for name, server in servers.items()
+        if isinstance(server.get("command"), str)
+        and "url" not in server
+        and "serverUrl" not in server
+        and server.get("disabled", False) is not True
+    }
+    commands = {name: str(server["command"]) for name, server in local.items()}
+    kept, withheld, unmatched = _select(local, commands, allow)
+    return SessionMCP(
+        document={"mcpServers": kept},
+        commands=tuple(commands[name] for name in kept),
+        kind="json",
+        names=tuple(kept),
+        env_names=_env_names(kept, "env"),
+        withheld=withheld,
+        unmatched=unmatched,
+    )
+
+
 def _env_names(
     servers: dict[str, dict[str, object]], key: Literal["env", "environment"]
 ) -> tuple[str, ...]:
@@ -366,6 +397,11 @@ def claude_config_file() -> Path:
     return (claude_config_dir() or Path.home()) / ".claude.json"
 
 
+def antigravity_config_file() -> Path:
+    """Return the host agy ``mcp_config.json`` path."""
+    return Path.home() / ".gemini" / "config" / "mcp_config.json"
+
+
 def _read_toml(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -379,11 +415,12 @@ def _read_toml(path: Path) -> dict[str, object]:
     return data
 
 
-def _read_json(path: Path) -> dict[str, object]:
+def _read_json(path: Path, *, jsonc: bool = False) -> dict[str, object]:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
+        text = path.read_text()
+        data = json.loads(_strip_jsonc(text) if jsonc else text)
     except json.JSONDecodeError as error:
         raise ValueError(f"host MCP config {path} is not valid JSON") from error
     if not isinstance(data, dict):

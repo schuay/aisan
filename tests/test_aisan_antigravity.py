@@ -507,6 +507,61 @@ def test_seeding_writes_nothing_through_links_planted_in_the_state(tmp_path):
     assert not (app / "settings.json").is_symlink()
 
 
+def _agy_mcp(servers: dict[str, dict[str, object]]):
+    from aisan.session_mcp import SessionMCP
+
+    return SessionMCP(
+        document={"mcpServers": servers},
+        commands=tuple(str(server["command"]) for server in servers.values()),
+        kind="json",
+        names=tuple(servers),
+    )
+
+
+def test_host_mcp_replaces_the_boxs_servers_and_keeps_other_keys(tmp_path):
+    from aisan.cli.antigravity import write_host_mcp
+
+    state = tmp_path / "state"
+    (state / "config").mkdir(parents=True)
+    path = state / "config" / "mcp_config.json"
+    path.write_text(
+        json.dumps({"other": 1, "mcpServers": {"stale": {"command": "gone"}}})
+    )
+
+    write_host_mcp(_agy_mcp({"fresh": {"command": "/usr/bin/tool"}}), state)
+    assert json.loads(path.read_text()) == {
+        "other": 1,
+        "mcpServers": {"fresh": {"command": "/usr/bin/tool"}},
+    }
+
+    # A launch that selects nothing clears an earlier import.
+    write_host_mcp(_agy_mcp({}), state)
+    assert json.loads(path.read_text()) == {"other": 1, "mcpServers": {}}
+
+
+def test_host_mcp_writes_nothing_through_links_planted_in_the_state(tmp_path):
+    from aisan.cli.antigravity import write_host_mcp
+
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    target = tmp_path / "target.json"
+    target.write_text("host file")
+    state = tmp_path / "state"
+    state.mkdir()
+    mcp = _agy_mcp({"fresh": {"command": "/usr/bin/tool"}})
+
+    (state / "config").symlink_to(victim)
+    write_host_mcp(mcp, state)
+    assert list(victim.iterdir()) == []
+
+    path = state / "config" / "mcp_config.json"
+    path.unlink()
+    path.symlink_to(target)
+    write_host_mcp(mcp, state)
+    assert target.read_text() == "host file"
+    assert not path.is_symlink()
+
+
 # The proxy policy, the token file, ``CLOUD_CODE_URL`` and ``--gemini_dir``
 # were measured against this version. On another, re-measure before trusting
 # a pass.
@@ -547,6 +602,29 @@ async def _run_agy(tmp_path: Path, backend_for, *payload: str):
         )
     assert (state / TOKEN_FILE).read_bytes() == b""
     return result
+
+
+@pytest.mark.live
+@pytest.mark.skipif(agy_binary() is None, reason="agy is not installed")
+def test_real_agy_reads_the_imported_mcp_servers(tmp_path):
+    from aisan.cli.antigravity import write_host_mcp
+
+    assert _agy_version() == AGY_VERSION
+    state = tmp_path / "state"
+    state.mkdir()
+    write_host_mcp(_agy_mcp({"local": {"command": "local-mcp"}}), state)
+
+    result = subprocess.run(
+        ["agy", "--gemini_dir", str(state), "mcp", "list"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    rows = [line.split() for line in result.stdout.splitlines()[1:]]
+    assert rows == [["local", "stdio", "enabled", "local-mcp"]]
 
 
 @pytest.mark.live
