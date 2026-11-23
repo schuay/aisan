@@ -15,7 +15,7 @@ from aisan.presets.claude_code import claude_code
 from aisan.presets.codex import codex
 from aisan.presets.depot_tools_job import depot_tools_grant, depot_tools_job
 from aisan.presets.opencode import opencode
-from aisan.sandbox import RO, RW, Bind, Overlay, Seal
+from aisan.sandbox import RO, RW, Bind, EnsurePath, Overlay, Seal
 from aisan.spec import Grant
 
 depot_tools_job_module = importlib.import_module("aisan.presets.depot_tools_job")
@@ -370,6 +370,44 @@ async def test_a_job_cannot_plant_a_worktree_config_end_to_end(tmp_path):
     assert out.count("Read-only file system") >= 2
 
 
+@needs_bwrap
+@pytest.mark.parametrize("preexisting", [False, True])
+async def test_git_cl_can_save_its_description_backup_end_to_end(
+    tmp_path, monkeypatch, preexisting
+):
+    """`git cl upload` writes the backup before every push and aborts when it
+    cannot. The rest of the depot_tools tree stays read-only."""
+    import dataclasses
+
+    monkeypatch.setattr(
+        depot_tools_job_module, "_vpython_cache", lambda **_: tmp_path / "nope"
+    )
+    _, wt = _fake_checkout(tmp_path)
+    depot_tools = tmp_path / "depot_tools"
+    depot_tools.mkdir()
+    backup = depot_tools / ".git_cl_description_backup"
+    if preexisting:
+        backup.write_text("older description\n")
+
+    spec = depot_tools_job(wt, depot_tools=depot_tools)
+    spec = dataclasses.replace(
+        spec, limits=dataclasses.replace(spec.limits, use_cgroup=False)
+    )
+    box = Box(spec, box_id="backup-test")
+
+    with box.staged():
+        out = await run_boxed(
+            f"printf 'new description\\n' > {backup} && echo wrote_backup; "
+            f"touch {depot_tools}/planted 2>&1",
+            sandbox=_WrapperOnly(box),
+        )
+        assert backup.read_text() == "new description\n"
+    assert "wrote_backup" in out
+    assert "Read-only file system" in out
+    assert not (depot_tools / "planted").exists()
+    assert backup.exists() == preexisting
+
+
 class _WrapperOnly:
     def __init__(self, box) -> None:
         self._box = box
@@ -616,6 +654,9 @@ def test_the_depot_tools_grant_is_the_tree_its_cache_its_path_and_its_env(
 
     assert Overlay(cache) in grant.binds
     assert Bind(depot_tools, RO, optional=True) in grant.binds
+    backup = depot_tools / ".git_cl_description_backup"
+    assert Bind(backup, RW) in grant.binds
+    assert grant.ensure == (EnsurePath(backup, is_dir=False),)
     assert grant.path == (depot_tools,)
     assert dict(grant.env)["DEPOT_TOOLS_UPDATE"] == "0"
     assert dict(grant.env)["PRESUBMIT_SKIP_NETWORK"] == "1"

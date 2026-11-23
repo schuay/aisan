@@ -20,6 +20,7 @@
   [..] ro      * <AISAN PREFIX>
   [..] ro      * <AISAN SRC>
   [..] ro      * <DEPOT_TOOLS>
+  [..] rw      * <DEPOT_TOOLS>/.git_cl_description_backup
   [..] rw      * <MAIN>/.git
   [..] ro-pin  * <MAIN>/.git/config
   [..] ro-pin  * <MAIN>/.git/config.worktree
@@ -120,6 +121,9 @@
   --ro-bind
   <DEPOT_TOOLS>
   <DEPOT_TOOLS>
+  --bind
+  <DEPOT_TOOLS>/.git_cl_description_backup
+  <DEPOT_TOOLS>/.git_cl_description_backup
   --bind
   <MAIN>/.git
   <MAIN>/.git

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from aisan.sandbox import RO, Bind, BindOver
+from aisan.sandbox import RO, RW, Bind, BindOver, EnsurePath
 from aisan.session import (
     LauncherFlags,
     box_id,
@@ -22,6 +22,7 @@ from aisan.session import (
     staged_directory,
     state_dir,
 )
+from aisan.spec import BoxSpec, Grant
 from aisan.upstream import CA_ENV, PROXY_ENV
 
 
@@ -676,6 +677,19 @@ def test_a_grant_brings_its_mounts_its_path_and_its_environment(tmp_path, comman
     assert path_line.strip().removeprefix("PATH=").split(os.pathsep)[0] == str(
         depot_tools
     )
+
+
+def test_a_grant_brings_the_host_files_its_binds_need(tmp_path):
+    target = tmp_path / "tool" / "state"
+    ensure = EnsurePath(target, is_dir=False)
+    grant = Grant(binds=(Bind(target, RW),), ensure=(ensure,))
+
+    base = BoxSpec(
+        root=tmp_path, binds=(), tmpfs=(), env=(), egress=(), unshare_net=True
+    )
+    spec = LauncherFlags(grants=(grant,)).apply(base)
+
+    assert ensure in spec.ensure
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "opencode"])

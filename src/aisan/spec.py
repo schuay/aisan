@@ -97,11 +97,15 @@ class Grant:
     `env` carries requirements that mounts cannot express. For example, an
     offline tool may need an environment variable that disables its updater.
     Keep these settings with the tool's mounts so operators don't duplicate them.
+
+    `ensure` names host files that a bind in `binds` needs as its source, for a
+    writable file bind below a read-only tree that cannot create a mount point.
     """
 
     binds: tuple[BindSpec, ...] = ()
     path: tuple[Path, ...] = ()
     env: tuple[tuple[str, str], ...] = ()
+    ensure: tuple[EnsurePath, ...] = ()
     allow_local_loopback: bool = False
     mach_profiles: tuple[str, ...] = ()
 
@@ -123,6 +127,7 @@ class Grant:
             self.binds
             or self.path
             or self.env
+            or self.ensure
             or self.allow_local_loopback
             or self.mach_profiles
         )
@@ -273,6 +278,12 @@ class BoxSpec:
         if not extra:
             return self
         return replace(self, env=(*self.env, *extra))
+
+    def with_ensure(self, extra: tuple[EnsurePath, ...]) -> BoxSpec:
+        """Return this spec with `extra` ensure-paths added."""
+        if not extra:
+            return self
+        return replace(self, ensure=(*self.ensure, *extra))
 
     def with_egress(self, extra: list[Backend]) -> BoxSpec:
         """Return this spec with `extra` backends added.

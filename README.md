@@ -343,8 +343,9 @@ aisan claude /path/to/v8 --grant depot_tools
 ```
 
 The `depot_tools` grant finds the checkout through `autoninja`, confines writes
-to the vpython cache (`Overlay` on Linux; lock/stamp `WriteRegex` on macOS),
-and disables network-dependent updates, telemetry, and presubmit checks.
+to the vpython cache (`Overlay` on Linux; lock/stamp `WriteRegex` on macOS) and
+the `git cl upload` description backup in the checkout root, and disables
+network-dependent updates, telemetry, and presubmit checks.
 These environment settings require a grant because bind files contain paths
 only. Grants apply before `--binds`, so user files retain precedence.
 

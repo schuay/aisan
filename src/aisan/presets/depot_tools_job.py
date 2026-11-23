@@ -27,8 +27,10 @@ from ..gitbinds import GC_ENV, external_symlink_targets, git_binds, git_host_fil
 from ..sandbox import (
     DARWIN_DEFAULT_BINS,
     RO,
+    RW,
     Bind,
     BindSpec,
+    EnsurePath,
     Overlay,
     WriteRegex,
     host_platform,
@@ -58,6 +60,11 @@ _DEPOT_TOOLS_ENV = (
     ("DEPOT_TOOLS_UPDATE", "0"),
     ("PRESUBMIT_SKIP_NETWORK", "1"),
 )
+
+# `git cl upload` saves the CL description to this file in the depot_tools root
+# before every push and aborts when it cannot. Nothing executes it, so the box
+# may write it.
+_DESCRIPTION_BACKUP = ".git_cl_description_backup"
 
 
 def _vpython_cache(*, is_darwin: bool | None = None) -> Path:
@@ -104,9 +111,10 @@ def depot_tools_grant(
 ) -> Grant:
     """Grant access to depot_tools and its copy-on-write caches.
 
-    The grant also adds depot_tools to ``PATH`` and disables operations that
-    need network access. ``depot_tools`` overrides PATH-based discovery. Return
-    an empty grant when no checkout is available.
+    The tree is read-only except for the ``git cl`` description backup. The
+    grant also adds depot_tools to ``PATH`` and disables operations that need
+    network access. ``depot_tools`` overrides PATH-based discovery. Return an
+    empty grant when no checkout is available.
     """
     root = depot_tools if depot_tools is not None else depot_tools_root()
     if root is None:
@@ -119,13 +127,16 @@ def depot_tools_grant(
         xcode_dev = _active_xcode_dev_dir()
         if xcode_dev is not None:
             grant_env.append(("DEVELOPER_DIR", str(xcode_dev)))
+    backup = root / _DESCRIPTION_BACKUP
     return Grant(
         binds=(
             *_tool_cache_binds(is_darwin=is_darwin),
             Bind(root, RO, optional=True),
+            Bind(backup, RW),
         ),
         path=(root,),
         env=tuple(grant_env),
+        ensure=(EnsurePath(backup, is_dir=False),),
     )
 
 
@@ -242,7 +253,7 @@ def depot_tools_job(
         ),
         egress=egress,
         unshare_net=unshare_net,
-        ensure=git_host_files(worktree, pin_packs=unshare_net),
+        ensure=(*git_host_files(worktree, pin_packs=unshare_net), *grant.ensure),
         limits=Limits(
             memory_max=memory_max,
             cpu_quota=cpu_quota,
