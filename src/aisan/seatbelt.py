@@ -27,8 +27,10 @@ It preserves `aisan`'s core guarantees through five rules:
   VFS mount points provide on Linux.
 * Network isolation (`unshare_net=True`) denies `network*` and opens only the
   activated host-proxy TCP ports and Unix domain sockets (plus localhost TCP
-  when `allow_local_loopback=True`). Neither `com.apple.SecurityServer` nor
-  `com.apple.securityd.xpc` is ever permitted.
+  when `allow_local_loopback=True`). `com.apple.securityd.xpc` is never
+  permitted. `com.apple.SecurityServer` is permitted only by the
+  `security-server` Mach profile, which requires shared networking; the Keychain
+  files stay unreadable either way.
 """
 
 from __future__ import annotations
@@ -65,7 +67,7 @@ from .policy_tree import (
     resolved_path,
     validate_destination,
 )
-from .spec import _validate_mach_profiles
+from .spec import SECURITY_SERVER, _validate_mach_profiles
 
 __all__ = [
     "SeatbeltSandbox",
@@ -369,6 +371,11 @@ class SeatbeltSandbox:
                 " supported on macOS Seatbelt"
             )
         _validate_mach_profiles(self.mach_profiles)
+        if SECURITY_SERVER in self.mach_profiles and self.unshare_net:
+            raise ValueError(
+                f"mach profile {SECURITY_SERVER} requires shared networking:"
+                " it only serves TLS trust lookups"
+            )
         if self.profile_path is not None:
             validate_destination(self.profile_path)
         for sock in self.unix_sockets:
@@ -635,6 +642,8 @@ class SeatbeltSandbox:
             services.extend(("com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon"))
         if not self.unshare_net:
             services.extend(("com.apple.trustd.agent", "com.apple.dnssd.service"))
+        if SECURITY_SERVER in self.mach_profiles:
+            services.append("com.apple.SecurityServer")
         quoted = " ".join(f"(global-name {_sbpl_quote(s)})" for s in services)
         out = [f"(allow mach-lookup {quoted})"]
         if "codex-cfprefs" in self.mach_profiles:

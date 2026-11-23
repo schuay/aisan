@@ -323,6 +323,22 @@ def test_the_shared_net_profile_is_the_one_that_survives_net(tmp_path, command):
     assert "luci credential" in result.stderr
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="the grant is empty off Darwin")
+@pytest.mark.parametrize("command", ["claude", "codex", "opencode"])
+def test_the_security_server_grant_needs_the_shared_network(tmp_path, command):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    argv = [command, "--grant", "security-server", "--explain", str(repo)]
+
+    isolated = _cli(tmp_path, argv)
+    assert isolated.returncode == 2
+    assert "needs --net" in isolated.stderr
+
+    shared = _cli(tmp_path, [*argv[:3], "--net", *argv[3:]])
+    assert shared.returncode == 0, shared.stderr
+    assert '(global-name "com.apple.SecurityServer")' in shared.stdout
+
+
 @pytest.mark.parametrize("command", ["claude"])
 def test_the_two_rbe_profiles_are_mutually_exclusive(tmp_path, command):
 

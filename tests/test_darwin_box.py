@@ -293,6 +293,29 @@ def test_darwin_presets_avoid_bind_over_and_overlay_and_configure_flags(
         Box(bad_sym, box_id="bad-sym-keystore")._sandbox()
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin Keychain layout")
+def test_security_server_profile_refuses_a_system_keychain_mount(tmp_path):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    def spec(profiles):
+        return BoxSpec(
+            root=wt,
+            binds=(Bind(Path("/Library/Keychains"), RO),),
+            tmpfs=(),
+            env=(),
+            egress=(),
+            unshare_net=False,
+            mach_profiles=profiles,
+        )
+
+    Box(spec(()), box_id="syskc-plain", platform="darwin")._sandbox()
+    with pytest.raises(ValueError, match="system Keychain"):
+        Box(
+            spec(("security-server",)), box_id="syskc-secsrv", platform="darwin"
+        )._sandbox()
+
+
 def test_darwin_executable_grant_mounts_standalone_app_bundle_root(
     tmp_path, monkeypatch, force_darwin
 ):

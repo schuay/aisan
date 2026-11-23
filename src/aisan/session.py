@@ -37,7 +37,7 @@ from .sandbox import (
 )
 from .seatbelt import darwin_system_ro_roots, seatbelt_lexpath, seatbelt_path
 from .session_mcp import MCPAllowlist, SessionMCP, _shared_roots, mcp_ro_binds
-from .spec import BoxSpec, Grant
+from .spec import SECURITY_SERVER, BoxSpec, Grant
 from .statedir import (
     StateBusyError,
     is_state_dir_locked,
@@ -511,6 +511,10 @@ def resolve_launcher_flags(
                 file=sys.stderr,
             )
             continue
+        if SECURITY_SERVER in grant.mach_profiles and unshare_net:
+            raise LaunchRefused(
+                f"--grant {name} needs --net: it only serves TLS trust lookups."
+            )
         resolved.append(grant)
 
     # The credential guard needs every backend the box will carry.

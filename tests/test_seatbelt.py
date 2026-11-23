@@ -385,7 +385,49 @@ def test_exposure_and_seal_checks_catch_leaks_including_case_and_system_literals
         sb_seal_leak.render_sbpl()
 
 
-def test_security_server_and_securityd_are_never_in_rendered_sbpl(tmp_path):
+def test_security_server_profile_needs_shared_net_and_adds_one_service(tmp_path):
+    with pytest.raises(ValueError, match="requires shared networking"):
+        SeatbeltSandbox(
+            root=tmp_path, unshare_net=True, mach_profiles=("security-server",)
+        )
+    sbpl = SeatbeltSandbox(
+        root=tmp_path, unshare_net=False, mach_profiles=("security-server",)
+    ).render_sbpl()
+    assert '(global-name "com.apple.SecurityServer")' in sbpl
+    assert "securityd" not in sbpl
+    assert "Keychains" not in sbpl
+
+
+_TRUST_LOOKUP = (
+    "import ctypes, ctypes.util\n"
+    "sec = ctypes.CDLL(ctypes.util.find_library('Security'))\n"
+    "lst = ctypes.c_void_p(0)\n"
+    "print('STATUS', sec.SecKeychainCopySearchList(ctypes.byref(lst)))\n"
+)
+
+
+@needs_seatbelt
+@pytest.mark.parametrize(
+    ("profiles", "ok"), [((), False), (("security-server",), True)]
+)
+def test_live_security_server_profile_gates_keychain_search_list(
+    tmp_path, profiles, ok
+):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    sb = SeatbeltSandbox(
+        root=wt,
+        binds=_python_binds(),
+        env=_box_env(wt),
+        unshare_net=False,
+        mach_profiles=profiles,
+    )
+    res = _run_sb(sb, ["/usr/bin/python3", "-c", _TRUST_LOOKUP])
+    assert res.returncode == 0, res.stderr
+    assert ("STATUS 0\n" in res.stdout) is ok, res.stdout
+
+
+def test_security_server_and_securityd_are_absent_without_the_profile(tmp_path):
     for unshare in (True, False):
         sbpl = SeatbeltSandbox(
             root=tmp_path,

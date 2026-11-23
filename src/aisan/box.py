@@ -57,8 +57,10 @@ from .sandbox import (
     host_platform,
 )
 from .seatbelt import SeatbeltSandbox, seatbelt_path, through_darwin_system_symlink
-from .spec import BoxSpec
+from .spec import SECURITY_SERVER, BoxSpec
 from .statedir import is_runtime_symlink
+
+_SYSTEM_KEYCHAINS = Path("/Library/Keychains")
 
 
 def _rw_grant_covers(path: Path, spec: BoxSpec) -> bool:
@@ -615,6 +617,10 @@ class Box:
             from .userbinds import _refused_key_stores
 
             groups.append(("host key store", _refused_key_stores()))
+            if SECURITY_SERVER in self.spec.mach_profiles:
+                # With `securityd` reachable, a readable Keychain database is
+                # enough to query its items.
+                groups.append(("system Keychain", (_SYSTEM_KEYCHAINS,)))
         groups += [(f"{b.name} backend's credential", b.credentials) for b in egress]
         for what, paths in groups:
             hit = sandbox.exposed_path(paths)

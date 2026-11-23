@@ -193,7 +193,8 @@ separate integrations.
 - **macOS:** Built-in Seatbelt (`/usr/bin/sandbox-exec`). `aisan claude` and
   `aisan agy` read host OAuth logins from the macOS Login Keychain before
   launch (falling back to their credential files) while denying `SecurityServer`
-  and `securityd` inside the box. Because Seatbelt stages read-only
+  and `securityd` inside the box (the opt-in `security-server` grant permits
+  `SecurityServer` alone). Because Seatbelt stages read-only
   `PinnedSymlink` placeholders inside the per-repository state directory rather
   than a private mount namespace, macOS enforces one active session at a time
   per `(client, repository)` via a host lock under `private_root()` (use a
@@ -346,6 +347,14 @@ to the vpython cache (`Overlay` on Linux; lock/stamp `WriteRegex` on macOS),
 and disables network-dependent updates, telemetry, and presubmit checks.
 These environment settings require a grant because bind files contain paths
 only. Grants apply before `--binds`, so user files retain precedence.
+
+The macOS-only `security-server` grant permits Mach lookups of
+`com.apple.SecurityServer` and requires `--net`. TLS clients that read the
+system trust store through the legacy Keychain API need it; depot_tools'
+bundled Python is one, so `git cl` cannot reach Gerrit without it. It adds no
+file access. The Keychain databases stay outside the box, and a mount that
+would expose them is refused, but they are then the only barrier between the
+box and Keychain items.
 
 Runtime dependencies are limited to `aiohttp` and `h2`. The Google credential
 chain is optional. A boundary test walks the package AST and fails when a module

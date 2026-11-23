@@ -66,7 +66,10 @@ class Limits:
     use_cgroup: bool = True
 
 
-KNOWN_MACH_PROFILES = frozenset({"codex-cfprefs"})
+# The Mach profile that lets Security.framework reach `securityd`.
+SECURITY_SERVER = "security-server"
+
+KNOWN_MACH_PROFILES = frozenset({"codex-cfprefs", SECURITY_SERVER})
 
 
 def _validate_mach_profiles(profiles: tuple[str, ...]) -> None:
