@@ -142,6 +142,16 @@ _DARWIN_SYSTEM_LITERALS: tuple[Path, ...] = (
     Path("/dev/ptmx"),
 )
 
+# Opening these duplicates an already open descriptor, and only with a subset
+# of its access mode (fd(4)), so allowing writes grants nothing new. Kept as
+# raw filters: canonicalizing them would resolve to host-specific descriptors.
+_DARWIN_FD_ALIASES: tuple[str, ...] = (
+    '(literal "/dev/stdin")',
+    '(literal "/dev/stdout")',
+    '(literal "/dev/stderr")',
+    '(subpath "/dev/fd")',
+)
+
 _SYSCTL_NAMES: tuple[str, ...] = (
     "hw.activecpu",
     "hw.busfrequency_compat",
@@ -735,6 +745,7 @@ class SeatbeltSandbox:
             f'(allow file-read-metadata file-test-existence {meta_args} (regex #"^/dev/ttys[0-9]+$"))',
             f"(allow file-read* file-test-existence {sub_args} {lit_args})",
             f"(allow file-read* file-write* file-ioctl {tty_lits})",
+            f"(allow file-read* file-write* {' '.join(_DARWIN_FD_ALIASES)})",
             r'(allow file-read* file-write* file-ioctl (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))',
         ]
 

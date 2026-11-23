@@ -509,6 +509,64 @@ def test_live_confinement_clearenv_cwd_home_and_write_denial(tmp_path, monkeypat
 
 
 @needs_seatbelt
+def test_live_fd_aliases_reach_inherited_descriptors_only(tmp_path):
+    wt = tmp_path / "wt"
+    outside = tmp_path / "outside"
+    scratch = tmp_path / "scratch"
+    for d in (wt, outside, scratch):
+        d.mkdir()
+    stdin_path = outside / "stdin.txt"
+    stdin_path.write_text("from-stdin")
+    out_path = outside / "out.txt"
+    err_path = outside / "err.txt"
+
+    sb = SeatbeltSandbox(
+        root=wt,
+        binds=(*_python_binds(), Bind(scratch, RW)),
+        env=_box_env(scratch),
+        unshare_net=True,
+    )
+    code = (
+        "import errno, os\n"
+        "assert open('/dev/stdin').read() == 'from-stdin'\n"
+        "for p in ('/dev/stdout', '/dev/fd/1'):\n"
+        "    with open(p, 'w') as f:\n"
+        "        f.write(p + '\\n')\n"
+        "with open('/dev/stderr', 'w') as f:\n"
+        "    f.write('err-ok\\n')\n"
+        "for bad in [\n"
+        "    lambda: open('/dev/fd/0', 'w'),\n"
+        "    lambda: open('/dev/stdin', 'w'),\n"
+        f"    lambda: open({str(out_path)!r}, 'a'),\n"
+        "]:\n"
+        "    try:\n"
+        "        bad(); raise SystemExit('UNEXPECTED_ALLOW')\n"
+        "    except PermissionError:\n"
+        "        pass\n"
+        "try:\n"
+        "    open('/dev/fd/250', 'w'); raise SystemExit('UNEXPECTED_FD')\n"
+        "except OSError as e:\n"
+        "    assert e.errno == errno.EBADF, e\n"
+    )
+    with (
+        stdin_path.open("rb") as fin,
+        out_path.open("wb") as fout,
+        err_path.open("wb") as ferr,
+    ):
+        res = subprocess.run(
+            [*sb.wrapper(), sys.executable, "-c", code],
+            stdin=fin,
+            stdout=fout,
+            stderr=ferr,
+            timeout=15.0,
+            check=False,
+        )
+    assert res.returncode == 0, err_path.read_text()
+    assert out_path.read_text() == "/dev/stdout\n/dev/fd/1\n"
+    assert err_path.read_text() == "err-ok\n"
+
+
+@needs_seatbelt
 def test_live_ro_pin_under_rw_and_deeper_rw_hole(tmp_path):
     wt = tmp_path / "wt"
     scratch = tmp_path / "scratch"
