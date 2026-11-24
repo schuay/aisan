@@ -27,6 +27,7 @@ from .depot_tools_job import (
     v8_rbe_shared_net,
 )
 from .opencode import opencode, opencode_default
+from .samply import samply_grant
 from .security_server import security_server_grant
 
 PRESETS: dict[str, Callable[[Path], BoxSpec]] = {
@@ -47,6 +48,8 @@ EGRESS_PROFILES: dict[str, Callable[[Path], EgressProfile]] = {
 # Grants describe host tools and caches and don't depend on the box root.
 GRANTS: dict[str, Callable[[], Grant]] = {
     "depot_tools": depot_tools_grant,
+    # This grant lets Darwin boxes holding it exchange Mach ports.
+    "samply": samply_grant,
     # This grant lets a shared-network Darwin box talk to `securityd`.
     "security-server": security_server_grant,
 }
@@ -66,6 +69,7 @@ __all__ = [
     "depot_tools_job_default",
     "opencode",
     "opencode_default",
+    "samply_grant",
     "security_server_grant",
     "v8_rbe",
     "v8_rbe_shared_net",

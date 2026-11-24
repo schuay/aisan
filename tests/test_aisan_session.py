@@ -341,6 +341,24 @@ def test_the_security_server_grant_needs_the_shared_network(tmp_path, command):
     assert '(global-name "com.apple.SecurityServer")' in shared.stdout
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="the grant is empty off Darwin")
+@pytest.mark.parametrize("net", [(), ("--net",)])
+def test_the_samply_grant_adds_the_ipc_channel_prefix(tmp_path, net):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    prefix = '(global-name-prefix "org.rust-lang.ipc-channel.")'
+
+    plain = _cli(tmp_path, ["claude", *net, "--explain", str(repo)])
+    assert plain.returncode == 0, plain.stderr
+    assert prefix not in plain.stdout
+
+    granted = _cli(
+        tmp_path, ["claude", "--grant", "samply", *net, "--explain", str(repo)]
+    )
+    assert granted.returncode == 0, granted.stderr
+    assert f"(allow mach-register mach-lookup {prefix})" in granted.stdout
+
+
 @pytest.mark.parametrize("command", ["claude"])
 def test_the_two_rbe_profiles_are_mutually_exclusive(tmp_path, command):
 

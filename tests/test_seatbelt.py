@@ -398,6 +398,54 @@ def test_security_server_profile_needs_shared_net_and_adds_one_service(tmp_path)
     assert "Keychains" not in sbpl
 
 
+def test_samply_profile_opens_only_the_ipc_channel_prefix(tmp_path):
+    rule = (
+        "(allow mach-register mach-lookup"
+        ' (global-name-prefix "org.rust-lang.ipc-channel."))'
+    )
+    for unshare in (True, False):
+        plain = SeatbeltSandbox(root=tmp_path, unshare_net=unshare).render_sbpl()
+        assert "mach-register" not in plain
+        assert "ipc-channel" not in plain
+        granted = SeatbeltSandbox(
+            root=tmp_path, unshare_net=unshare, mach_profiles=("samply",)
+        ).render_sbpl()
+        assert granted.count("mach-register") == 1
+        assert rule in granted.splitlines()
+
+
+def _samply_record(target: str) -> list[str]:
+    samply = shutil.which("samply")
+    assert samply is not None
+    cmd = [samply, "record", "--save-only", "-o", "profile.json.gz", "--"]
+    return [*cmd, target, "-c", "pass"]
+
+
+@needs_seatbelt
+@pytest.mark.skipif(shutil.which("samply") is None, reason="samply not installed")
+@pytest.mark.parametrize(("profiles", "ok"), [((), False), (("samply",), True)])
+def test_live_samply_profile_gates_recording(tmp_path, profiles, ok):
+    # samply cannot record hardened binaries such as the system Python.
+    host = tmp_path / "host"
+    host.mkdir()
+    cmd = _samply_record(sys.executable)
+    if subprocess.run(cmd, cwd=host, capture_output=True, check=False).returncode:
+        pytest.skip("samply cannot record this interpreter")
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    sb = SeatbeltSandbox(
+        root=wt,
+        binds=_python_binds(),
+        env=_box_env(wt),
+        unshare_net=True,
+        mach_profiles=profiles,
+    )
+    res = _run_sb(sb, cmd, timeout=60.0)
+    assert (res.returncode == 0) is ok, res.stderr
+    assert (wt / "profile.json.gz").exists() is ok
+
+
 _TRUST_LOOKUP = (
     "import ctypes, ctypes.util\n"
     "sec = ctypes.CDLL(ctypes.util.find_library('Security'))\n"

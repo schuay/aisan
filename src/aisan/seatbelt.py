@@ -67,7 +67,7 @@ from .policy_tree import (
     resolved_path,
     validate_destination,
 )
-from .spec import SECURITY_SERVER, _validate_mach_profiles
+from .spec import SAMPLY, SECURITY_SERVER, _validate_mach_profiles
 
 __all__ = [
     "SeatbeltSandbox",
@@ -83,6 +83,8 @@ __all__ = [
 _PORT_PLACEHOLDER_RE = re.compile(r"^<PORT:[^>\x00\r\n\"]+>$")
 _DEV_TTYS_RE = re.compile(r"^/dev/ttys[0-9]+$")
 _XCODE_SELECT_LINK = Path("/private/var/db/xcode_select_link")
+# Bootstrap names of the `ipc-channel` crate's one-shot servers.
+_IPC_CHANNEL_PREFIX = "org.rust-lang.ipc-channel."
 
 # Read-only system subpaths required by dyld, POSIX utilities, and toolchains.
 _DARWIN_SYSTEM_SUBPATHS: tuple[Path, ...] = (
@@ -668,6 +670,12 @@ class SeatbeltSandbox:
             services.append("com.apple.SecurityServer")
         quoted = " ".join(f"(global-name {_sbpl_quote(s)})" for s in services)
         out = [f"(allow mach-lookup {quoted})"]
+        if SAMPLY in self.mach_profiles:
+            # The name is random per recording, so only the prefix can match.
+            out.append(
+                "(allow mach-register mach-lookup"
+                f" (global-name-prefix {_sbpl_quote(_IPC_CHANNEL_PREFIX)}))"
+            )
         if "codex-cfprefs" in self.mach_profiles:
             out.append(
                 '(allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))'

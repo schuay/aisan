@@ -69,7 +69,10 @@ class Limits:
 # The Mach profile that lets Security.framework reach `securityd`.
 SECURITY_SERVER = "security-server"
 
-KNOWN_MACH_PROFILES = frozenset({"codex-cfprefs", SECURITY_SERVER})
+# The Mach profile that lets `samply record` receive its child's task port.
+SAMPLY = "samply"
+
+KNOWN_MACH_PROFILES = frozenset({"codex-cfprefs", SAMPLY, SECURITY_SERVER})
 
 
 def _validate_mach_profiles(profiles: tuple[str, ...]) -> None:

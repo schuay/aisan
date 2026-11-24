@@ -359,6 +359,14 @@ file access. The Keychain databases stay outside the box, and a mount that
 would expose them is refused, but they are then the only barrier between the
 box and Keychain items.
 
+The macOS-only `samply` grant lets `samply record` run in the box. samply's
+launcher receives the profiled process's task port over a bootstrap service
+named `org.rust-lang.ipc-channel.<random>`; the grant permits registering and
+looking up names with that prefix. It adds no file access and works without
+`--net`. The prefix is shared by the login session, so two boxes that both hold
+the grant can agree on a name and exchange Mach ports, file descriptors
+included. Grant it to profiling sessions only.
+
 Runtime dependencies are limited to `aiohttp` and `h2`. The Google credential
 chain is optional. A boundary test walks the package AST and fails when a module
 imports an undeclared third-party dependency.
