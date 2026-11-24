@@ -24,7 +24,7 @@ from .box import Box
 from .egress import known_credential_paths
 from .egress.base import Backend, EgressProfile, PreflightError, credential_overlap
 from .explain import assembly_refusal, explain
-from .launch import exit_status, interpreter_roots
+from .launch import exit_status, interpreter_roots, link_target
 from .presets import EGRESS_PROFILES, GRANTS
 from .private import private_root
 from .sandbox import (
@@ -155,8 +155,7 @@ def _symlink_hops(entry: Path) -> list[Path]:
                 break
             seen.add(p)
             hops.append(p)
-            target = Path(os.readlink(p))
-            p = target if target.is_absolute() else (p.parent / target)
+            p = link_target(p)
         except OSError:
             break
     return hops

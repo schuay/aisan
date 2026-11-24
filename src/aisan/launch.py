@@ -40,6 +40,20 @@ from .seatbelt import darwin_system_ro_roots, through_darwin_system_symlink
 _FORWARD = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 
 
+def link_target(link: Path) -> Path:
+    """Return the path a symlink names, with any ``..`` already applied.
+
+    The kernel applies ``..`` to the directory the preceding components resolve
+    to, so removing it lexically would name a different path whenever one of
+    them is a symlink. Components that precede no ``..`` keep their spelling.
+    """
+    target = Path(os.readlink(link))
+    path = Path(target.anchor) if target.is_absolute() else link.parent
+    for part in target.parts[1:] if target.is_absolute() else target.parts:
+        path = path.resolve().parent if part == ".." else path / part
+    return path
+
+
 def interpreter_roots(python: Path) -> list[Path]:
     """Return every root traversed by an interpreter symlink chain.
 
@@ -69,8 +83,7 @@ def interpreter_roots(python: Path) -> list[Path]:
                 # Resolve directory symlinks that weren't visible as file links.
                 add(p.resolve().parents[1] if len(p.parents) >= 2 else p.resolve())
                 break
-            target = Path(os.readlink(p))
-            p = target if target.is_absolute() else (p.parent / target)
+            p = link_target(p)
         except OSError:
             break
     return roots
@@ -101,8 +114,7 @@ def interpreter_chain_dirs(python: Path) -> list[Path]:
                 dirs.append(p.parent)
             if not p.is_symlink():
                 break
-            target = Path(os.readlink(p))
-            p = target if target.is_absolute() else (p.parent / target)
+            p = link_target(p)
         except OSError:
             break
     return dirs

@@ -284,6 +284,30 @@ def test_interpreter_roots_walks_a_symlink_chain(tmp_path):
     assert tmp_path / "cpython-3.12.12" in roots
 
 
+def test_interpreter_chain_resolves_parent_traversal_in_a_link(tmp_path):
+    # Homebrew: opt/python -> ../Cellar/python/3.15, whose bin/python3 is
+    # ../Frameworks/Versions/3.15/bin/python3. The kernel applies that `..` to
+    # the Cellar directory, not to the opt alias.
+    cellar = tmp_path / "Cellar" / "python" / "3.15"
+    framework = cellar / "Frameworks" / "Versions" / "3.15"
+    (framework / "bin").mkdir(parents=True)
+    (framework / "bin" / "python3").write_text("#!/bin/true\n")
+    (cellar / "bin").mkdir()
+    (cellar / "bin" / "python3").symlink_to("../Frameworks/Versions/3.15/bin/python3")
+    opt = tmp_path / "opt"
+    opt.mkdir()
+    (opt / "python").symlink_to("../Cellar/python/3.15")
+    venv = tmp_path / "venv" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").symlink_to(opt / "python" / "bin" / "python3")
+
+    roots = interpreter_roots(venv / "python")
+    dirs = interpreter_chain_dirs(venv / "python")
+    assert framework in roots
+    assert framework / "bin" in dirs
+    assert not any(".." in p.parts for p in (*roots, *dirs))
+
+
 def test_an_empty_manifest_still_runs_the_payload(tmp_path):
 
     write_manifest(tmp_path, [])
