@@ -73,6 +73,7 @@ __all__ = [
     "SeatbeltSandbox",
     "darwin_controlling_ttys",
     "darwin_selected_xcode_app",
+    "darwin_surface_covers",
     "darwin_system_ro_roots",
     "seatbelt_lexpath",
     "seatbelt_path",
@@ -332,6 +333,17 @@ def _active_system_subpaths() -> tuple[Path, ...]:
 def darwin_system_ro_roots() -> frozenset[Path]:
     """Return identity-mounted Darwin system roots that need no duplicate bind."""
     return frozenset(_canonical_path(p) for p in _active_system_subpaths())
+
+
+def darwin_surface_covers(path: Path, roots: frozenset[Path] | None = None) -> bool:
+    """Return whether the fixed Darwin system surface already exposes `path`.
+
+    A symlink is judged by its own location: reading the link needs only that,
+    and its target is a separate path with its own answer.
+    """
+    sys_roots = darwin_system_ro_roots() if roots is None else roots
+    canon = Path(seatbelt_lexpath(path) if path.is_symlink() else seatbelt_path(path))
+    return any(canon.is_relative_to(r) for r in sys_roots)
 
 
 def _surface_entries(norm: Callable[[Path], Path]) -> tuple[Entry, ...]:

@@ -35,7 +35,12 @@ from .sandbox import (
     BindSpec,
     host_platform,
 )
-from .seatbelt import darwin_system_ro_roots, seatbelt_lexpath, seatbelt_path
+from .seatbelt import (
+    darwin_surface_covers,
+    darwin_system_ro_roots,
+    seatbelt_lexpath,
+    seatbelt_path,
+)
 from .session_mcp import MCPAllowlist, SessionMCP, _shared_roots, mcp_ro_binds
 from .spec import SECURITY_SERVER, BoxSpec, Grant
 from .statedir import (
@@ -205,10 +210,7 @@ def darwin_executable_grant(
     shared = _shared_roots(Path.home().resolve())
 
     def covered_by_surface(target: Path) -> bool:
-        canon = Path(
-            seatbelt_lexpath(target) if target.is_symlink() else seatbelt_path(target)
-        )
-        return any(canon == r or canon.is_relative_to(r) for r in sys_roots)
+        return darwin_surface_covers(target, sys_roots)
 
     refused_stores = (
         *known_credential_paths(),

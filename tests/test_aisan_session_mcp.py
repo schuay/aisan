@@ -187,6 +187,37 @@ def test_mcp_binds_chase_a_uv_tool_launcher_and_python(tmp_path, monkeypatch):
     )
 
 
+def test_mcp_binds_omit_an_interpreter_the_darwin_surface_exposes(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    shim_dir = home / ".local" / "bin"
+    tool = home / "venvs" / "local-mcp"
+    brew = tmp_path / "brew"
+    cellar = brew / "Cellar" / "python" / "3.15"
+    shim_dir.mkdir(parents=True)
+    (tool / "bin").mkdir(parents=True)
+    (cellar / "bin").mkdir(parents=True)
+    (brew / "opt").mkdir()
+    (tool / "pyvenv.cfg").write_text("")
+    executable = tool / "bin" / "local-mcp"
+    executable.write_text("#!python\n")
+    executable.chmod(0o755)
+    (cellar / "bin" / "python3").write_text("")
+    (brew / "opt" / "python").symlink_to("../Cellar/python/3.15")
+    (tool / "bin" / "python").symlink_to(brew / "opt" / "python" / "bin" / "python3")
+    (shim_dir / "local-mcp").symlink_to(executable)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: home))
+    monkeypatch.setattr("aisan.session_mcp.host_platform", lambda: "darwin")
+    monkeypatch.setattr(
+        "aisan.seatbelt._active_system_subpaths",
+        lambda: (brew / "opt", brew / "Cellar"),
+    )
+    config = SessionMCP({}, ("local-mcp",), "json")
+
+    assert mcp_ro_binds(config, str(shim_dir)) == (shim_dir, tool)
+
+
 def test_a_bare_local_bin_script_is_refused_not_overmounted(tmp_path, monkeypatch):
     home = tmp_path / "home"
     shim_dir = home / ".local" / "bin"

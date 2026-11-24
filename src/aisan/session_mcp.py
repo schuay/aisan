@@ -34,6 +34,7 @@ from .opencode_config import _strip_jsonc
 from .opencode_config import config_file as _opencode_config_file
 from .opencode_config import read_config as _read_jsonc
 from .sandbox import DARWIN_DEFAULT_BINS, host_platform
+from .seatbelt import darwin_surface_covers
 from .statedir import write_sealed
 from .userbinds import WILDCARD
 
@@ -379,7 +380,14 @@ def _launcher_binds(command: str, search_path: str) -> list[Path]:
     binds = [root]
     python = root / "bin" / "python"
     if python.is_symlink():
-        binds.extend(path for path in interpreter_roots(python) if path not in binds)
+        # A Homebrew interpreter is already readable, and its prefix is a
+        # symlink that Seatbelt refuses as a destination.
+        darwin = host_platform() == "darwin"
+        binds.extend(
+            path
+            for path in interpreter_roots(python)
+            if path not in binds and not (darwin and darwin_surface_covers(path))
+        )
     return binds
 
 
