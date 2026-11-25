@@ -201,6 +201,7 @@ def test_the_shared_net_profile_mounts_the_credential_and_says_so(
 
     assert profile.backends == ()
     assert [(b.path, b.mode) for b in profile.binds] == [(store, RO)]
+    assert profile.env == (("SISO_CREDENTIAL_HELPER", "luci-auth"),)
     assert "luci credential" in profile.notice
 
 

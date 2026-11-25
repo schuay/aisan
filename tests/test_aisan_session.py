@@ -321,6 +321,7 @@ def test_the_shared_net_profile_is_the_one_that_survives_net(tmp_path, command):
 
     assert result.returncode == 0, result.stderr
     assert "chrome_infra" in result.stdout
+    assert "SISO_CREDENTIAL_HELPER=luci-auth" in result.stdout
     assert "luci credential" in result.stderr
 
 

@@ -426,7 +426,7 @@ class LauncherFlags:
                 spec = spec.with_egress(list(profile.backends))
             except ValueError as e:
                 raise LaunchRefused(f"--egress {name}: {e}") from e
-            spec = spec.with_binds(list(profile.binds))
+            spec = spec.with_binds(list(profile.binds)).with_env(profile.env)
         for grant in self.grants:
             spec = (
                 spec.with_binds(list(grant.binds))

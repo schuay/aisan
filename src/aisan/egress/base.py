@@ -221,12 +221,16 @@ class EgressProfile:
     """Describe the resources contributed by one named egress profile.
 
     Backends provide credential-aware host services. ``binds`` supports direct
-    routes that expose a credential mount instead. ``notice`` explains boundary
-    changes when the launcher applies the profile.
+    routes that expose a credential mount instead. ``env`` carries what such a
+    direct route needs in order to be used: a mounted credential store does
+    nothing until the client is told to read it, and the box starts from a
+    cleared environment. ``notice`` explains boundary changes when the launcher
+    applies the profile.
     """
 
     backends: tuple[Backend, ...] = ()
     binds: tuple[BindSpec, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
     notice: str = ""
 
     def __bool__(self) -> bool:

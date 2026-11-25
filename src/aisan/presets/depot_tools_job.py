@@ -177,6 +177,10 @@ def v8_rbe_shared_net(_root: Path) -> EgressProfile:
     process. This profile instead mounts the LUCI credential store read-only and
     lets Siso authenticate directly. The resulting cloud token represents the
     user's full account, including chromium-review, for the session lifetime.
+
+    Siso does not read the LUCI store unless told to, and the box's cleared
+    environment drops the operator's own setting, so the profile names the
+    helper that reads the mounted store.
     """
     from ..egress.reapi import LUCI_STORE
 
@@ -184,6 +188,7 @@ def v8_rbe_shared_net(_root: Path) -> EgressProfile:
         return EgressProfile()
     return EgressProfile(
         binds=(Bind(LUCI_STORE, RO),),
+        env=(("SISO_CREDENTIAL_HELPER", "luci-auth"),),
         notice=(
             f"WARNING: {LUCI_STORE} is mounted in the box: the session holds a"
             " luci credential that resolves to your full account, chromium-review"

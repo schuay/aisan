@@ -268,7 +268,8 @@ class BoxSpec:
         """Return this spec with `extra` environment pairs appended.
 
         Arbitrary values cannot be checked against the mount policy as PATH
-        entries can. This method therefore serves aisan's reviewed, named grants;
+        entries can. This method therefore serves aisan's reviewed, named grants
+        and egress profiles;
         user bind files cannot add environment variables that may contain
         secrets.
 
