@@ -154,7 +154,10 @@ def test_the_reader_passes_the_attributes_and_returns_the_secret(tmp_path):
         "compile(sys.argv[3], 'reader', 'exec')\n"
         "sys.stdout.write('|'.join(sys.argv[4:]))",
     )
-    assert read_keyring(python=python) == "service=gemini|username=antigravity"
+    assert (
+        read_keyring(python=python, fallback_file=tmp_path / "no-token")
+        == "service=gemini|username=antigravity"
+    )
     assert KEYRING_ATTRIBUTES == (("service", "gemini"), ("username", "antigravity"))
 
 
@@ -169,14 +172,48 @@ def test_the_reader_passes_the_attributes_and_returns_the_secret(tmp_path):
 )
 def test_a_failed_keyring_read_says_what_to_fix(tmp_path, body, reason, fix):
     with pytest.raises(KeyringError, match=reason) as error:
-        read_keyring(python=_fake_python(tmp_path, body))
+        read_keyring(
+            python=_fake_python(tmp_path, body), fallback_file=tmp_path / "no-token"
+        )
     assert fix in error.value.fix
 
 
 def test_a_missing_system_interpreter_is_reported(tmp_path):
     with pytest.raises(KeyringError, match="cannot run") as error:
-        read_keyring(python=str(tmp_path / "absent"))
+        read_keyring(
+            python=str(tmp_path / "absent"), fallback_file=tmp_path / "no-token"
+        )
     assert "python-gobject" in error.value.fix
+
+
+_NO_SERVICE = (
+    "sys.stderr.write('GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown:"
+    " The name is not activatable'); sys.exit(1)"
+)
+
+
+def test_without_a_secret_service_the_fallback_token_file_is_read(tmp_path):
+    # Headless host: no keyring daemon on the bus, agy wrote its file instead.
+    item = _item()
+    token = tmp_path / "antigravity-oauth-token"
+    token.write_text(item)
+    python = _fake_python(tmp_path, _NO_SERVICE)
+    assert read_keyring(python=python, fallback_file=token) == item
+
+
+def test_the_keyring_error_stands_when_no_fallback_file_exists(tmp_path):
+    python = _fake_python(tmp_path, _NO_SERVICE)
+    with pytest.raises(KeyringError, match="ServiceUnknown"):
+        read_keyring(python=python, fallback_file=tmp_path / "no-token")
+
+
+def test_the_later_expiring_of_keyring_and_file_logins_is_used(tmp_path):
+    stale, fresh = _item("stale", lifetime=60.0), _item("fresh", lifetime=3600.0)
+    token = tmp_path / "antigravity-oauth-token"
+    for kc_item, file_item in ((stale, fresh), (fresh, stale)):
+        token.write_text(file_item)
+        python = _fake_python(tmp_path, f"sys.stdout.write({kc_item!r})")
+        assert read_keyring(python=python, fallback_file=token) == fresh
 
 
 async def test_a_fresh_token_is_used_without_running_agy_or_rereading(tmp_path):

@@ -3,8 +3,9 @@
 
 """The Antigravity CLI consumer login as a proxy credential.
 
-Host agy keeps its Google login in the Secret Service keyring and is the only
-writer of that item; this module reads it. agy 1.5.11 refreshes the access
+Host agy keeps its Google login in the Secret Service keyring, or in its
+fallback token file when no keyring answers, and is the only writer of
+either; this module reads them. agy 1.5.11 refreshes the access
 token only when it runs within about a minute of the expiry or after it, so
 aisan cannot refresh early. Once a token enters that window, aisan runs
 host agy against a loopback sink in place of Cloud Code and reads the item
@@ -136,6 +137,50 @@ def read_keyring(
     attributes: tuple[tuple[str, str], ...] = KEYRING_ATTRIBUTES,
     *,
     python: str = _SYSTEM_PYTHON,
+    fallback_file: Path | None = None,
+) -> str:
+    """Read the Antigravity login from the Secret Service or its fallback file.
+
+    Without a Secret Service on the session bus (a headless host with no
+    keyring daemon), host agy writes its ``0600`` fallback file instead. When
+    both sources answer, pick the valid consumer login with the later expiry.
+    """
+    token_path = fallback_file if fallback_file is not None else default_credentials()
+    file_text = _read_fallback(token_path)
+    try:
+        kc_text = _read_secret_service(attributes, python=python)
+    except KeyringError:
+        if file_text is None:
+            raise
+        return file_text
+    return _newer_login(kc_text, file_text)
+
+
+def _read_fallback(path: Path) -> str | None:
+    """Return agy's fallback token file, or None when it is absent or unreadable."""
+    try:
+        return path.read_text() if path.is_file() else None
+    except OSError:
+        return None
+
+
+def _newer_login(kc_text: str, file_text: str | None) -> str:
+    """Return whichever of the keyring and file logins expires later."""
+    if file_text is None:
+        return kc_text
+    valid: list[tuple[float, str]] = []
+    for candidate in (kc_text, file_text):
+        try:
+            valid.append((parse_login(candidate).expires_at, candidate))
+        except KeyringError:
+            continue
+    if valid:
+        return max(valid, key=lambda item: item[0])[1]
+    return kc_text
+
+
+def _read_secret_service(
+    attributes: tuple[tuple[str, str], ...], *, python: str
 ) -> str:
     """Return the secret of the keyring item with these attributes."""
     try:
@@ -214,18 +259,8 @@ def read_macos_keychain(
                     f"cannot read fallback token file {token_path}: {e}", _FIX_LOGIN
                 ) from e
 
-    if kc_text is not None and file_text is not None:
-        valid: list[tuple[float, str]] = []
-        for candidate in (kc_text, file_text):
-            try:
-                valid.append((parse_login(candidate).expires_at, candidate))
-            except KeyringError:
-                continue
-        if valid:
-            return max(valid, key=lambda item: item[0])[1]
-        return kc_text
     if kc_text is not None:
-        return kc_text
+        return _newer_login(kc_text, file_text)
     if file_text is not None:
         return file_text
 
