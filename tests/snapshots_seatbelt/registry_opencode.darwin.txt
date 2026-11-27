@@ -64,6 +64,7 @@
   PAGER=cat
   PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
   TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+  TMPPREFIX=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/zsh
   XDG_CACHE_HOME=<ROOT>/.aisan-opencode-state/xdg-cache
   XDG_CONFIG_HOME=<ROOT>/.aisan-opencode-state/xdg-config
   XDG_DATA_HOME=<ROOT>/.aisan-opencode-state
@@ -157,6 +158,7 @@
   OPENCODE_DISABLE_LSP_DOWNLOAD=1
   TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
   CLAUDE_CODE_TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+  TMPPREFIX=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/zsh
   NPM_CONFIG_CACHE=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/npm-cache
   GIT_CONFIG_GLOBAL=/dev/null
   /usr/bin/sandbox-exec

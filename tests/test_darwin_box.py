@@ -649,6 +649,31 @@ async def test_concurrent_sessions_share_a_state_dir(tmp_path):
         await runner.cleanup()
 
 
+@needs_seatbelt
+async def test_zsh_here_documents_work_in_a_darwin_box(tmp_path):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    spec = BoxSpec(
+        root=wt,
+        binds=(),
+        tmpfs=(),
+        env=(("HOME", str(Path.home())),),
+        egress=(),
+        unshare_net=True,
+    )
+    async with Box(spec, box_id="darwin-zsh-heredoc") as box:
+        res = subprocess.run(
+            box.command(["/bin/zsh", "-fc", "cat <<'EOF'\nheredoc-ok\nEOF"]),
+            env={**os.environ, **box.env},
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout == "heredoc-ok\n"
+
+
 # --- Live Darwin `Box` + authenticated host-loopback proxy round-trip ---
 
 

@@ -66,6 +66,7 @@
   PAGER=cat
   PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
   TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+  TMPPREFIX=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/zsh
   XDG_CACHE_HOME=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/xdg-cache
 
 == seatbelt profile (SBPL) ==
@@ -153,6 +154,7 @@
   CODEX_HOME=<STATE>
   TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
   CLAUDE_CODE_TMPDIR=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92
+  TMPPREFIX=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/zsh
   XDG_CACHE_HOME=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/xdg-cache
   NPM_CONFIG_CACHE=<AISAN PRIVATE>/tmp-16a0eeb0791b6c92/npm-cache
   GIT_CONFIG_GLOBAL=/dev/null

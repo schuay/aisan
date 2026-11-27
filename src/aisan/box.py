@@ -493,6 +493,9 @@ class Box:
             if "TMPDIR" not in env:
                 env["TMPDIR"] = seatbelt_path(self.scratch_dir)
             env.setdefault("CLAUDE_CODE_TMPDIR", env["TMPDIR"])
+            # zsh creates here-document files under TMPPREFIX (default
+            # /tmp/zsh), not TMPDIR, and the box can't write /tmp.
+            env.setdefault("TMPPREFIX", f"{env['TMPDIR']}/zsh")
             env.setdefault("XDG_CACHE_HOME", f"{env['TMPDIR']}/xdg-cache")
             env.setdefault("NPM_CONFIG_CACHE", f"{env['TMPDIR']}/npm-cache")
             env.setdefault("GIT_CONFIG_GLOBAL", "/dev/null")
